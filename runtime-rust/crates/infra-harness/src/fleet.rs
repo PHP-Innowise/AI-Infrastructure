@@ -143,6 +143,44 @@ fn round_usd_metric(value: f64) -> f64 {
     ((value * 1_000_000_000.0).round()) / 1_000_000_000.0
 }
 
+fn resolve_fleet_project_identity(
+    store: &SessionStore,
+    root_canon: &Path,
+    thread: Option<&str>,
+    state: &Value,
+) -> (String, String) {
+    let project_path = root_canon.to_string_lossy().into_owned();
+    let mut project_id = state["project_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    if project_id.is_empty()
+        && let Some(tid) = thread.map(str::trim).filter(|s| !s.is_empty())
+        && let Ok(session) = store.get(tid)
+        && let Some(pid) = session["project_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        project_id = pid.to_owned();
+    }
+    if project_id.is_empty()
+        && let Ok(db) = store.connection()
+        && let Ok(Some(pid)) = db
+            .query_row(
+                "SELECT id FROM registered_projects WHERE path = ?1 LIMIT 1",
+                [project_path.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+    {
+        project_id = pid;
+    }
+    (project_id, project_path)
+}
+
 fn collect_fleet_lens_roi(
     store: &SessionStore,
     current_thread: Option<&str>,
@@ -153,13 +191,19 @@ fn collect_fleet_lens_roi(
     for lens in &c.lenses {
         per_lens.entry(lens.clone()).or_default();
     }
+    let root_canon = infra_core::fs::canonicalize(&c.project).unwrap_or_else(|_| c.project.clone());
+    let (proj_id, proj_path) =
+        resolve_fleet_project_identity(store, &root_canon, current_thread, state);
     let current_thread = current_thread.unwrap_or("");
     let mut current_counted = false;
     if let Ok(db) = store.connection()
         && let Ok(mut stmt) = db.prepare(
-            "SELECT t.thread_id, t.lens, t.status, t.output, r.state
+            "SELECT t.thread_id, t.lens, t.status, t.output, r.state,
+                    COALESCE(r.project_id, ''), COALESCE(r.project_path, ''),
+                    COALESCE(s.project_id, ''), COALESCE(s.project_path, '')
              FROM native_fleet_tasks t
              JOIN native_fleet_runs r ON r.thread_id = t.thread_id
+             LEFT JOIN sessions s ON s.id = t.thread_id
              ORDER BY r.rowid DESC, t.ordinal ASC
              LIMIT 500",
         )
@@ -170,12 +214,48 @@ fn collect_fleet_lens_roi(
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })
     {
         for row in rows.flatten() {
-            let (row_thread, lens, status, output_raw, run_state_raw) = row;
-            if !current_thread.is_empty() && row_thread == current_thread {
+            let (
+                row_thread,
+                lens,
+                status,
+                output_raw,
+                run_state_raw,
+                r_pid,
+                r_ppath,
+                s_pid,
+                s_ppath,
+            ) = row;
+            let run_state = serde_json::from_str::<Value>(&run_state_raw).unwrap_or(Value::Null);
+            let row_pid = if !r_pid.is_empty() {
+                r_pid.as_str()
+            } else if !s_pid.is_empty() {
+                s_pid.as_str()
+            } else {
+                run_state["project_id"].as_str().unwrap_or("")
+            };
+            let row_ppath = if !r_ppath.is_empty() {
+                r_ppath.as_str()
+            } else if !s_ppath.is_empty() {
+                s_ppath.as_str()
+            } else {
+                run_state["project_path"].as_str().unwrap_or("")
+            };
+            let same_thread = !current_thread.is_empty() && row_thread == current_thread;
+            let same_project_id = !proj_id.is_empty() && !row_pid.is_empty() && row_pid == proj_id;
+            let same_project_path =
+                !proj_path.is_empty() && !row_ppath.is_empty() && row_ppath == proj_path;
+            if !(same_thread || same_project_id || same_project_path) {
+                continue;
+            }
+            if same_thread {
                 current_counted = true;
             }
             let entry = per_lens.entry(lens).or_default();
@@ -183,7 +263,6 @@ fn collect_fleet_lens_roi(
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .unwrap_or(Value::Null);
-            let run_state = serde_json::from_str::<Value>(&run_state_raw).unwrap_or(Value::Null);
             let approved = run_state["approved"] == true;
             let was_skipped = output_val
                 .get("skipped")
@@ -395,6 +474,7 @@ fn parse_frontmatter_watched_globs(path: &Path) -> Vec<String> {
 fn resolve_lens_watched_globs(
     store: &SessionStore,
     root: &Path,
+    project_id: Option<&str>,
     state: &Value,
     lenses: &[String],
 ) -> BTreeMap<String, Vec<String>> {
@@ -470,7 +550,9 @@ fn resolve_lens_watched_globs(
             }
         }
     }
-    if let Ok(db) = store.connection() {
+    if let Some(pid) = project_id.map(str::trim).filter(|s| !s.is_empty())
+        && let Ok(db) = store.connection()
+    {
         for lens in lenses {
             if map.get(lens).is_some_and(|s| !s.is_empty()) {
                 continue;
@@ -478,9 +560,11 @@ fn resolve_lens_watched_globs(
             if let Ok(Some(raw_manifest)) = db
                 .query_row(
                     "SELECT dependency_manifest FROM skillcache_capsules
-                     WHERE (mu_name = ?1 OR skill_name = ?1) AND status = 'active'
+                     WHERE (mu_name = ?1 OR skill_name = ?1)
+                       AND project_id = ?2
+                       AND status = 'active'
                      ORDER BY rowid DESC LIMIT 1",
-                    [lens],
+                    params![lens, pid],
                     |r| r.get::<_, String>(0),
                 )
                 .optional()
@@ -504,7 +588,57 @@ fn resolve_lens_watched_globs(
         .collect()
 }
 
-fn collect_git_diff_files(root: &Path) -> std::result::Result<Vec<String>, &'static str> {
+fn git_rev_oid(root: &Path, rev: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", rev])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!oid.is_empty()).then_some(oid)
+}
+
+fn resolve_committed_diff_base(root: &Path, base_hint: Option<&str>) -> Option<String> {
+    let head = git_rev_oid(root, "HEAD")?;
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(hint) = base_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        candidates.push(hint);
+    }
+    candidates.extend([
+        "@{upstream}",
+        "origin/main",
+        "origin/master",
+        "main",
+        "master",
+    ]);
+    for cand in candidates {
+        if git_rev_oid(root, cand).is_none() {
+            continue;
+        }
+        let Ok(out) = std::process::Command::new("git")
+            .args(["merge-base", "HEAD", cand])
+            .current_dir(root)
+            .output()
+        else {
+            continue;
+        };
+        if out.status.success() {
+            let mb = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !mb.is_empty() && mb != head {
+                return Some(mb);
+            }
+        }
+    }
+    git_rev_oid(root, "HEAD~1")
+}
+
+fn collect_git_diff_files(
+    root: &Path,
+    base_hint: Option<&str>,
+) -> std::result::Result<Vec<String>, &'static str> {
     if !root.join(".git").exists() {
         return Err("no_git_repository");
     }
@@ -538,17 +672,10 @@ fn collect_git_diff_files(root: &Path) -> std::result::Result<Vec<String>, &'sta
             }
         }
     }
-    if files.is_empty() {
-        let has_prev = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD~1"])
-            .current_dir(root)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if !has_prev {
-            return Err("empty_git_diff");
-        }
+    if let Some(diff_base) = resolve_committed_diff_base(root, base_hint) {
+        let range = format!("{diff_base}..HEAD");
         let diff_out = std::process::Command::new("git")
-            .args(["diff", "--name-only", "-z", "HEAD~1..HEAD"])
+            .args(["diff", "--name-only", "-z", &range])
             .current_dir(root)
             .output()
             .map_err(|_| "git_diff_failed")?;
@@ -590,10 +717,92 @@ fn is_global_manifest_change(rel: &str) -> bool {
         || rel.starts_with(".agents/")
 }
 
-fn evaluate_fleet_lens_scope(store: &SessionStore, state: &Value, c: &Config) -> FleetScopePlan {
+fn meta_mtime_ns(meta: &std::fs::Metadata) -> i64 {
+    let nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0u128, |d| d.as_nanos());
+    i64::try_from(nanos).unwrap_or(i64::MAX)
+}
+
+fn verify_graph_ir_fresh_for_scope(
+    root: &Path,
+    ir: &crate::graph_ir::GraphIrStore,
+    diff_files: &[String],
+) -> Option<&'static str> {
+    let Ok((stamps, manifest_stamp, ir_git_head)) = ir.file_stamps_and_meta() else {
+        return Some("graph_ir_meta_unreadable");
+    };
+    let current_manifest = crate::graph_ir::compute_root_manifest_stamp(root);
+    if manifest_stamp.as_deref() != Some(current_manifest.as_str()) {
+        return Some("graph_ir_manifest_stale");
+    }
+    if let Some(current_head) = crate::graph_ir::current_git_head(root)
+        && ir_git_head.as_deref() != Some(current_head.as_str())
+    {
+        return Some("graph_ir_head_stale");
+    }
+    let mut checked = BTreeSet::new();
+    for rel in diff_files {
+        checked.insert(rel.as_str());
+        let disk_meta = std::fs::symlink_metadata(root.join(rel)).ok();
+        if let Some(&(ir_size, ir_mtime_ns)) = stamps.get(rel) {
+            let Some(meta) = disk_meta else {
+                return Some("graph_ir_stale_for_diff");
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Some("graph_ir_stale_for_diff");
+            }
+            let disk_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+            if (disk_size, meta_mtime_ns(&meta)) != (ir_size, ir_mtime_ns) {
+                return Some("graph_ir_stale_for_diff");
+            }
+        } else if crate::graph_ast::AstGrammar::from_rel_path(rel).is_some()
+            && disk_meta.is_some_and(|m| !m.file_type().is_symlink() && m.is_file())
+        {
+            return Some("graph_ir_unindexed_diff_file");
+        }
+    }
+    for (path, &(ir_size, ir_mtime_ns)) in &stamps {
+        if checked.contains(path.as_str()) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(root.join(path)) else {
+            return Some("graph_ir_stale_on_disk");
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Some("graph_ir_stale_on_disk");
+        }
+        let disk_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+        if (disk_size, meta_mtime_ns(&meta)) != (ir_size, ir_mtime_ns) {
+            return Some("graph_ir_stale_on_disk");
+        }
+    }
+    None
+}
+
+fn evaluate_fleet_lens_scope(
+    store: &SessionStore,
+    thread: &str,
+    state: &Value,
+    c: &Config,
+) -> FleetScopePlan {
     let root_canon = infra_core::fs::canonicalize(&c.project).unwrap_or_else(|_| c.project.clone());
-    let lens_globs = resolve_lens_watched_globs(store, &root_canon, state, &c.lenses);
-    let diff_files = match collect_git_diff_files(&root_canon) {
+    let (project_id, _) = resolve_fleet_project_identity(store, &root_canon, Some(thread), state);
+    let pid_opt = (!project_id.is_empty()).then_some(project_id.as_str());
+    let lens_globs = resolve_lens_watched_globs(store, &root_canon, pid_opt, state, &c.lenses);
+    let session_base_head = store
+        .get(thread)
+        .ok()
+        .and_then(|s| s["result_base"]["head"].as_str().map(str::to_owned))
+        .filter(|s| !s.is_empty());
+    let base_hint = state["base_head"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(session_base_head.as_deref());
+    let diff_files = match collect_git_diff_files(&root_canon, base_hint) {
         Ok(files) => files,
         Err(reason) => {
             return FleetScopePlan {
@@ -645,6 +854,17 @@ fn evaluate_fleet_lens_scope(store: &SessionStore, state: &Value, c: &Config) ->
             caller_files: Vec::new(),
             fallback: true,
             fallback_reason: Some("graph_ir_empty".into()),
+            lens_globs,
+        };
+    }
+    if let Some(stale_reason) = verify_graph_ir_fresh_for_scope(&root_canon, &ir, &diff_files) {
+        return FleetScopePlan {
+            evaluated: true,
+            ir_revision,
+            diff_files,
+            caller_files: Vec::new(),
+            fallback: true,
+            fallback_reason: Some(stale_reason.to_owned()),
             lens_globs,
         };
     }
@@ -922,13 +1142,30 @@ impl Fleet {
                 }
             }
         };
-        let mut state = json!({"scope":scope,"task_id":task,"thread_id":thread,"lenses":c.lenses,"findings":[],"cost_usd":0.0,"usage_components":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_write_5m_input_tokens":0,"cache_write_1h_input_tokens":0,"model_calls":0},"skipped":[]});
+        let root_canon =
+            infra_core::fs::canonicalize(&c.project).unwrap_or_else(|_| c.project.clone());
+        let (project_id, project_path) =
+            resolve_fleet_project_identity(&self.store, &root_canon, Some(thread), &Value::Null);
+        let mut state = json!({
+            "scope": scope,
+            "task_id": task,
+            "thread_id": thread,
+            "project_path": project_path,
+            "lenses": c.lenses,
+            "findings": [],
+            "cost_usd": 0.0,
+            "usage_components": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_write_5m_input_tokens": 0, "cache_write_1h_input_tokens": 0, "model_calls": 0},
+            "skipped": [],
+        });
+        if !project_id.is_empty() {
+            state["project_id"] = json!(project_id);
+        }
         if !precheck_val.is_null() {
             state["precheck"] = precheck_val;
         }
         self.store.connection()?.execute(
-            "INSERT INTO native_fleet_runs(thread_id,state,stage)VALUES(?1,?2,'scope')",
-            params![thread, state.to_string()],
+            "INSERT INTO native_fleet_runs(thread_id,state,stage,project_id,project_path)VALUES(?1,?2,'scope',?3,?4)",
+            params![thread, state.to_string(), project_id, project_path],
         )?;
         Ok(())
     }
@@ -1098,7 +1335,7 @@ impl Fleet {
                             ),
                         )?;
                     }
-                    let scope_plan = evaluate_fleet_lens_scope(&self.store, &state, c);
+                    let scope_plan = evaluate_fleet_lens_scope(&self.store, thread, &state, c);
                     state["scope_filter"] = json!({
                         "evaluated": scope_plan.evaluated,
                         "ir_revision": scope_plan.ir_revision,
@@ -1950,9 +2187,8 @@ mod tests {
         assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
 
         // Edit ONLY src/auth/token.rs:
-        // - `api-reviewer` watches `src/api/**`, which overlaps via Graph-IR 1-hop caller `src/api/handler.rs`!
-        // - `billing-reviewer` & `billing-agent` watch `src/billing/**`, strictly disjoint -> skipped with ir_revision receipt!
-        // - `general-reviewer` has no watched_globs -> conservative fallback, still runs!
+        // - Before Graph-IR refreshes for dirty `src/auth/token.rs`, `evaluate_fleet_lens_scope`
+        //   must refuse to trust stale IR callers and fall back conservatively.
         std::fs::write(
             ws.join("src/auth/token.rs"),
             "pub fn verify() -> bool { false }\n",
@@ -1983,6 +2219,21 @@ mod tests {
             adapter: None,
             runner_lock: None,
         };
+        let stale_plan = evaluate_fleet_lens_scope(&store, "fleet-stale", &json!({}), &cfg);
+        assert!(stale_plan.fallback);
+        assert_eq!(
+            stale_plan.fallback_reason.as_deref(),
+            Some("graph_ir_stale_for_diff")
+        );
+
+        // Once Graph-IR indexes the dirty change cleanly:
+        // - `api-reviewer` watches `src/api/**`, which overlaps via Graph-IR 1-hop caller `src/api/handler.rs`!
+        // - `billing-reviewer` & `billing-agent` watch `src/billing/**`, strictly disjoint -> skipped with ir_revision receipt!
+        // - `general-reviewer` has no watched_globs -> conservative fallback, still runs!
+        let ir = crate::graph_ir::GraphIrStore::open(&store.state, &pid).unwrap();
+        ir.update_paths_with_delta(&ws, &["src/auth/token.rs".to_owned()])
+            .unwrap();
+
         let thread = "fleet-scope-1";
         fleet
             .initialize(thread, "task-scope-1", "Scoped review", &cfg, None, None)
@@ -2163,6 +2414,133 @@ mod tests {
                 .any(|w| w.contains("Low ROI warning") && w.contains("noisy")),
             "{:?}",
             report.warnings
+        );
+    }
+
+    #[test]
+    fn fleet_scope_unions_branch_and_dirty_diffs_and_isolates_project_globs_and_roi() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let ws_a = dir.path().join("proj-a");
+        let ws_b = dir.path().join("proj-b");
+        std::fs::create_dir_all(ws_a.join("src")).unwrap();
+        std::fs::create_dir_all(&ws_b).unwrap();
+        let git_a = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&ws_a)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::write(ws_a.join("src/base.rs"), "pub fn b() {}\n").unwrap();
+        git_a(&["init", "-b", "main"]);
+        git_a(&["add", "."]);
+        git_a(&["commit", "-m", "main base"]);
+        git_a(&["checkout", "-b", "feature/two-commits"]);
+        std::fs::write(ws_a.join("src/commit1.rs"), "pub fn c1() {}\n").unwrap();
+        git_a(&["add", "."]);
+        git_a(&["commit", "-m", "commit 1"]);
+        std::fs::write(ws_a.join("src/commit2.rs"), "pub fn c2() {}\n").unwrap();
+        git_a(&["add", "."]);
+        git_a(&["commit", "-m", "commit 2"]);
+        // Dirty working tree file must NOT hide commit1.rs or commit2.rs on feature branch.
+        std::fs::write(ws_a.join("src/dirty.rs"), "pub fn d() {}\n").unwrap();
+        let diff_files = collect_git_diff_files(&ws_a, None).unwrap();
+        for expected in ["src/commit1.rs", "src/commit2.rs", "src/dirty.rs"] {
+            assert!(
+                diff_files.iter().any(|p| p == expected),
+                "missing {expected} from {diff_files:?}"
+            );
+        }
+
+        // Capsule dependency_manifest globs and ROI telemetry must stay strictly scoped by project.
+        let reg_a = store.register(&ws_a).unwrap();
+        let reg_b = store.register(&ws_b).unwrap();
+        let pid_a = reg_a["id"].as_str().unwrap().to_owned();
+        let pid_b = reg_b["id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "INSERT INTO skillcache_capsules(capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,dependency_manifest) VALUES('cap-b',?1,'shared-lens','.claude/skills/shared-lens/SKILL.md','shared-lens','desc','hybrid','active',1,'s','t','[]','e',1,'r','sess-b','gen-1','comp-b','dir','2026-01-01','2026-01-01',?2)",
+                params![
+                    pid_b,
+                    json!({"watched_globs": ["src/only-b/**"]}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        let globs_a = resolve_lens_watched_globs(
+            &store,
+            &ws_a,
+            Some(&pid_a),
+            &json!({}),
+            &["shared-lens".into()],
+        );
+        assert!(
+            globs_a.get("shared-lens").is_none_or(|v| v.is_empty()),
+            "foreign project capsule globs must not leak: {globs_a:?}"
+        );
+
+        let fleet = Fleet {
+            store: store.clone(),
+            blackboard: Arc::new(NoopBlackboard),
+        };
+        let cfg_b = Config {
+            project: ws_b.clone(),
+            provider: "claude".into(),
+            executable: PathBuf::from("claude"),
+            lenses: vec!["shared-lens".into()],
+            model: None,
+            effort: None,
+            budget: None,
+            seconds: 60,
+            concurrency: 1,
+            dry_run: true,
+            reports: dir.path().join("reports-b"),
+            adapter: None,
+            runner_lock: None,
+        };
+        let cfg_a = Config {
+            project: ws_a.clone(),
+            reports: dir.path().join("reports-a"),
+            ..cfg_b.clone()
+        };
+        for i in 0..4 {
+            let tid = format!("b-noisy-{i}");
+            fleet
+                .initialize(&tid, "task-b", "Noisy B", &cfg_b, None, None)
+                .unwrap();
+            let db = store.connection().unwrap();
+            db.execute(
+                "INSERT INTO native_fleet_tasks(thread_id,task_id,lens,ordinal,status,input,output) VALUES(?1,'t','shared-lens',0,'completed','{}',?2)",
+                params![tid, json!({"findings": [], "cost_usd": 0.5}).to_string()],
+            )
+            .unwrap();
+        }
+        let health_a = collect_fleet_health(&store, None, &json!({}), &cfg_a);
+        let shared_a = health_a
+            .lens_roi
+            .iter()
+            .find(|v| v["lens"] == "shared-lens")
+            .unwrap();
+        assert_eq!(shared_a["runs"], 0);
+        assert_eq!(shared_a["total_cost_usd"], 0.0);
+        assert!(
+            !health_a
+                .warnings
+                .iter()
+                .any(|w| w.contains("Low ROI warning")),
+            "foreign project ROI must not warn in project A: {:?}",
+            health_a.warnings
         );
     }
 }

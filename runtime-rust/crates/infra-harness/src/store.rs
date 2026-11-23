@@ -283,7 +283,7 @@ impl SessionStore {
    CREATE TABLE IF NOT EXISTS memory_result_attempts(session_id TEXT NOT NULL,generation TEXT NOT NULL,binding TEXT NOT NULL,PRIMARY KEY(session_id,generation));
    CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,digest TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS harness_settings(name TEXT PRIMARY KEY,value TEXT NOT NULL);
-   CREATE TABLE IF NOT EXISTS native_fleet_runs(thread_id TEXT PRIMARY KEY,state TEXT NOT NULL,stage TEXT NOT NULL,decision INTEGER,import_id TEXT,revision INTEGER NOT NULL DEFAULT 1);
+   CREATE TABLE IF NOT EXISTS native_fleet_runs(thread_id TEXT PRIMARY KEY,state TEXT NOT NULL,stage TEXT NOT NULL,decision INTEGER,import_id TEXT,revision INTEGER NOT NULL DEFAULT 1,project_id TEXT NOT NULL DEFAULT '',project_path TEXT NOT NULL DEFAULT '');
    CREATE TABLE IF NOT EXISTS native_fleet_tasks(thread_id TEXT NOT NULL,task_id TEXT NOT NULL,lens TEXT NOT NULL,ordinal INTEGER NOT NULL,status TEXT NOT NULL,input TEXT NOT NULL,output TEXT,error TEXT,PRIMARY KEY(thread_id,task_id));
    CREATE TABLE IF NOT EXISTS native_checkpoint_imports(import_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,checkpoint_id TEXT NOT NULL,source_digest TEXT NOT NULL,created_at TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS harness_generations(session_id TEXT PRIMARY KEY,generation TEXT NOT NULL);")?;
@@ -324,6 +324,21 @@ impl SessionStore {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
                     "ALTER TABLE sessions ADD COLUMN {name} {definition}"
+                ))?;
+            }
+        }
+        let fleet_columns = {
+            let mut q = db.prepare("PRAGMA table_info(native_fleet_runs)")?;
+            q.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<BTreeSet<_>, _>>()?
+        };
+        for (name, definition) in [
+            ("project_id", "TEXT NOT NULL DEFAULT ''"),
+            ("project_path", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !fleet_columns.contains(name) {
+                db.execute_batch(&format!(
+                    "ALTER TABLE native_fleet_runs ADD COLUMN {name} {definition}"
                 ))?;
             }
         }

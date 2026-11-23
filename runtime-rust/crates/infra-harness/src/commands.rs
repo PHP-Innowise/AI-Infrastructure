@@ -378,66 +378,69 @@ impl CommandCatalog {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<V>>>,
     {
-        let current_stamp = || {
-            let now_ns = cmd_time_ns(SystemTime::now()).unwrap_or(0);
-            stamp_probe_paths(executable, &probe_dirs, now_ns, true)
-        };
-        let usable = |e: &Entry, stamp: &Option<String>| {
-            if !newer.map(|age| e.loaded.elapsed() < age).unwrap_or(true) {
-                return false;
+        Box::pin(async move {
+            let current_stamp = || {
+                let now_ns = cmd_time_ns(SystemTime::now()).unwrap_or(0);
+                stamp_probe_paths(executable, &probe_dirs, now_ns, true)
+            };
+            let usable = |e: &Entry, stamp: &Option<String>| {
+                if !newer.map(|age| e.loaded.elapsed() < age).unwrap_or(true) {
+                    return false;
+                }
+                if e.error.is_some() {
+                    return e.loaded.elapsed() < Duration::from_secs(10)
+                        && (stamp.is_none() || &e.stamp == stamp);
+                }
+                stamp.is_some() && &e.stamp == stamp
+            };
+            let gate = {
+                let stamp = current_stamp();
+                let mut c = cache()
+                    .lock()
+                    .map_err(|_| HarnessError::unavailable("Command cache unavailable."))?;
+                if let Some(entry) = c.entries.get(&key).filter(|e| usable(e, &stamp)) {
+                    return Ok((entry.value.clone(), entry.error.clone()));
+                }
+                c.locks
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            };
+            let _guard = gate.lock().await;
+            {
+                let stamp = current_stamp();
+                let c = cache()
+                    .lock()
+                    .map_err(|_| HarnessError::unavailable("Command cache unavailable."))?;
+                if let Some(entry) = c.entries.get(&key).filter(|e| usable(e, &stamp)) {
+                    return Ok((entry.value.clone(), entry.error.clone()));
+                }
             }
-            if e.error.is_some() {
-                return e.loaded.elapsed() < Duration::from_secs(10)
-                    && (stamp.is_none() || &e.stamp == stamp);
-            }
-            stamp.is_some() && &e.stamp == stamp
-        };
-        let gate = {
-            let stamp = current_stamp();
+            let result = Box::pin(load()).await;
+            let stored_stamp = current_stamp();
+            let (value, error) = match result {
+                Ok(v) => (v, None),
+                Err(e) => (vec![], Some(e.message)),
+            };
             let mut c = cache()
                 .lock()
                 .map_err(|_| HarnessError::unavailable("Command cache unavailable."))?;
-            if let Some(entry) = c.entries.get(&key).filter(|e| usable(e, &stamp)) {
-                return Ok((entry.value.clone(), entry.error.clone()));
+            if c.entries.len() > 64 {
+                c.entries.clear();
+                c.locks.retain(|k, _| k == &key);
             }
-            c.locks
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _guard = gate.lock().await;
-        {
-            let stamp = current_stamp();
-            let c = cache()
-                .lock()
-                .map_err(|_| HarnessError::unavailable("Command cache unavailable."))?;
-            if let Some(entry) = c.entries.get(&key).filter(|e| usable(e, &stamp)) {
-                return Ok((entry.value.clone(), entry.error.clone()));
-            }
-        }
-        let result = load().await;
-        let stored_stamp = current_stamp();
-        let (value, error) = match result {
-            Ok(v) => (v, None),
-            Err(e) => (vec![], Some(e.message)),
-        };
-        let mut c = cache()
-            .lock()
-            .map_err(|_| HarnessError::unavailable("Command cache unavailable."))?;
-        if c.entries.len() > 64 {
-            c.entries.clear();
-            c.locks.retain(|k, _| k == &key);
-        }
-        c.entries.insert(
-            key,
-            Entry {
-                stamp: stored_stamp,
-                loaded: Instant::now(),
-                value: value.clone(),
-                error: error.clone(),
-            },
-        );
-        Ok((value, error))
+            c.entries.insert(
+                key,
+                Entry {
+                    stamp: stored_stamp,
+                    loaded: Instant::now(),
+                    value: value.clone(),
+                    error: error.clone(),
+                },
+            );
+            Ok((value, error))
+        })
+        .await
     }
     async fn claude(
         &self,
@@ -446,26 +449,32 @@ impl CommandCatalog {
         extra: &[String],
         newer: Option<Duration>,
     ) -> Result<(Vec<V>, Option<String>)> {
-        let executable = match self.executable("claude") {
-            Ok(e) => e,
-            Err(e) => return Ok((vec![], Some(e.message))),
-        };
-        let key = json!(["claude", executable, cwd, settings, extra]).to_string();
-        let dirs = Self::claude_probe_dirs(cwd, extra);
-        self.cached(key, Some(&executable), dirs, newer, || {
-            claude_commands(&executable, cwd, settings, extra, self.store.runner_lock())
+        Box::pin(async move {
+            let executable = match self.executable("claude") {
+                Ok(e) => e,
+                Err(e) => return Ok((vec![], Some(e.message))),
+            };
+            let key = json!(["claude", executable, cwd, settings, extra]).to_string();
+            let dirs = Self::claude_probe_dirs(cwd, extra);
+            Box::pin(self.cached(key, Some(&executable), dirs, newer, || {
+                claude_commands(&executable, cwd, settings, extra, self.store.runner_lock())
+            }))
+            .await
         })
         .await
     }
     async fn codex(&self, cwd: &Path) -> Result<(Vec<V>, Option<String>)> {
-        let executable = match self.executable("codex") {
-            Ok(e) => e,
-            Err(e) => return Ok((vec![], Some(e.message))),
-        };
-        let key = json!(["codex", executable, cwd]).to_string();
-        let dirs = Self::codex_probe_dirs(cwd);
-        self.cached(key, Some(&executable), dirs, None, || {
-            codex_skills(&executable, cwd, self.store.runner_lock())
+        Box::pin(async move {
+            let executable = match self.executable("codex") {
+                Ok(e) => e,
+                Err(e) => return Ok((vec![], Some(e.message))),
+            };
+            let key = json!(["codex", executable, cwd]).to_string();
+            let dirs = Self::codex_probe_dirs(cwd);
+            Box::pin(self.cached(key, Some(&executable), dirs, None, || {
+                codex_skills(&executable, cwd, self.store.runner_lock())
+            }))
+            .await
         })
         .await
     }
@@ -477,41 +486,44 @@ impl CommandCatalog {
         project: Option<&str>,
         newer: Option<Duration>,
     ) -> Result<(Vec<V>, Option<String>)> {
-        let home = self.attached(project, cwd)?;
-        if provider == "claude" {
-            let settings = settings
-                .map(str::to_owned)
-                .unwrap_or(claude_settings(false, 3, None)?);
-            let extra = home
-                .as_ref()
-                .map(|h| vec!["--add-dir".into(), h.to_string_lossy().into_owned()])
-                .unwrap_or_default();
-            return self.claude(cwd, &settings, &extra, newer).await;
-        }
-        let (mut listed, error) = match provider {
-            "codex" => {
-                let (skills, error) = self.codex(cwd).await?;
-                (skills.into_iter().map(|v|json!({"name":v["name"],"description":v["description"],"path":v["path"]})).collect::<Vec<_>>(),error)
+        Box::pin(async move {
+            let home = self.attached(project, cwd)?;
+            if provider == "claude" {
+                let settings = settings
+                    .map(str::to_owned)
+                    .unwrap_or(claude_settings(false, 3, None)?);
+                let extra = home
+                    .as_ref()
+                    .map(|h| vec!["--add-dir".into(), h.to_string_lossy().into_owned()])
+                    .unwrap_or_default();
+                return Box::pin(self.claude(cwd, &settings, &extra, newer)).await;
             }
-            "cursor" => (user_skills(cwd, provider)?, None),
-            _ => return Err(HarnessError::invalid("Choose a provider.")),
-        };
-        if let Some(home) = home {
-            let (mut attached, _) = workspace_skills(&home, provider)?;
-            let names = listed
-                .iter()
-                .filter_map(|v| v["name"].as_str().map(str::to_owned))
-                .collect::<BTreeSet<_>>();
-            for mut skill in attached.drain(..) {
-                if let Some(path) = skill["path"].as_str() {
-                    skill["path"] = json!(home.join(path));
+            let (mut listed, error) = match provider {
+                "codex" => {
+                    let (skills, error) = Box::pin(self.codex(cwd)).await?;
+                    (skills.into_iter().map(|v|json!({"name":v["name"],"description":v["description"],"path":v["path"]})).collect::<Vec<_>>(),error)
                 }
-                if !names.contains(skill["name"].as_str().unwrap_or("")) {
-                    listed.push(skill);
+                "cursor" => (user_skills(cwd, provider)?, None),
+                _ => return Err(HarnessError::invalid("Choose a provider.")),
+            };
+            if let Some(home) = home {
+                let (mut attached, _) = workspace_skills(&home, provider)?;
+                let names = listed
+                    .iter()
+                    .filter_map(|v| v["name"].as_str().map(str::to_owned))
+                    .collect::<BTreeSet<_>>();
+                for mut skill in attached.drain(..) {
+                    if let Some(path) = skill["path"].as_str() {
+                        skill["path"] = json!(home.join(path));
+                    }
+                    if !names.contains(skill["name"].as_str().unwrap_or("")) {
+                        listed.push(skill);
+                    }
                 }
             }
-        }
-        Ok((listed, error))
+            Ok((listed, error))
+        })
+        .await
     }
     pub async fn listing(
         &self,
@@ -520,9 +532,8 @@ impl CommandCatalog {
         settings: Option<&str>,
         project: Option<&str>,
     ) -> Result<V> {
-        let (native, error) = self
-            .catalogue(provider, cwd, settings, project, None)
-            .await?;
+        let (native, error) =
+            Box::pin(self.catalogue(provider, cwd, settings, project, None)).await?;
         let(mut commands,skills)=match provider{
    "claude"=>(native.into_iter().map(|mut item|{let action=claude_page(item["name"].as_str().unwrap_or(""));item["kind"]=json!(if action.is_some(){"page"}else{"native"});item["action"]=action.map(|s|json!(s)).unwrap_or(V::Null);item}).collect::<Vec<_>>(),claude_skills(cwd)?),
    "codex"=>{let mut commands=vec![];for(name,description,hint,action)in [("new","Start a new session in this project","","new"),("model","Choose the model for the next turn","[model]","model"),("diff","Show this session's changes","","diff"),("status","Show this session's usage","","status"),("init","Create an AGENTS.md contributor guide for this repository","","")]{commands.push(json!({"name":name,"description":description,"hint":hint,"aliases":[],"kind":if action.is_empty(){"prompt"}else{"page"},"action":if action.is_empty(){V::Null}else{json!(action)}}));}for prompt in codex_prompts()?{commands.push(json!({"name":prompt["name"],"description":prompt["description"],"hint":prompt["hint"],"aliases":[],"kind":"prompt","action":null}));}(commands,native)},
@@ -578,169 +589,173 @@ impl CommandCatalog {
         Ok(())
     }
     pub async fn route(&self, session: &V, message: &str) -> Result<ResolvedCommand> {
-        let provider = session["provider"]
-            .as_str()
-            .ok_or_else(|| HarnessError::invalid("Missing session provider."))?;
-        let cwd = PathBuf::from(
-            session["project_path"]
+        Box::pin(async move {
+            let provider = session["provider"]
                 .as_str()
-                .ok_or_else(|| HarnessError::invalid("Missing session workspace."))?,
-        );
-        let project = session["project_id"].as_str();
-        let mut route = ResolvedCommand {
-            mode: "text".into(),
-            text: message.into(),
-            requests: vec![],
-            notice: None,
-        };
-        let lead = leading(message);
-        if provider == "claude" {
-            if let Some((name, _)) = lead {
-                let settings = claude_settings(
-                    session["agents_enabled"].as_bool().unwrap_or(false),
-                    session["agent_count"].as_u64().unwrap_or(3) as u32,
-                    session["thinking_effort"].as_str(),
-                )?;
-                let (mut commands, mut error) = self
-                    .catalogue(provider, &cwd, Some(&settings), project, None)
-                    .await?;
-                let mut aliases = aliases(&commands);
-                if !aliases.contains_key(name) && error.is_none() {
-                    let fresh = self
-                        .catalogue(
+                .ok_or_else(|| HarnessError::invalid("Missing session provider."))?;
+            let cwd = PathBuf::from(
+                session["project_path"]
+                    .as_str()
+                    .ok_or_else(|| HarnessError::invalid("Missing session workspace."))?,
+            );
+            let project = session["project_id"].as_str();
+            let mut route = ResolvedCommand {
+                mode: "text".into(),
+                text: message.into(),
+                requests: vec![],
+                notice: None,
+            };
+            let lead = leading(message);
+            if provider == "claude" {
+                if let Some((name, _)) = lead {
+                    let settings = claude_settings(
+                        session["agents_enabled"].as_bool().unwrap_or(false),
+                        session["agent_count"].as_u64().unwrap_or(3) as u32,
+                        session["thinking_effort"].as_str(),
+                    )?;
+                    let (mut commands, mut error) =
+                        Box::pin(self.catalogue(provider, &cwd, Some(&settings), project, None))
+                            .await?;
+                    let mut aliases = aliases(&commands);
+                    if !aliases.contains_key(name) && error.is_none() {
+                        let fresh = Box::pin(self.catalogue(
                             provider,
                             &cwd,
                             Some(&settings),
                             project,
                             Some(Duration::from_secs(5)),
-                        )
+                        ))
                         .await?;
-                    commands = fresh.0;
-                    error = fresh.1;
-                    aliases = self::aliases(&commands);
-                }
-                let page = aliases
-                    .iter()
-                    .filter_map(|(alias, target)| {
-                        Some((alias.clone(), claude_page(target)?.to_owned()))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                self.check(provider, message, Some(&page))?;
-                if let Some(name) = aliases.get(name) {
-                    route.mode = "native".into();
-                    route.notice = Some(format!(
-                        "Claude Code runs /{name} itself: the message went to it as typed, without Harness memory or instructions."
-                    ));
-                    if session["brain"].is_object() && session["brain"]["review"] != false {
-                        return Err(HarnessError::invalid(
-                            "This session reviews project memory before each run; a native Claude command goes to the CLI without it. Use automatic memory for native commands.",
-                        ));
+                        commands = fresh.0;
+                        error = fresh.1;
+                        aliases = self::aliases(&commands);
                     }
-                    return Ok(route);
-                }
-                route.notice = Some(if let Some(error) = error {
-                    format!(
-                        "Claude Code could not list its commands ({error}), so /{name} went as text."
-                    )
-                } else {
-                    format!("/{name} is not a Claude Code command here, so it went as text.")
-                });
-            }
-            // A `$skill` mention is routed only for a session that opted into
-            // SkillCache: an ordinary Claude session's message goes as typed
-            // and its prompt stays what it was.
-            let mentioned = if crate::skillcache::settings::mode(session) == "off" {
-                Vec::new()
-            } else {
-                mentions(message)
-            };
-            if !mentioned.is_empty() {
-                let skills = claude_skills(&cwd)?;
-                resolve_mentions(&mentioned, &skills, &mut route);
-                let names = route
-                    .requests
-                    .iter()
-                    .filter_map(|r| r["name"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if !names.is_empty() {
-                    route.notice = join_notice(
-                        route.notice,
-                        Some(format!("Claude skills requested: {names}.")),
-                    );
-                }
-            }
-        } else if provider == "codex" {
-            if let Some((name, args)) = lead {
-                if name.starts_with("prompts:") {
-                    self.check(provider, message, None)?;
-                    let prompt = codex_prompts()?
-                        .into_iter()
-                        .find(|v| v["name"] == name)
-                        .ok_or_else(|| HarnessError::missing("Custom prompt disappeared."))?;
-                    route.text = expand_prompt(name, prompt["body"].as_str().unwrap_or(""), args)?;
-                    route.notice = Some(format!(
-                        "Codex prompt /{name} expanded as the Codex app would."
-                    ));
-                } else if name == "init" {
-                    route.text = if args.is_empty() {
-                        INIT_PROMPT.into()
+                    let page = aliases
+                        .iter()
+                        .filter_map(|(alias, target)| {
+                            Some((alias.clone(), claude_page(target)?.to_owned()))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    self.check(provider, message, Some(&page))?;
+                    if let Some(name) = aliases.get(name) {
+                        route.mode = "native".into();
+                        route.notice = Some(format!(
+                            "Claude Code runs /{name} itself: the message went to it as typed, without Harness memory or instructions."
+                        ));
+                        if session["brain"].is_object() && session["brain"]["review"] != false {
+                            return Err(HarnessError::invalid(
+                                "This session reviews project memory before each run; a native Claude command goes to the CLI without it. Use automatic memory for native commands.",
+                            ));
+                        }
+                        return Ok(route);
+                    }
+                    route.notice = Some(if let Some(error) = error {
+                        format!(
+                            "Claude Code could not list its commands ({error}), so /{name} went as text."
+                        )
                     } else {
-                        format!("{INIT_PROMPT}\n\nAlso: {args}")
-                    };
-                    route.notice = Some("Sent Codex /init as its instruction.".into());
+                        format!("/{name} is not a Claude Code command here, so it went as text.")
+                    });
                 }
-            }
-            let mentioned = mentions(message);
-            if !mentioned.is_empty() {
-                let (skills, error) = self.catalogue(provider, &cwd, None, project, None).await?;
-                resolve_mentions(&mentioned, &skills, &mut route);
-                let names = route
-                    .requests
-                    .iter()
-                    .filter_map(|r| r["name"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let notice = if !names.is_empty() {
-                    Some(format!("Codex skills requested: {names}."))
+                // A `$skill` mention is routed only for a session that opted into
+                // SkillCache: an ordinary Claude session's message goes as typed
+                // and its prompt stays what it was.
+                let mentioned = if crate::skillcache::settings::mode(session) == "off" {
+                    Vec::new()
                 } else {
-                    error.map(|e| format!("Codex could not list its skills ({e})."))
+                    mentions(message)
                 };
-                route.notice = join_notice(route.notice, notice);
-            }
-        } else if provider == "cursor" {
-            let mentioned = if crate::skillcache::settings::mode(session) == "off" {
-                Vec::new()
-            } else {
-                mentions(message)
-            };
-            if lead.is_some() || !mentioned.is_empty() {
-                let (skills, _) = self.catalogue(provider, &cwd, None, project, None).await?;
-                if let Some((name, _)) = lead
-                    && let Some(skill) = skills.iter().find(|s| s["name"] == name)
-                {
-                    route.requests.push(skill.clone());
-                }
                 if !mentioned.is_empty() {
+                    let skills = claude_skills(&cwd)?;
                     resolve_mentions(&mentioned, &skills, &mut route);
+                    let names = route
+                        .requests
+                        .iter()
+                        .filter_map(|r| r["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !names.is_empty() {
+                        route.notice = join_notice(
+                            route.notice,
+                            Some(format!("Claude skills requested: {names}.")),
+                        );
+                    }
                 }
-                let names = route
-                    .requests
-                    .iter()
-                    .filter_map(|r| r["name"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if !names.is_empty() {
-                    route.notice = join_notice(
-                        route.notice,
-                        Some(format!("Cursor skills requested: {names}.")),
-                    );
+            } else if provider == "codex" {
+                if let Some((name, args)) = lead {
+                    if name.starts_with("prompts:") {
+                        self.check(provider, message, None)?;
+                        let prompt = codex_prompts()?
+                            .into_iter()
+                            .find(|v| v["name"] == name)
+                            .ok_or_else(|| HarnessError::missing("Custom prompt disappeared."))?;
+                        route.text = expand_prompt(name, prompt["body"].as_str().unwrap_or(""), args)?;
+                        route.notice = Some(format!(
+                            "Codex prompt /{name} expanded as the Codex app would."
+                        ));
+                    } else if name == "init" {
+                        route.text = if args.is_empty() {
+                            INIT_PROMPT.into()
+                        } else {
+                            format!("{INIT_PROMPT}\n\nAlso: {args}")
+                        };
+                        route.notice = Some("Sent Codex /init as its instruction.".into());
+                    }
                 }
+                let mentioned = mentions(message);
+                if !mentioned.is_empty() {
+                    let (skills, error) =
+                        Box::pin(self.catalogue(provider, &cwd, None, project, None)).await?;
+                    resolve_mentions(&mentioned, &skills, &mut route);
+                    let names = route
+                        .requests
+                        .iter()
+                        .filter_map(|r| r["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let notice = if !names.is_empty() {
+                        Some(format!("Codex skills requested: {names}."))
+                    } else {
+                        error.map(|e| format!("Codex could not list its skills ({e})."))
+                    };
+                    route.notice = join_notice(route.notice, notice);
+                }
+            } else if provider == "cursor" {
+                let mentioned = if crate::skillcache::settings::mode(session) == "off" {
+                    Vec::new()
+                } else {
+                    mentions(message)
+                };
+                if lead.is_some() || !mentioned.is_empty() {
+                    let (skills, _) =
+                        Box::pin(self.catalogue(provider, &cwd, None, project, None)).await?;
+                    if let Some((name, _)) = lead
+                        && let Some(skill) = skills.iter().find(|s| s["name"] == name)
+                    {
+                        route.requests.push(skill.clone());
+                    }
+                    if !mentioned.is_empty() {
+                        resolve_mentions(&mentioned, &skills, &mut route);
+                    }
+                    let names = route
+                        .requests
+                        .iter()
+                        .filter_map(|r| r["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !names.is_empty() {
+                        route.notice = join_notice(
+                            route.notice,
+                            Some(format!("Cursor skills requested: {names}.")),
+                        );
+                    }
+                }
+            } else {
+                return Err(HarnessError::invalid("Choose a provider."));
             }
-        } else {
-            return Err(HarnessError::invalid("Choose a provider."));
-        }
-        Ok(route)
+            Ok(route)
+        })
+        .await
     }
     /// Lists the skills routable for `provider` in `cwd` without executing a
     /// live slash-command probe for Claude.
@@ -880,81 +895,87 @@ async fn claude_commands(
     extra: &[String],
     lock: Arc<std::fs::File>,
 ) -> Result<Vec<V>> {
-    let mut settings: V = serde_json::from_str(settings)
-        .map_err(|_| HarnessError::invalid("Invalid Claude settings."))?;
-    settings["disableAllHooks"] = json!(true);
-    let mut args =
-        provider::command_argv(&[executable.to_string_lossy().into_owned()], Some("claude"))
-            .map_err(host)?;
-    args.extend(
-        [
-            "--print",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--settings",
-        ]
-        .into_iter()
-        .map(str::to_owned),
-    );
-    args.push(settings.to_string());
-    args.extend_from_slice(extra);
-    let raw=process::converse_environment(&args,cwd,&BTreeMap::new(),&["CONTEXT_CAPSULE_DELIVERED".into()],&[json!({"type":"control_request","request_id":"harness-commands","request":{"subtype":"initialize"}})],Limits{seconds:Some(10),output:PROBE_BYTES,line:PROBE_BYTES},Arc::new(AtomicBool::new(false)),Some(lock),|message|{if message["type"]!="control_response"||message["response"]["request_id"]!="harness-commands"{return Ok(Control::Continue);}let response=&message["response"];if response["subtype"]!="success"||!response["response"]["commands"].is_array(){return Err(infra_host::HostError::unavailable("Claude Code did not list its commands."));}Ok(Control::Done(response["response"]["commands"].clone()))}).await.map_err(host)?;
-    let mut commands = vec![];
-    for item in raw.as_array().into_iter().flatten().take(1000) {
-        let Some(name) = item["name"].as_str().filter(|s| {
-            !s.is_empty()
-                && !s.starts_with('_')
-                && s.chars().count() <= 200
-                && !s.chars().any(|c| c.is_whitespace() || c < ' ')
-        }) else {
-            continue;
-        };
-        let aliases = item["aliases"]
-            .as_array()
+    Box::pin(async move {
+        let mut settings: V = serde_json::from_str(settings)
+            .map_err(|_| HarnessError::invalid("Invalid Claude settings."))?;
+        settings["disableAllHooks"] = json!(true);
+        let mut args =
+            provider::command_argv(&[executable.to_string_lossy().into_owned()], Some("claude"))
+                .map_err(host)?;
+        args.extend(
+            [
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--settings",
+            ]
             .into_iter()
-            .flatten()
-            .filter_map(V::as_str)
-            .filter(|s| !s.is_empty() && !s.chars().any(char::is_whitespace))
-            .take(8)
-            .collect::<Vec<_>>();
-        commands.push(json!({"name":name,"description":short(&item["description"],300),"hint":short(&item["argumentHint"],200),"aliases":aliases,"builtin":item["builtin"]==true}));
-    }
-    Ok(commands)
+            .map(str::to_owned),
+        );
+        args.push(settings.to_string());
+        args.extend_from_slice(extra);
+        let raw=Box::pin(process::converse_environment(&args,cwd,&BTreeMap::new(),&["CONTEXT_CAPSULE_DELIVERED".into()],&[json!({"type":"control_request","request_id":"harness-commands","request":{"subtype":"initialize"}})],Limits{seconds:Some(10),output:PROBE_BYTES,line:PROBE_BYTES},Arc::new(AtomicBool::new(false)),Some(lock),|message|{if message["type"]!="control_response"||message["response"]["request_id"]!="harness-commands"{return Ok(Control::Continue);}let response=&message["response"];if response["subtype"]!="success"||!response["response"]["commands"].is_array(){return Err(infra_host::HostError::unavailable("Claude Code did not list its commands."));}Ok(Control::Done(response["response"]["commands"].clone()))})).await.map_err(host)?;
+        let mut commands = vec![];
+        for item in raw.as_array().into_iter().flatten().take(1000) {
+            let Some(name) = item["name"].as_str().filter(|s| {
+                !s.is_empty()
+                    && !s.starts_with('_')
+                    && s.chars().count() <= 200
+                    && !s.chars().any(|c| c.is_whitespace() || c < ' ')
+            }) else {
+                continue;
+            };
+            let aliases = item["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(V::as_str)
+                .filter(|s| !s.is_empty() && !s.chars().any(char::is_whitespace))
+                .take(8)
+                .collect::<Vec<_>>();
+            commands.push(json!({"name":name,"description":short(&item["description"],300),"hint":short(&item["argumentHint"],200),"aliases":aliases,"builtin":item["builtin"]==true}));
+        }
+        Ok(commands)
+    })
+    .await
 }
 async fn codex_skills(executable: &Path, cwd: &Path, lock: Arc<std::fs::File>) -> Result<Vec<V>> {
-    let args = provider::command_argv(
-        &[
-            executable.to_string_lossy().into_owned(),
-            "app-server".into(),
-        ],
-        Some("codex"),
-    )
-    .map_err(host)?;
-    let folder = cwd.to_string_lossy().into_owned();
-    let raw=process::converse(&args,cwd,&BTreeMap::new(),&[json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"ai-infrastructure-harness","version":"1"}}})],Limits{seconds:Some(10),output:PROBE_BYTES,line:PROBE_BYTES},Arc::new(AtomicBool::new(false)),Some(lock),move|message|{if message["id"]==1{if message.get("error").is_some(){return Err(infra_host::HostError::unavailable("Codex refused the skills request."));}return Ok(Control::Write(vec![json!({"jsonrpc":"2.0","method":"initialized"}),json!({"jsonrpc":"2.0","id":2,"method":"skills/list","params":{"cwds":[folder]}})]));}
-    if message["id"]==2{if message.get("error").is_some()||!message["result"]["data"].is_array(){return Err(infra_host::HostError::unavailable("Codex did not list its skills."));}return Ok(Control::Done(json!(message["result"]["data"].as_array().into_iter().flatten().flat_map(|e|e["skills"].as_array().into_iter().flatten().cloned()).collect::<Vec<_>>())));}Ok(Control::Continue)}).await.map_err(host)?;
-    let mut skills = vec![];
-    let mut seen = BTreeSet::new();
-    for item in raw.as_array().into_iter().flatten() {
-        let (Some(name), Some(path)) = (item["name"].as_str(), item["path"].as_str()) else {
-            continue;
-        };
-        if !skill_name(name)
-            || path.chars().count() > 4096
-            || item["enabled"] == false
-            || !seen.insert(name.to_owned())
-        {
-            continue;
+    Box::pin(async move {
+        let args = provider::command_argv(
+            &[
+                executable.to_string_lossy().into_owned(),
+                "app-server".into(),
+            ],
+            Some("codex"),
+        )
+        .map_err(host)?;
+        let folder = cwd.to_string_lossy().into_owned();
+        let raw=Box::pin(process::converse(&args,cwd,&BTreeMap::new(),&[json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"ai-infrastructure-harness","version":"1"}}})],Limits{seconds:Some(10),output:PROBE_BYTES,line:PROBE_BYTES},Arc::new(AtomicBool::new(false)),Some(lock),move|message|{if message["id"]==1{if message.get("error").is_some(){return Err(infra_host::HostError::unavailable("Codex refused the skills request."));}return Ok(Control::Write(vec![json!({"jsonrpc":"2.0","method":"initialized"}),json!({"jsonrpc":"2.0","id":2,"method":"skills/list","params":{"cwds":[folder]}})]));}
+        if message["id"]==2{if message.get("error").is_some()||!message["result"]["data"].is_array(){return Err(infra_host::HostError::unavailable("Codex did not list its skills."));}return Ok(Control::Done(json!(message["result"]["data"].as_array().into_iter().flatten().flat_map(|e|e["skills"].as_array().into_iter().flatten().cloned()).collect::<Vec<_>>())));}Ok(Control::Continue)})).await.map_err(host)?;
+        let mut skills = vec![];
+        let mut seen = BTreeSet::new();
+        for item in raw.as_array().into_iter().flatten() {
+            let (Some(name), Some(path)) = (item["name"].as_str(), item["path"].as_str()) else {
+                continue;
+            };
+            if !skill_name(name)
+                || path.chars().count() > 4096
+                || item["enabled"] == false
+                || !seen.insert(name.to_owned())
+            {
+                continue;
+            }
+            skills.push(json!({"name":name,"description":short(&item["description"],300),"path":path,"scope":item["scope"].as_str().unwrap_or("")}));
+            if skills.len() == 1000 {
+                break;
+            }
         }
-        skills.push(json!({"name":name,"description":short(&item["description"],300),"path":path,"scope":item["scope"].as_str().unwrap_or("")}));
-        if skills.len() == 1000 {
-            break;
-        }
-    }
-    Ok(skills)
+        Ok(skills)
+    })
+    .await
 }
 fn basic_name(s: &str) -> bool {
     !s.is_empty()

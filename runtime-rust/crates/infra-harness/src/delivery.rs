@@ -208,6 +208,8 @@ fn compute_delivery_settled_stamp_at(session: &Value, root: &Path, now_ns: i128)
         ("config", common_dir.join("config")),
         ("packed-refs", common_dir.join("packed-refs")),
         ("sparse", git_dir.join("info/sparse-checkout")),
+        ("git_exclude", git_dir.join("info/exclude")),
+        ("gitignore", root_canon.join(".gitignore")),
     ] {
         if !stamp_delivery_stat_path(label, &p, &mut parts, &mut max_mtime_ns) {
             return None;

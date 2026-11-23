@@ -747,6 +747,15 @@ async fn mock_mutate(
         props["target_id"] = json!(dst);
         snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
         edges += 1;
+    } else if qname == "clear_atom_files"
+        || (qtext.contains("delete TouchesFile") && !qtext.contains("delete ContextAtom"))
+    {
+        // As `GQ_CLEAR_ATOM_FILES`: the atom's touched-file edges only.
+        let aid = params["atom_id"].as_str().unwrap_or("");
+        let before = snap.touches_file.len();
+        snap.touches_file
+            .retain(|_, props| props["source_id"].as_str() != Some(aid));
+        edges += before - snap.touches_file.len();
     } else if qname == "clear_atom_symbols"
         || (qtext.contains("delete MentionsSymbol") && !qtext.contains("delete ContextAtom"))
     {
@@ -869,7 +878,19 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
             .collect(),
         "list_published_edges" => snap.published_by.values().cloned().collect(),
         "list_consumed_edges" => snap.consumed_by.values().cloned().collect(),
-        "list_file_edges" => snap.touches_file.values().cloned().collect(),
+        "list_file_edges" => snap
+            .touches_file
+            .values()
+            .filter(|edge| {
+                pid.is_empty()
+                    || snap
+                        .atoms
+                        .get(edge["source_id"].as_str().unwrap_or(""))
+                        .is_some_and(match_proj)
+            })
+            .take(2000)
+            .cloned()
+            .collect(),
         "list_atom_relations" => snap.relates_to.values().cloned().collect(),
         "list_session_follows" => snap.session_follows.values().cloned().collect(),
         "file_context" => {
@@ -5675,6 +5696,131 @@ async fn omnigraph_sync_canonical_knowledge_skips_unchanged_atoms_and_files_over
                 .unwrap_or(0),
             3
         );
+    }
+
+    // 5. Shrinking `files` deletes stale `TouchesFile` edge via `clear_atom_files`, and clearing to `[]` removes the rest.
+    items[1]["files"] = json!(["src/b.rs"]);
+    let r5 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r5["synced"], 2);
+    assert_eq!(r5["mutated_atoms"], 0);
+    assert_eq!(r5["skipped_files"], 1);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+    }
+    let fetched_shrunk = fx
+        .omnigraph
+        .fetch_atom_with_files(&fx.project_id, "ledger-atom-b", Some("knowledge/canonical"))
+        .await
+        .unwrap();
+    assert_eq!(fetched_shrunk["files"], json!(["src/b.rs"]));
+
+    items[1]["files"] = json!([]);
+    let r6 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r6["synced"], 2);
+    assert_eq!(r6["mutated_atoms"], 0);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+    let fetched_empty = fx
+        .omnigraph
+        .fetch_atom_with_files(&fx.project_id, "ledger-atom-b", Some("knowledge/canonical"))
+        .await
+        .unwrap();
+    assert_eq!(fetched_empty["files"], json!([]));
+
+    // Identical re-sync with `[]` skips both atom & file mutations without extra clears.
+    let r7 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r7["skipped_atoms"], 2);
+    assert_eq!(r7["skipped_files"], 2);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    // 6. Seed >2000 TouchesFile edges sorting lexicographically before `zzz-atom` so `list_file_edges`
+    // truncates at 2000; `export_branch` expansion must still find and clear shrunk `zzz-atom` edges.
+    items.push(json!({
+        "atom_id": "zzz-atom",
+        "kind": "finding",
+        "title": "Tail atom",
+        "summary": "Beyond 2000 edges.",
+        "body": "Tail atom body.",
+        "files": ["src/a.rs", "src/b.rs"],
+        "origin_layer": "memory-bank",
+        "authority": "verified",
+        "verified": true,
+    }));
+    fx.omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    {
+        let mut st = mock_state.lock().unwrap();
+        let head_cid = st.branches["knowledge/canonical"].head_commit.clone();
+        let snap = &mut st.commits.get_mut(&head_cid).unwrap().snapshot;
+        for i in 0..2005 {
+            let aid = format!("aaa-pad-{i:04}");
+            let path = format!("src/pad_{i:04}.rs");
+            snap.atoms.insert(
+                aid.clone(),
+                json!({ "atom_id": aid, "project_id": fx.project_id, "origin_layer": "memory-bank" }),
+            );
+            snap.touches_file.insert(
+                format!("{aid}->{path}"),
+                json!({ "source_id": aid, "target_id": path, "access": "referenced" }),
+            );
+        }
+    }
+    items[2]["files"] = json!(["src/a.rs"]);
+    fx.omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+        let head_cid = &st.branches["knowledge/canonical"].head_commit;
+        let snap = &st.commits[head_cid].snapshot;
+        assert!(snap.touches_file.contains_key("zzz-atom->src/a.rs"));
+        assert!(!snap.touches_file.contains_key("zzz-atom->src/b.rs"));
     }
 
     mock_task.abort();

@@ -883,47 +883,50 @@ pub(crate) fn extract_checked_claims(files: &[Value]) -> Vec<CheckedClaimLine> {
 
     let mut out = Vec::new();
     for suffix in ["tasks.md", "progress.md"] {
-        let Some((doc_path, text)) = files.iter().find_map(|f| {
-            let p = f["path"].as_str()?;
-            (p.ends_with(suffix) && f["available"] == true)
-                .then(|| f["text"].as_str().map(|t| (p, t)))
-                .flatten()
-        }) else {
-            continue;
-        };
-        for (idx, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            let is_done = trimmed.starts_with("- [x]")
-                || trimmed.starts_with("- [X]")
-                || trimmed.starts_with("* [x]")
-                || trimmed.starts_with("* [X]");
-            if !is_done {
+        for f in files {
+            let Some(doc_path) = f["path"].as_str() else {
+                continue;
+            };
+            if !(doc_path.ends_with(suffix) && f["available"] == true) {
                 continue;
             }
-            let mut claimed_files = Vec::new();
-            let mut claimed_symbols = Vec::new();
-            for cap in backtick_re.captures_iter(trimmed) {
-                let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                let token = raw.trim();
-                if is_claim_file_token(token) {
-                    let norm = token.trim_start_matches("./").to_owned();
-                    if !claimed_files.contains(&norm) {
-                        claimed_files.push(norm);
-                    }
-                } else if is_claim_symbol_token(token) {
-                    let sym = token.to_owned();
-                    if !claimed_symbols.contains(&sym) {
-                        claimed_symbols.push(sym);
+            let Some(text) = f["text"].as_str() else {
+                continue;
+            };
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                let is_done = trimmed.starts_with("- [x]")
+                    || trimmed.starts_with("- [X]")
+                    || trimmed.starts_with("* [x]")
+                    || trimmed.starts_with("* [X]");
+                if !is_done {
+                    continue;
+                }
+                let mut claimed_files = Vec::new();
+                let mut claimed_symbols = Vec::new();
+                for cap in backtick_re.captures_iter(trimmed) {
+                    let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let token = raw.trim();
+                    if is_claim_file_token(token) {
+                        let norm = token.trim_start_matches("./").to_owned();
+                        if !claimed_files.contains(&norm) {
+                            claimed_files.push(norm);
+                        }
+                    } else if is_claim_symbol_token(token) {
+                        let sym = token.to_owned();
+                        if !claimed_symbols.contains(&sym) {
+                            claimed_symbols.push(sym);
+                        }
                     }
                 }
-            }
-            if !claimed_files.is_empty() || !claimed_symbols.is_empty() {
-                out.push(CheckedClaimLine {
-                    doc_path: doc_path.to_owned(),
-                    line_no: idx + 1,
-                    files: claimed_files,
-                    symbols: claimed_symbols,
-                });
+                if !claimed_files.is_empty() || !claimed_symbols.is_empty() {
+                    out.push(CheckedClaimLine {
+                        doc_path: doc_path.to_owned(),
+                        line_no: idx + 1,
+                        files: claimed_files,
+                        symbols: claimed_symbols,
+                    });
+                }
             }
         }
     }
