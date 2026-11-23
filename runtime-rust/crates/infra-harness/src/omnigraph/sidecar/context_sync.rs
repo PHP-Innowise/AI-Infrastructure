@@ -1,10 +1,11 @@
 use super::graph_ops::now_utc_iso_ms;
 use super::helpers::{
-    AtomProvenance, atom_symbols_for_project, build_upsert_atom_params, clean_opt, detect_language,
-    format_atom_line_with_authority, format_context_capsule, format_omnigraph_ts,
-    list_atom_symbols, normalize_atom_row, normalize_file_row, normalize_session_row,
-    normalize_symbol_row, normalize_turn_row, parse_string_list, parse_tags_opt, pascal_to_snake,
-    str_field, symbol_edges, upsert_atom_files, upsert_atom_symbols,
+    AtomProvenance, atom_symbols_for_project, build_upsert_atom_params, clean_opt,
+    clear_atom_files, detect_language, format_atom_line_with_authority, format_context_capsule,
+    format_omnigraph_ts, list_atom_symbols, normalize_atom_row, normalize_file_row,
+    normalize_session_row, normalize_symbol_row, normalize_turn_row, parse_string_list,
+    parse_tags_opt, pascal_to_snake, str_field, symbol_edges, upsert_atom_files,
+    upsert_atom_symbols,
 };
 use super::{OmnigraphManager, OmnigraphMode, VALID_ATOM_KINDS};
 use crate::omnigraph::{
@@ -213,6 +214,7 @@ async fn list_atom_files_map(
     client: &OmnigraphClient,
     project_id: &str,
     branch: &str,
+    project_atom_ids: &BTreeSet<String>,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut by_atom: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let edges = query_edges_safe(
@@ -224,11 +226,25 @@ async fn list_atom_files_map(
         None,
     )
     .await;
-    for edge in edges {
+    for edge in &edges {
         if let (Some(atom_id), Some(path)) =
-            (str_field(&edge, "source_id"), str_field(&edge, "target_id"))
+            (str_field(edge, "source_id"), str_field(edge, "target_id"))
         {
             by_atom.entry(atom_id).or_default().insert(path);
+        }
+    }
+    if edges.len() >= 2000
+        && let Ok(ndjson) = client
+            .export_branch(Some(branch), &["TouchesFile"], None)
+            .await
+        && let Ok(parsed) = parse_ndjson_records(&ndjson)
+    {
+        for edge in parsed.edges {
+            if edge.edge_type == "TouchesFile"
+                && (project_id.is_empty() || project_atom_ids.contains(&edge.from))
+            {
+                by_atom.entry(edge.from).or_default().insert(edge.to);
+            }
         }
     }
     by_atom
@@ -2041,7 +2057,8 @@ impl OmnigraphManager {
         // what each synced atom named before is replaced only when it changed.
         let root = self.project_root(project_id, None);
         let mut previous_symbols = list_atom_symbols(&client, project_id, branch).await;
-        let mut previous_files = list_atom_files_map(&client, project_id, branch).await;
+        let mut previous_files =
+            list_atom_files_map(&client, project_id, branch, &existing_ids).await;
         let mut symbol_count = 0usize;
         let mut skipped_atoms = 0usize;
         let mut skipped_files = 0usize;
@@ -2145,8 +2162,17 @@ impl OmnigraphManager {
                 || (on_branch
                     && wanted_files_set == prev_files_set
                     && prev_ledger.is_some_and(|r| r.files_sha256 == files_sha256));
+            let mut files_sync_ok = true;
             if files_unchanged {
                 skipped_files += 1;
+            } else if !prev_files_set.is_subset(&wanted_files_set) {
+                // Files were removed or swapped out: clear prior TouchesFile edges first so stale links don't persist.
+                if !clear_atom_files(&client, branch, &atom_id).await {
+                    files_sync_ok = false;
+                } else if !files.is_empty() {
+                    upsert_atom_files(&client, effective_project_id, branch, &atom_id, &files, &ts)
+                        .await;
+                }
             } else if !files.is_empty() {
                 let target_files: Vec<String> = if atom_unchanged && on_branch {
                     files
@@ -2195,6 +2221,13 @@ impl OmnigraphManager {
                 pending_supersedes.push((atom_id.clone(), supersedes));
             }
             if let Some(ref db) = ledger_db {
+                let persisted_files_sha256 = if files_sync_ok {
+                    files_sha256
+                } else {
+                    prev_ledger
+                        .map(|r| r.files_sha256.clone())
+                        .unwrap_or_default()
+                };
                 save_canonical_sync_ledger(
                     db,
                     &endpoint_key,
@@ -2204,7 +2237,7 @@ impl OmnigraphManager {
                     &atom_id,
                     &CanonicalSyncLedgerEntry {
                         atom_sha256,
-                        files_sha256,
+                        files_sha256: persisted_files_sha256,
                         supersedes_sha256,
                     },
                     &ts,
@@ -2974,25 +3007,12 @@ pub(super) async fn list_atom_files(
     branch: &str,
     atom_id: &str,
 ) -> Vec<String> {
-    let edges = query_edges_safe(
-        client,
-        GQ_LIST_FILE_EDGES,
-        "list_file_edges",
-        &json!({ "project_id": project_id }),
-        Some(branch),
-        None,
-    )
-    .await;
-    let mut files = Vec::new();
-    for edge in &edges {
-        if str_field(edge, "source_id").as_deref() == Some(atom_id)
-            && let Some(path) = str_field(edge, "target_id")
-            && !files.contains(&path)
-        {
-            files.push(path);
-        }
-    }
-    files
+    let target_set = BTreeSet::from([atom_id.to_owned()]);
+    list_atom_files_map(client, project_id, branch, &target_set)
+        .await
+        .remove(atom_id)
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default()
 }
 
 pub(super) async fn collect_branch_atom_ids(

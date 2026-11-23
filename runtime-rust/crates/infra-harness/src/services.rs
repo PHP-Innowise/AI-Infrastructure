@@ -1386,71 +1386,72 @@ impl NativeServices {
         Ok(Payload::Json(links))
     }
     async fn handle_preflight(&self, request: &Value) -> Result<Payload> {
-        let pid_str = request["params"]["project_id"]
-            .as_str()
-            .or_else(|| request["query"]["project_id"].as_str())
-            .or_else(|| request["body"]["project_id"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_owned();
-        let memo_key = self.build_preflight_memo_key(&pid_str, request);
-        let mut preflight = if let Some(ref key) = memo_key
-            && let Ok(mut guard) = self.runtime_cache.lock()
-            && let Some(cached) = guard.get_preflight(key)
-        {
-            cached
-        } else {
-            let knowledge = self.domains.get("knowledge").ok_or_else(|| {
-                HarnessError::unavailable("Required native service is unavailable.")
-            })?;
-            let Payload::Json(mut computed) = knowledge
-                .execute("knowledge.preflight", request.clone())
-                .await?
-            else {
-                return Err(HarnessError::unavailable("Unexpected preflight payload."));
-            };
-            let project_id = computed
-                .get("project_id")
-                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-                .cloned()
-                .unwrap_or_else(|| request["params"]["project_id"].clone());
-            let mut contradictions = Vec::new();
-            let mut seen = std::collections::BTreeSet::new();
-            if let Some(files) = computed["files"].as_array_mut() {
-                self.enrich_items_concurrently(&project_id, files).await;
-                for item in files {
-                    collect_unique_contradictions(item, &mut contradictions, &mut seen);
-                }
-            }
-            if computed.is_object() {
-                computed["contradiction_warnings"] = Value::Array(contradictions);
-            }
-            let has_omnigraph_error = computed["files"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|item| item.get("omnigraph_error").is_some_and(|v| !v.is_null()));
-            if let Some(key) = memo_key
-                && computed.is_object()
-                && computed["ok"].as_bool().unwrap_or(true)
-                && !has_omnigraph_error
+        Box::pin(async move {
+            let pid_str = request["params"]["project_id"]
+                .as_str()
+                .or_else(|| request["query"]["project_id"].as_str())
+                .or_else(|| request["body"]["project_id"].as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let memo_key = self.build_preflight_memo_key(&pid_str, request);
+            let mut preflight = if let Some(ref key) = memo_key
                 && let Ok(mut guard) = self.runtime_cache.lock()
+                && let Some(cached) = guard.get_preflight(key)
             {
-                guard.insert_preflight(key, computed.clone());
+                cached
+            } else {
+                let knowledge = self.domains.get("knowledge").ok_or_else(|| {
+                    HarnessError::unavailable("Required native service is unavailable.")
+                })?;
+                let Payload::Json(mut computed) =
+                    Box::pin(knowledge.execute("knowledge.preflight", request.clone())).await?
+                else {
+                    return Err(HarnessError::unavailable("Unexpected preflight payload."));
+                };
+                let project_id = computed
+                    .get("project_id")
+                    .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                    .cloned()
+                    .unwrap_or_else(|| request["params"]["project_id"].clone());
+                let mut contradictions = Vec::new();
+                let mut seen = std::collections::BTreeSet::new();
+                if let Some(files) = computed["files"].as_array_mut() {
+                    Box::pin(self.enrich_items_concurrently(&project_id, files)).await;
+                    for item in files {
+                        collect_unique_contradictions(item, &mut contradictions, &mut seen);
+                    }
+                }
+                if computed.is_object() {
+                    computed["contradiction_warnings"] = Value::Array(contradictions);
+                }
+                let has_omnigraph_error = computed["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|item| item.get("omnigraph_error").is_some_and(|v| !v.is_null()));
+                if let Some(key) = memo_key
+                    && computed.is_object()
+                    && computed["ok"].as_bool().unwrap_or(true)
+                    && !has_omnigraph_error
+                    && let Ok(mut guard) = self.runtime_cache.lock()
+                {
+                    guard.insert_preflight(key, computed.clone());
+                }
+                computed
+            };
+            if preflight.is_object()
+                && !request["body"]["skillcache"].is_null()
+                && let Some(sessions) = self.domains.get("sessions")
+                && let Ok(Payload::Json(preview)) =
+                    Box::pin(sessions.execute("sessions.skillcache_preview", request.clone())).await
+            {
+                // What SkillCache would decide for this message, evaluated dynamically outside base memo.
+                preflight["skillcache"] = preview;
             }
-            computed
-        };
-        if preflight.is_object()
-            && !request["body"]["skillcache"].is_null()
-            && let Some(sessions) = self.domains.get("sessions")
-            && let Ok(Payload::Json(preview)) = sessions
-                .execute("sessions.skillcache_preview", request.clone())
-                .await
-        {
-            // What SkillCache would decide for this message, evaluated dynamically outside base memo.
-            preflight["skillcache"] = preview;
-        }
-        Ok(Payload::Json(preflight))
+            Ok(Payload::Json(preflight))
+        })
+        .await
     }
     async fn annotate_delivery_preview(&self, sid: &str, preview: &mut Value) {
         let mut contradiction_warnings = Vec::new();
