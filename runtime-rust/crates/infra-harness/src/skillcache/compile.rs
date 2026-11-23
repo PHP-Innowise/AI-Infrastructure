@@ -73,7 +73,7 @@ pub struct Runtime {
     pub(crate) requalifying: Option<Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>>,
 }
 impl Runtime {
-    fn codex_executable(&self) -> Option<PathBuf> {
+    pub(super) fn codex_executable(&self) -> Option<PathBuf> {
         if cfg!(windows) {
             self.providers
                 .get("codex")
@@ -1098,17 +1098,25 @@ fn rel_in_workspace(workspace: &Path, raw: &str) -> Option<String> {
     }
 }
 
+fn is_under_skill_path(skill_paths: &[String], rel: &str) -> bool {
+    skill_paths.iter().any(|skill| {
+        if db::path_matches(skill, rel) {
+            return true;
+        }
+        let norm = db::normalize_rel_path(skill);
+        norm.strip_suffix("/SKILL.md")
+            .or_else(|| norm.strip_suffix("/skill.md"))
+            .is_some_and(|dir| db::path_matches(dir, rel))
+    })
+}
+
 /// Builds the persisted dependency manifest recorded alongside a qualified capsule.
 fn record_manifest_path(
     workspace: &Path,
     manifest: &mut db::ArtifactDependencyManifest,
     rel: String,
 ) {
-    if manifest
-        .skill_paths
-        .iter()
-        .any(|skill| db::path_matches(skill, &rel))
-    {
+    if is_under_skill_path(&manifest.skill_paths, &rel) {
         return;
     }
     let lower = rel.to_ascii_lowercase();
@@ -1223,12 +1231,58 @@ pub(crate) fn enrich_manifest_from_graph_ir(
     }
 }
 
+pub(crate) fn populate_manifest_path_hashes(
+    workspace: &Path,
+    manifest: &mut db::ArtifactDependencyManifest,
+) {
+    let tracked: Vec<String> = manifest
+        .manifest_files
+        .iter()
+        .chain(manifest.caller_files.iter())
+        .chain(manifest.ast_selectors.iter())
+        .chain(manifest.route_selectors.iter())
+        .chain(manifest.table_selectors.iter())
+        .cloned()
+        .collect();
+    for rel in tracked {
+        if rel.is_empty() || is_under_skill_path(&manifest.skill_paths, &rel) {
+            continue;
+        }
+        let target = workspace.join(&rel);
+        if target.is_file() {
+            manifest
+                .path_hashes
+                .entry(rel)
+                .or_insert_with(|| trace::hash_workspace_target(&target));
+        }
+    }
+}
+
+fn refresh_manifest_path_hashes(workspace: &Path, manifest: &mut db::ArtifactDependencyManifest) {
+    let mut keys: Vec<String> = manifest.path_hashes.keys().cloned().collect();
+    manifest.path_hashes.clear();
+    for rel in keys.drain(..) {
+        if rel == "." {
+            if let Ok(tree_sha) = trace::workspace_tree_sha(workspace) {
+                manifest.path_hashes.insert(".".to_owned(), tree_sha);
+            }
+        } else {
+            manifest.path_hashes.insert(
+                rel.clone(),
+                trace::hash_workspace_target(&workspace.join(&rel)),
+            );
+        }
+    }
+    populate_manifest_path_hashes(workspace, manifest);
+}
+
 pub(crate) fn build_dependency_manifest(
     workspace: &Path,
     stored_trace: &Value,
     candidate: &Candidate,
     ir_revision: u64,
 ) -> db::ArtifactDependencyManifest {
+    let _ = candidate;
     let mut manifest = db::ArtifactDependencyManifest {
         skill_paths: candidate
             .capsule
@@ -1285,21 +1339,10 @@ pub(crate) fn build_dependency_manifest(
             }
         }
     }
-    if let Some(examples) = &candidate.examples {
-        for binding in &candidate.capsule.bindings {
-            if binding.kind == infra_skillcache::capsule::BindingType::Path
-                && let Some(raw) = examples.bindings.get(&binding.name).and_then(Value::as_str)
-                && let Some(rel) = rel_in_workspace(workspace, raw)
-            {
-                let glob = if workspace.join(&rel).is_dir() {
-                    format!("{rel}/**")
-                } else {
-                    rel
-                };
-                push_unique(&mut manifest.watched_globs, glob);
-            }
-        }
-    }
+    // Note: `examples.bindings` (`BindingType::Path`) are request-specific data
+    // inputs, never code dependencies, so they are intentionally excluded from
+    // `watched_globs` to avoid invalidating capsules when task data changes.
+    populate_manifest_path_hashes(workspace, &mut manifest);
     manifest
 }
 
@@ -1403,6 +1446,7 @@ fn publish_capsule(
     let mut manifest =
         build_dependency_manifest(&job.workspace, &stored_trace, candidate, ir_revision);
     enrich_manifest_from_graph_ir(&runtime.store.state, &job.project_id, &mut manifest);
+    populate_manifest_path_hashes(&job.workspace, &mut manifest);
     let portable_template = if candidate.capsule.kind == CapsuleKind::Skill
         && let Some(edition) = workspace_edition_for_project(
             &runtime.store,
@@ -1432,10 +1476,13 @@ fn publish_capsule(
     let capsule_sha256 = fingerprint::sha256(&candidate.capsule_bytes);
     let engine_digest = runtime.engine_digest();
     let artifact_dir_str = artifacts.display().to_string();
-    let capabilities = json!({
+    let mut capabilities = json!({
         "network": candidate.capsule.capabilities.network.as_str(),
         "runtimes": candidate.capsule.capabilities.runtimes,
     });
+    if !candidate.capsule.capabilities.allow_ignored.is_empty() {
+        capabilities["allow_ignored"] = json!(candidate.capsule.capabilities.allow_ignored);
+    }
     let all_read_only = candidate.capsule.form == Form::Textual
         || candidate.capsule.programs.iter().all(|p| p.read_only);
     let db = runtime.store.connection()?;
@@ -1936,6 +1983,7 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
         manifest.ir_revision = super::latest_ir_revision(&runtime.store.state, &project_id);
         manifest.verified_ns = db::current_unix_ns();
         enrich_manifest_from_graph_ir(&runtime.store.state, &project_id, &mut manifest);
+        refresh_manifest_path_hashes(workspace, &mut manifest);
         let _ = db::set_dependency_manifest(&db, &capsule_id, &manifest);
     } else {
         let target = if capsule["status"] == "retired" {
@@ -2799,5 +2847,77 @@ mod tests {
         assert_eq!(cmp["status"], "dry_run_passed");
         assert!(fake_violations.is_empty());
         let _ = (&session, &skill, &exe);
+    }
+
+    #[test]
+    fn build_dependency_manifest_excludes_example_path_bindings_from_watched_globs() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("data/invoices/dir")).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}\n").unwrap();
+        std::fs::write(workspace.join("src/App.php"), "<?php\nclass App {}\n").unwrap();
+        std::fs::write(workspace.join("data/invoices/batch1.json"), "[]\n").unwrap();
+        std::fs::write(workspace.join("data/invoices/dir/b.json"), "[]\n").unwrap();
+
+        let mut cap_files = infra_skillcache::package::Files::new();
+        cap_files.insert("programs/run/main.py", b"print('{}')\n".to_vec());
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "s", "description": "d"},
+            "source": {"skills": [{"name": "s", "path": ".claude/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [
+                {"name": "input_file", "type": "path", "origin": "request", "description": "Input file"},
+                {"name": "target_dir", "type": "path", "origin": "request", "description": "Target dir"}
+            ],
+            "programs": [{
+                "id": "run",
+                "entry": ["python3", "programs/run/main.py"],
+                "inputs": ["input_file", "target_dir"],
+                "outputs": [],
+                "check": ["python3", "programs/run/main.py"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "run"}],
+            "verification": []
+        }))
+        .unwrap();
+        let cand = Candidate {
+            capsule: cap,
+            capsule_bytes: Vec::new(),
+            files: cap_files,
+            examples: Some(infra_skillcache::Examples {
+                bindings: serde_json::Map::from_iter([
+                    ("input_file".to_owned(), json!("data/invoices/batch1.json")),
+                    ("target_dir".to_owned(), json!("data/invoices/dir")),
+                ]),
+                steps: std::collections::BTreeMap::new(),
+            }),
+            markdown: None,
+        };
+        let trace_val = json!({
+            "steps": [
+                {"kind": "tool", "name": "Read", "input": {"file_path": "src/App.php"}}
+            ]
+        });
+        let manifest = build_dependency_manifest(&workspace, &trace_val, &cand, 3);
+        assert!(
+            !manifest
+                .watched_globs
+                .iter()
+                .any(|glob| glob.contains("data/invoices")),
+            "example binding paths must never populate watched_globs: {:?}",
+            manifest.watched_globs
+        );
+        assert!(manifest.path_hashes.contains_key("composer.json"));
+        assert!(manifest.path_hashes.contains_key("src/App.php"));
+        assert!(
+            !manifest
+                .path_hashes
+                .contains_key("data/invoices/batch1.json")
+        );
     }
 }

@@ -251,42 +251,53 @@ fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
         .collect()
 }
 
+fn infer_state_dir(capsule: &Value) -> Option<PathBuf> {
+    let artifact_dir = capsule["artifact_dir"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)?;
+    for anc in artifact_dir.ancestors() {
+        if anc.file_name().and_then(|n| n.to_str()) == Some("skillcache")
+            && let Some(parent) = anc.parent()
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    artifact_dir
+        .ancestors()
+        .nth(4)
+        .filter(|p| p.join("harness.db").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn manifest_has_hashed_path(manifest: &db::ArtifactDependencyManifest, rel_norm: &str) -> bool {
+    manifest.path_hashes.contains_key(".")
+        || manifest.path_hashes.contains_key(rel_norm)
+        || manifest
+            .path_hashes
+            .keys()
+            .any(|k| db::normalize_rel_path(k) == rel_norm)
+}
+
 /// Why an active capsule may no longer be used in `workspace`, if it may not:
 /// its skill, its environment, its rules or its package is not what it was
 /// qualified with.
 pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
+    staleness_in_state(None, capsule, workspace)
+}
+
+/// State-aware variant of [`staleness`] that also checks [`crate::graph_ir::GraphIrStore`]
+/// in `state` when evaluating `ArtifactDependencyManifest` `ir_revision` and `caller_files`.
+pub(crate) fn staleness_in_state(
+    state: Option<&Path>,
+    capsule: &Value,
+    workspace: &Path,
+) -> Option<String> {
     if capsule["schema_version"].as_u64() != Some(infra_skillcache::SCHEMA_VERSION) {
         return Some("The capsule was written in another schema version.".into());
     }
     if capsule["compile_rules_version"].as_str() != Some(compile_rules::version().as_str()) {
         return Some("The compiler's rules changed since this capsule was compiled.".into());
-    }
-    if capsule["kind"] == "tool_chain" {
-        let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
-        if !manifest.path_hashes.is_empty() {
-            if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
-                return Some(
-                    "Watched workspace files changed since this tool-chain capsule was compiled."
-                        .into(),
-                );
-            }
-        } else if let Some(expected_tree) = capsule["tool_chain_tree_sha"]
-            .as_str()
-            .filter(|sha| !sha.is_empty())
-        {
-            match trace::workspace_tree_sha(workspace) {
-                Ok(now_tree) if now_tree == expected_tree => {}
-                Ok(_) => {
-                    return Some(
-                        "The workspace tree changed since this tool-chain capsule was compiled."
-                            .into(),
-                    );
-                }
-                Err(_) => {
-                    return Some("The workspace tree could not be fingerprinted.".into());
-                }
-            }
-        }
     }
     for skill in capsule["skill_files"]["skills"]
         .as_array()
@@ -328,6 +339,125 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
                 ));
             }
             Err(_) => return Some(format!("The skill `{name}` is not readable.")),
+        }
+    }
+    let kind = capsule["kind"].as_str().unwrap_or("skill");
+    let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+    if !manifest.path_hashes.is_empty() {
+        if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
+            return Some(if kind == "tool_chain" {
+                "Watched workspace files changed since this tool-chain capsule was compiled.".into()
+            } else {
+                "Watched workspace files changed since this capsule was compiled.".into()
+            });
+        }
+    } else if kind == "tool_chain"
+        && let Some(expected_tree) = capsule["tool_chain_tree_sha"]
+            .as_str()
+            .filter(|sha| !sha.is_empty())
+    {
+        match trace::workspace_tree_sha(workspace) {
+            Ok(now_tree) if now_tree == expected_tree => {}
+            Ok(_) => {
+                return Some(
+                    "The workspace tree changed since this tool-chain capsule was compiled.".into(),
+                );
+            }
+            Err(_) => {
+                return Some("The workspace tree could not be fingerprinted.".into());
+            }
+        }
+    }
+    let is_skill_path = |rel: &str| -> bool {
+        manifest
+            .skill_paths
+            .iter()
+            .any(|skill| db::path_matches(skill, rel))
+    };
+    if !manifest.path_hashes.contains_key(".") {
+        for rel in manifest
+            .manifest_files
+            .iter()
+            .chain(manifest.caller_files.iter())
+        {
+            let rel_norm = db::normalize_rel_path(rel);
+            if rel_norm.is_empty() || is_skill_path(&rel_norm) {
+                continue;
+            }
+            if !manifest_has_hashed_path(&manifest, &rel_norm)
+                && !workspace.join(&rel_norm).exists()
+            {
+                return Some(format!(
+                    "Watched dependency `{rel_norm}` is missing from workspace."
+                ));
+            }
+        }
+    }
+    let project_id = capsule["project_id"].as_str().unwrap_or("");
+    if manifest.ir_revision > 0 && !project_id.is_empty() {
+        let resolved_state = state
+            .map(Path::to_path_buf)
+            .or_else(|| infer_state_dir(capsule));
+        let latest_ir = resolved_state
+            .as_deref()
+            .map(|s| latest_ir_revision(s, project_id))
+            .unwrap_or_else(|| cached_ir_revision(project_id));
+        if latest_ir > manifest.ir_revision {
+            let has_unhashed_structural_dep = manifest
+                .manifest_files
+                .iter()
+                .chain(manifest.caller_files.iter())
+                .chain(manifest.ast_selectors.iter())
+                .chain(manifest.route_selectors.iter())
+                .chain(manifest.table_selectors.iter())
+                .map(|p| db::normalize_rel_path(p))
+                .filter(|rel| !rel.is_empty() && !is_skill_path(rel))
+                .any(|rel| {
+                    !manifest_has_hashed_path(&manifest, &rel) && !workspace.join(&rel).is_dir()
+                });
+            if has_unhashed_structural_dep {
+                return Some(
+                    "Project IR revision advanced and watched dependencies lack matching path hashes."
+                        .into(),
+                );
+            }
+            if let Some(ref state_dir) = resolved_state
+                && let Ok(Some(ir)) =
+                    crate::graph_ir::GraphIrStore::open_readonly_cached(state_dir, project_id)
+            {
+                let mut targets = Vec::new();
+                for rel in manifest
+                    .caller_files
+                    .iter()
+                    .chain(manifest.ast_selectors.iter())
+                    .chain(manifest.route_selectors.iter())
+                    .chain(manifest.table_selectors.iter())
+                {
+                    let rel_norm = db::normalize_rel_path(rel);
+                    if !rel_norm.is_empty() && !targets.contains(&rel_norm) {
+                        targets.push(rel_norm);
+                    }
+                }
+                if !targets.is_empty()
+                    && let Ok(now_callers) = ir.incoming_caller_files_for_paths(&targets)
+                {
+                    for caller in now_callers {
+                        let caller_norm = db::normalize_rel_path(&caller);
+                        if caller_norm.is_empty() || is_skill_path(&caller_norm) {
+                            continue;
+                        }
+                        if !manifest
+                            .caller_files
+                            .iter()
+                            .any(|known| db::path_matches(known, &caller_norm))
+                        {
+                            return Some(format!(
+                                "New IR caller `{caller_norm}` depends on watched target files since compilation."
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
     let runtimes = capsule["capabilities"]["runtimes"]
@@ -491,18 +621,25 @@ pub(super) fn record_ir_revision(project_id: &str, ir_revision: u64) {
     }
 }
 
-pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
-    if let Ok(guard) = ir_revisions().lock()
-        && let Some(&rev) = guard.get(project_id)
-        && rev > 0
-    {
-        return rev;
+pub(super) fn cached_ir_revision(project_id: &str) -> u64 {
+    if project_id.is_empty() {
+        return 0;
     }
-    crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
+    ir_revisions()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(project_id).copied())
+        .unwrap_or(0)
+}
+
+pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
+    let cached = cached_ir_revision(project_id);
+    let db_epoch = crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
         .ok()
         .flatten()
         .map(|ir| ir.current_write_epoch())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    cached.max(db_epoch)
 }
 
 #[derive(Clone)]
@@ -667,7 +804,9 @@ impl SkillCacheDomain {
         let Ok(workspace) = project_path(&self.runtime.store, &capsule) else {
             return Ok(capsule);
         };
-        let Some(reason) = staleness(&capsule, &workspace) else {
+        let Some(reason) =
+            staleness_in_state(Some(&self.runtime.store.state), &capsule, &workspace)
+        else {
             return Ok(capsule);
         };
         let id = capsule["capsule_id"].as_str().unwrap_or("").to_string();
@@ -2267,5 +2406,153 @@ mod tests {
                 .contains_key(&canon_warm)
         );
         let _ = package::remove(&warm);
+    }
+
+    #[test]
+    fn staleness_enforces_dependency_manifest_for_skill_and_toolchain_without_unrelated_false_positive()
+     {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("project");
+        let state = scratch.path().join("state");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join(".claude/skills/dep-check")).unwrap();
+        std::fs::write(
+            workspace.join(".claude/skills/dep-check/SKILL.md"),
+            "# Dep Check\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("composer.json"), "{\"name\":\"app\"}\n").unwrap();
+        std::fs::write(
+            workspace.join("src/Service.php"),
+            "<?php\nclass Service { public static function run() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("src/Unrelated.php"),
+            "<?php\nclass Unrelated { public function ping() { return 1; } }\n",
+        )
+        .unwrap();
+
+        let skill_dir = workspace.join(".claude/skills/dep-check");
+        let skill_tree = fingerprint::tree_sha256(&skill_dir).unwrap();
+        let store = SessionStore::open(&state).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&state, &project_id).unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        let base_rev = ir.current_write_epoch();
+
+        let artifact_dir = compile::artifact_dir(&store, &project_id, "cap-dep-skill", 1);
+        let warm_dir = artifact_dir.join("warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "dep-check", "description": "Check service"},
+            "source": {"skills": [{"name": "dep-check", "path": ".claude/skills/dep-check/SKILL.md", "tree_sha256": skill_tree.sha256}]}
+        }))
+        .unwrap();
+        let files = infra_skillcache::package::Files::new();
+        let pkg_sha = package::write_warm(&warm_dir, &cap, Some(b"# Dep Check\n"), &files).unwrap();
+        let env_fp = fingerprint::env_fingerprint(&fingerprint::runtime_versions(&[]));
+
+        let mut path_hashes = BTreeMap::new();
+        path_hashes.insert(
+            "composer.json".to_owned(),
+            trace::hash_workspace_target(&workspace.join("composer.json")),
+        );
+        path_hashes.insert(
+            "src/Service.php".to_owned(),
+            trace::hash_workspace_target(&workspace.join("src/Service.php")),
+        );
+        let manifest = db::ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/dep-check/SKILL.md".into()],
+            manifest_files: vec!["composer.json".into()],
+            ast_selectors: vec!["src/Service.php".into()],
+            caller_files: vec!["src/Service.php".into()],
+            ir_revision: base_rev,
+            verified_ns: 1,
+            path_hashes: path_hashes.clone(),
+            ..Default::default()
+        };
+        let mut capsule_row = json!({
+            "capsule_id": "cap-dep-skill",
+            "project_id": project_id,
+            "kind": "skill",
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "compile_rules_version": infra_skillcache::compile_rules::version(),
+            "env_fingerprint": env_fp,
+            "package_sha256": pkg_sha,
+            "artifact_dir": artifact_dir,
+            "capabilities": {"network": "none", "runtimes": []},
+            "skill_files": {
+                "skills": [{
+                    "name": "dep-check",
+                    "path": ".claude/skills/dep-check/SKILL.md",
+                    "tree_sha256": skill_tree.sha256,
+                    "taken_ns": skill_tree.taken_ns.to_string(),
+                    "files": skill_tree.files.iter().map(|f| json!({
+                        "path": f.path,
+                        "size": f.size,
+                        "mtime_ns": f.mtime_ns.to_string(),
+                    })).collect::<Vec<_>>(),
+                }]
+            },
+            "dependency_manifest": serde_json::to_value(&manifest).unwrap(),
+        });
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Editing an unrelated file bumps IR epoch, but must NOT falsely mark this capsule stale.
+        std::fs::write(
+            workspace.join("src/Unrelated.php"),
+            "<?php\nclass Unrelated { public function ping() { return 2; } }\n",
+        )
+        .unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        assert!(ir.current_write_epoch() > base_rev);
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Changing a watched manifest_file marks even a `Skill` capsule stale.
+        let orig_composer = std::fs::read(workspace.join("composer.json")).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{\"name\":\"changed\"}\n").unwrap();
+        assert!(staleness_in_state(Some(&state), &capsule_row, &workspace).is_some());
+        std::fs::write(workspace.join("composer.json"), orig_composer).unwrap();
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Adding a new caller in GraphIR referencing `Service` invalidates `caller_files`.
+        std::fs::write(
+            workspace.join("src/Controller.php"),
+            "<?php\nclass Controller { public function call() { Service::run(); } }\n",
+        )
+        .unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        let reason = staleness_in_state(Some(&state), &capsule_row, &workspace)
+            .expect("new incoming caller in IR must mark Skill capsule stale");
+        assert!(
+            reason.contains("src/Controller.php"),
+            "unexpected stale reason: {reason}"
+        );
+
+        // ToolChain with path_hashes also enforces manifest_files/caller_files directly.
+        capsule_row["kind"] = json!("tool_chain");
+        capsule_row["skill_files"] = json!({});
+        let _ = std::fs::remove_file(workspace.join("src/Controller.php"));
+        ir.sync_workspace(&workspace).unwrap();
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+        std::fs::remove_file(workspace.join("composer.json")).unwrap();
+        assert!(staleness_in_state(Some(&state), &capsule_row, &workspace).is_some());
+
+        let _ = package::remove(&warm_dir);
     }
 }

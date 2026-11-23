@@ -12,23 +12,24 @@
 use crate::{
     HarnessError, Result,
     commands::ResolvedCommand,
-    skillcache::{compile::Runtime, db, settings, staleness, trace},
+    skillcache::{compile::Runtime, db, settings, staleness_in_state, trace},
     store::SessionStore,
 };
-use infra_host::provider::{Launch, LaunchAdapter, PreparedCommand};
+use infra_host::{
+    provider::{Launch, LaunchAdapter, PreparedCommand},
+    sandbox::Spec,
+};
 use infra_skillcache::{
-    Form, Step,
-    capsule::{CapsuleKind, Network},
-    env_filter, executor, package, prompt, state, trace as sc_trace,
+    Form, Step, capsule::Network, env_filter, package, prompt, state, trace as sc_trace,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -71,6 +72,8 @@ pub struct Warm {
     pub bin: Option<PathBuf>,
     pub package: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
+    pub(crate) engine: Option<PathBuf>,
+    pub(crate) codex: Option<PathBuf>,
     /// True when the active verified capsule is pure deterministic read-only (`Step::Program` only)
     /// and eligible for direct in-process execution without paying the ~25k prefix LLM turn.
     pub direct_dispatch: bool,
@@ -96,6 +99,8 @@ impl Warm {
             bin: None,
             package: None,
             state_dir: Some(state_dir),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -380,7 +385,7 @@ fn is_read_only_capsule(capsule_row: &Value) -> bool {
 }
 
 /// Among several active capsules of one skill, the one whose description
-/// matches the request best. Used only behind [`RETRIEVAL_BY_MU`].
+/// matches the request best. Used only behind [`RETRIEVAL_BY_MU`] and tool-chain ranking.
 fn best_by_description(
     store: &SessionStore,
     project_id: &str,
@@ -390,6 +395,7 @@ fn best_by_description(
     let words = request
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| word.chars().count() >= 3)
+        .filter(|word| !is_mu_stopword(&word.to_ascii_lowercase()))
         .take(24)
         .map(|word| format!("\"{}\"", word.replace('"', "")))
         .collect::<Vec<_>>();
@@ -582,32 +588,119 @@ fn decide_raw_trace(
         bin: None,
         package: None,
         state_dir: None,
+        engine: None,
+        codex: None,
         direct_dispatch: false,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
     }))
 }
 
-fn message_matches_mu(message: &str, capsule: &Value, hint: Option<&str>) -> bool {
+fn is_mu_stopword(tok: &str) -> bool {
+    matches!(
+        tok,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "this"
+            | "that"
+            | "are"
+            | "was"
+            | "were"
+            | "can"
+            | "could"
+            | "would"
+            | "should"
+            | "into"
+            | "onto"
+            | "about"
+            | "please"
+            | "how"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "you"
+            | "your"
+            | "our"
+            | "out"
+            | "not"
+            | "but"
+            | "all"
+            | "any"
+            | "has"
+            | "have"
+            | "had"
+            | "did"
+            | "does"
+            | "its"
+            | "let"
+            | "use"
+            | "using"
+            | "via"
+    )
+}
+
+fn tokenize_mu(text: &str) -> BTreeSet<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|tok| tok.len() >= 3)
+        .map(|tok| tok.to_ascii_lowercase())
+        .filter(|tok| !is_mu_stopword(tok))
+        .collect()
+}
+
+fn mu_tokens_for_capsule(capsule: &Value) -> BTreeSet<String> {
     let mu_name = capsule["mu"]["name"].as_str().unwrap_or("");
+    let desc = capsule["mu"]["description"].as_str().unwrap_or("");
+    tokenize_mu(&format!("{mu_name} {desc}"))
+}
+
+fn capsule_lexical_f1_millionths(msg_tokens: &BTreeSet<String>, capsule: &Value) -> u64 {
+    if msg_tokens.is_empty() {
+        return 0;
+    }
+    let mu_tokens = mu_tokens_for_capsule(capsule);
+    if mu_tokens.is_empty() {
+        return 0;
+    }
+    let overlap = msg_tokens
+        .iter()
+        .filter(|tok| mu_tokens.contains(*tok))
+        .count() as u64;
+    let denom = (msg_tokens.len() + mu_tokens.len()) as u64;
+    (2 * overlap * 1_000_000) / denom.max(1)
+}
+
+fn message_matches_mu(message: &str, capsule: &Value, hint: Option<&str>) -> bool {
+    let mu_name = capsule["mu"]["name"].as_str().unwrap_or("").trim();
     if let Some(hint) = hint
         && hint.eq_ignore_ascii_case(mu_name)
     {
         return true;
     }
-    let tokenize = |text: &str| -> std::collections::BTreeSet<String> {
-        text.split(|ch: char| !ch.is_ascii_alphanumeric())
-            .filter(|tok| tok.len() >= 3)
-            .map(|tok| tok.to_ascii_lowercase())
-            .collect()
-    };
-    let msg_tokens = tokenize(message);
+    if !mu_name.is_empty() && message.trim().eq_ignore_ascii_case(mu_name) {
+        return true;
+    }
+    let msg_tokens = tokenize_mu(message);
     if msg_tokens.is_empty() {
         return false;
     }
-    let desc = capsule["mu"]["description"].as_str().unwrap_or("");
-    let mu_tokens = tokenize(&format!("{mu_name} {desc}"));
-    msg_tokens.iter().any(|tok| mu_tokens.contains(tok))
+    let mu_tokens = mu_tokens_for_capsule(capsule);
+    if mu_tokens.is_empty() {
+        return false;
+    }
+    let overlap = msg_tokens
+        .iter()
+        .filter(|tok| mu_tokens.contains(*tok))
+        .count();
+    let union = msg_tokens.len() + mu_tokens.len() - overlap;
+    // Require multi-token overlap, >=60% query-token precision, and >=33.3% Jaccard similarity
+    // so broad edit requests sharing 1-2 generic tokens cannot hijack a specialized tool-chain.
+    overlap >= 2 && overlap * 5 >= msg_tokens.len() * 3 && overlap * 3 >= union
 }
 
 fn decide_toolchain_candidate(
@@ -681,13 +774,41 @@ fn decide_toolchain_candidate(
     }
     let fresh: Vec<Value> = eligible
         .iter()
-        .filter(|capsule| staleness(capsule, workspace).is_none())
+        .filter(|capsule| {
+            staleness_in_state(Some(&runtime.store.state), capsule, workspace).is_none()
+        })
         .cloned()
         .collect();
     let pool = if fresh.is_empty() { &eligible } else { &fresh };
     let chosen = match pool.len() {
         1 => pool[0].clone(),
-        _ => best_by_health_and_recency(&runtime.store, pool),
+        _ => {
+            let ids = pool
+                .iter()
+                .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
+                .collect::<Vec<_>>();
+            if let Some(best_id) = best_by_description(&runtime.store, project_id, &ids, message)
+                && let Some(found) = pool
+                    .iter()
+                    .find(|capsule| capsule["capsule_id"] == best_id.as_str())
+                    .cloned()
+            {
+                found
+            } else {
+                let msg_tokens = tokenize_mu(message);
+                let max_score = pool
+                    .iter()
+                    .map(|c| capsule_lexical_f1_millionths(&msg_tokens, c))
+                    .max()
+                    .unwrap_or(0);
+                let top_scored: Vec<Value> = pool
+                    .iter()
+                    .filter(|c| capsule_lexical_f1_millionths(&msg_tokens, c) == max_score)
+                    .cloned()
+                    .collect();
+                best_by_health_and_recency(&runtime.store, &top_scored)
+            }
+        }
     };
     Ok((chosen, String::new()))
 }
@@ -984,7 +1105,7 @@ fn decide_for(
         (chosen, skill_path)
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
-    if let Some(reason) = staleness(&chosen, workspace) {
+    if let Some(reason) = staleness_in_state(Some(&runtime.store.state), &chosen, workspace) {
         if generation.is_some() {
             if let Ok(db) = runtime.store.connection() {
                 let _ = db::set_capsule_status(&db, &capsule_id, "stale", Some(&reason));
@@ -1021,6 +1142,8 @@ fn decide_for(
     } else {
         block(&stored, skill_label)
     };
+    let engine = runtime.engine.clone();
+    let codex = runtime.codex_executable();
     let eval_arm = arm.map(String::from);
     let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
         // A written procedure is read, and a preview stages nothing.
@@ -1034,6 +1157,8 @@ fn decide_for(
             bin: None,
             package: None,
             state_dir: None,
+            engine,
+            codex,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -1044,13 +1169,14 @@ fn decide_for(
         .capsule
         .plan()
         .all(|step| matches!(step, Step::Program { .. }));
+    let explicit_direct = session["skillcache"]["direct_dispatch"].as_bool() == Some(true);
     let direct_dispatch = arm.is_none()
         && !agent_only
         && all_read_only
         && all_program_steps
         && !stored.capsule.programs.is_empty()
         && stored.capsule.bindings.is_empty()
-        && (plan_only || stored.capsule.kind == CapsuleKind::ToolChain);
+        && (plan_only || explicit_direct);
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
         let state_dir = runtime
@@ -1093,6 +1219,8 @@ fn decide_for(
         bin: Some(bin),
         package: Some(warm_dir),
         state_dir: Some(state_dir),
+        engine,
+        codex,
         direct_dispatch,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
@@ -1535,14 +1663,96 @@ pub fn format_direct_output(capsule_name: &str, answer: &Value) -> String {
     serde_json::to_string_pretty(answer).unwrap_or_else(|_| answer.to_string())
 }
 
-/// Executes an eligible deterministic read-only capsule directly via `executor::execute`,
-/// avoiding the ~25k prefix LLM loop while falling back cleanly on error, missing bindings,
-/// residual steps, or program failure.
+struct DirectSandboxDir(PathBuf);
+impl Drop for DirectSandboxDir {
+    fn drop(&mut self) {
+        package::release(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn push_unique_path(list: &mut Vec<PathBuf>, path: PathBuf) {
+    if !list.contains(&path) {
+        list.push(path);
+    }
+}
+
+struct DirectSandboxInputs<'a> {
+    engine: &'a super::gates::Engine,
+    package_dir: &'a Path,
+    workspace: &'a Path,
+    state_dir: &'a Path,
+    sandbox_ws: &'a Path,
+    protected: &'a [PathBuf],
+    stored: &'a package::Package,
+    all_read_only: bool,
+}
+
+fn build_direct_sandbox_spec(
+    inputs: DirectSandboxInputs<'_>,
+) -> std::result::Result<(String, PathBuf, PathBuf, PathBuf, Spec), String> {
+    let canon = |path: &Path| {
+        infra_core::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))
+    };
+    let canon_pkg = canon(inputs.package_dir)?;
+    let canon_ws = canon(inputs.workspace)?;
+    let canon_state = canon(inputs.state_dir)?;
+    let canon_sandbox_ws = canon(inputs.sandbox_ws)?;
+    let mut canon_protected = Vec::with_capacity(inputs.protected.len());
+    for path in inputs.protected {
+        canon_protected.push(canon(path)?);
+    }
+    let (executable, extra_readable) = inputs
+        .engine
+        .command(&canon_sandbox_ws)
+        .map_err(|err| err.to_string())?;
+    let mut readable = Vec::new();
+    for path in extra_readable {
+        push_unique_path(&mut readable, canon(&path)?);
+    }
+    push_unique_path(&mut readable, canon_pkg.clone());
+    let mut writable = vec![canon_state.clone()];
+    if inputs.all_read_only {
+        push_unique_path(&mut readable, canon_ws.clone());
+    } else {
+        push_unique_path(&mut writable, canon_ws.clone());
+    }
+    let spec = Spec {
+        workspace: canon_sandbox_ws.clone(),
+        target: canon_sandbox_ws,
+        protected: canon_protected,
+        readable,
+        accounts: writable,
+        runtime: super::gates::gate_runtime_dirs(&inputs.stored.capsule.capabilities.runtimes),
+        codex: inputs.engine.codex.clone(),
+        evidence: None,
+        network: inputs.stored.capsule.capabilities.network == Network::Required,
+    };
+    Ok((executable, canon_pkg, canon_ws, canon_state, spec))
+}
+
+/// Executes an eligible deterministic read-only capsule directly inside
+/// `infra_host::sandbox::gate`, avoiding the ~25k prefix LLM loop while falling
+/// back cleanly on sandbox refusal, error, missing bindings, residual steps, or program failure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn try_direct_execute(
     warm: &Warm,
     workspace: &Path,
     generation: &str,
     supplied_bindings: Option<&Value>,
+) -> DirectDispatchOutcome {
+    try_direct_execute_with(warm, workspace, generation, supplied_bindings, &[], None)
+}
+
+/// Executes an eligible deterministic read-only capsule inside `infra_host::sandbox::gate`,
+/// passing optional protected boundary paths and cancellation signal.
+pub(crate) fn try_direct_execute_with(
+    warm: &Warm,
+    workspace: &Path,
+    generation: &str,
+    supplied_bindings: Option<&Value>,
+    protected: &[PathBuf],
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> DirectDispatchOutcome {
     if !warm.direct_dispatch {
         return DirectDispatchOutcome::Fallback {
@@ -1565,12 +1775,12 @@ pub(crate) fn try_direct_execute(
             };
         }
     };
-    if !stored.capsule.programs.iter().all(|p| p.read_only)
-        || !stored
-            .capsule
-            .plan()
-            .all(|step| matches!(step, Step::Program { .. }))
-    {
+    let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_program_steps = stored
+        .capsule
+        .plan()
+        .all(|step| matches!(step, Step::Program { .. }));
+    if !all_read_only || !all_program_steps {
         return DirectDispatchOutcome::Fallback {
             reason: "requires_agent".into(),
             program_failed: false,
@@ -1582,17 +1792,152 @@ pub(crate) fn try_direct_execute(
             program_failed: false,
         };
     }
-    let state_file = state_dir.join("plan-state.json");
-    let exec_session = executor::Session {
-        package: &stored,
-        workspace,
-        state_file: &state_file,
-        generation,
+    let default_cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.unwrap_or(&default_cancel);
+    if cancel_flag.load(Ordering::Acquire) {
+        return DirectDispatchOutcome::Fallback {
+            reason: "cancelled".into(),
+            program_failed: false,
+        };
+    }
+    let sandbox_base = state_dir.parent().unwrap_or(state_dir);
+    let sandbox_root = sandbox_base.join(format!("direct-sandbox-{}", crate::store::hexid()));
+    let _sandbox_cleanup = DirectSandboxDir(sandbox_root.clone());
+    let sandbox_ws = sandbox_root.join("work");
+    let scratch = sandbox_ws.join(".harness-tmp");
+    if let Err(err) = infra_core::fs::ensure_directory(&scratch, true)
+        .and_then(|_| infra_core::fs::ensure_directory(state_dir, true))
+    {
+        return DirectDispatchOutcome::Fallback {
+            reason: format!("sandbox_unavailable: {err}"),
+            program_failed: false,
+        };
+    }
+    let engine = super::gates::Engine {
+        path: warm.engine.clone(),
+        codex: warm.codex.clone(),
     };
-    match executor::execute(
-        &exec_session,
-        executor::Command::Run(supplied_bindings.cloned()),
+    let (executable, canon_pkg, canon_ws, canon_state, spec) =
+        match build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir,
+            workspace,
+            state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected,
+            stored: &stored,
+            all_read_only,
+        }) {
+            Ok(parts) => parts,
+            Err(err) => {
+                return DirectDispatchOutcome::Fallback {
+                    reason: format!("sandbox_unavailable: {err}"),
+                    program_failed: false,
+                };
+            }
+        };
+    let canon_scratch = match infra_core::fs::canonicalize(&scratch) {
+        Ok(path) => path,
+        Err(err) => {
+            return DirectDispatchOutcome::Fallback {
+                reason: format!("sandbox_unavailable: {err}"),
+                program_failed: false,
+            };
+        }
+    };
+    let state_file = canon_state.join("plan-state.json");
+    let environment = super::gates::sandbox_environment(
+        &engine,
+        &canon_pkg,
+        &canon_ws,
+        &canon_scratch,
+        Some(&state_file),
+        generation,
+    );
+    let (argv, stdin_bytes) = if let Some(bindings) = supplied_bindings {
+        match serde_json::to_vec(bindings) {
+            Ok(bytes) => (
+                vec![executable, "skillcache".into(), "run".into(), "-".into()],
+                bytes,
+            ),
+            Err(err) => {
+                return DirectDispatchOutcome::Fallback {
+                    reason: format!("invalid_bindings: {err}"),
+                    program_failed: false,
+                };
+            }
+        }
+    } else {
+        (
+            vec![executable, "skillcache".into(), "run".into()],
+            Vec::new(),
+        )
+    };
+    let seconds = stored
+        .capsule
+        .programs
+        .iter()
+        .map(|p| p.timeout_seconds)
+        .sum::<u64>()
+        .saturating_add(15);
+    let ran = match super::gates::run_sandboxed_with_input(
+        &spec,
+        &argv,
+        &environment,
+        seconds,
+        &stdin_bytes,
+        cancel_flag,
     ) {
+        Ok(ran) => ran,
+        Err(err) => {
+            return DirectDispatchOutcome::Fallback {
+                reason: format!("sandbox_unavailable: {err}"),
+                program_failed: false,
+            };
+        }
+    };
+    if let Some(stopped) = ran.stopped {
+        return DirectDispatchOutcome::Fallback {
+            reason: stopped.to_owned(),
+            program_failed: true,
+        };
+    }
+    let parsed = infra_core::strict_json::parse(
+        String::from_utf8_lossy(&ran.stdout).trim().as_bytes(),
+        8 * 1024 * 1024,
+        32,
+        200_000,
+    );
+    if ran.code != Some(0) {
+        if let Ok(answer) = parsed {
+            let code = answer["code"].as_str().unwrap_or("");
+            let status = answer["status"].as_str().unwrap_or("");
+            let program_failed = code == "program_failed" || status == "program_failed";
+            let reason = answer["message"]
+                .as_str()
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| super::gates::detail(&ran.stderr));
+            return DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            };
+        }
+        let code_desc = ran
+            .code
+            .map_or_else(|| "signal".to_owned(), |c| format!("exit_{c}"));
+        let stderr_detail = super::gates::detail(&ran.stderr);
+        let reason = if stderr_detail.is_empty() {
+            format!("sandbox_{code_desc}")
+        } else {
+            format!("sandbox_{code_desc}: {stderr_detail}")
+        };
+        return DirectDispatchOutcome::Fallback {
+            reason,
+            program_failed: false,
+        };
+    }
+    match parsed {
         Ok(answer) => {
             let status = answer["status"].as_str().unwrap_or("");
             let no_failures = answer["failed"].as_array().is_none_or(Vec::is_empty);
@@ -1600,10 +1945,12 @@ pub(crate) fn try_direct_execute(
                 let formatted = format_direct_output(&warm.name, &answer);
                 return DirectDispatchOutcome::Completed { answer, formatted };
             }
-            let program_failed = status == "program_failed"
-                || !answer["failed"].as_array().is_none_or(Vec::is_empty);
+            let program_failed =
+                status == "program_failed" || answer["code"] == "program_failed" || !no_failures;
             let reason = if status == "program_failed" && !answer["diagnostics"].is_null() {
                 format!("program_failed: {}", answer["diagnostics"])
+            } else if let Some(msg) = answer["message"].as_str().filter(|s| !s.is_empty()) {
+                msg.to_owned()
             } else {
                 status.to_owned()
             };
@@ -1612,10 +1959,17 @@ pub(crate) fn try_direct_execute(
                 program_failed,
             }
         }
-        Err(refusal) => DirectDispatchOutcome::Fallback {
-            reason: refusal.message,
-            program_failed: refusal.code == "program_failed",
-        },
+        Err(_) => {
+            let stderr_detail = super::gates::detail(&ran.stderr);
+            DirectDispatchOutcome::Fallback {
+                reason: if stderr_detail.is_empty() {
+                    "invalid_sandbox_output".into()
+                } else {
+                    format!("invalid_sandbox_output: {stderr_detail}")
+                },
+                program_failed: false,
+            }
+        }
     }
 }
 
@@ -1899,6 +2253,8 @@ mod tests {
             bin: Some(PathBuf::from("/state/skillcache/bin/abc")),
             package: Some(PathBuf::from("/state/warm")),
             state_dir: Some(PathBuf::from("/state/skillcache/sessions/s/g")),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -2030,6 +2386,8 @@ mod tests {
                 bin: None,
                 package: None,
                 state_dir: None,
+                engine: None,
+                codex: None,
                 direct_dispatch: false,
                 seen: AtomicU64::new(0),
                 seen_changes: AtomicU64::new(0),
@@ -2070,6 +2428,8 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -2325,6 +2685,8 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -3051,6 +3413,8 @@ mod tests {
             bin: None,
             package: Some(warm_dir.clone()),
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -3083,6 +3447,8 @@ mod tests {
             bin: None,
             package: Some(warm_dir.clone()),
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -3138,6 +3504,8 @@ mod tests {
             bin: None,
             package: Some(hybrid_instr_dir.clone()),
             state_dir: Some(hybrid_instr_state),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -3165,7 +3533,8 @@ mod tests {
         assert_eq!(thin.ledger["thin_formatter"], true);
         assert!(thin.text.len() < 512);
 
-        // Failing read-only program falls back cleanly with program_failed = true.
+        // Failing read-only program falls back cleanly inside `sandbox::gate` with `program_failed = true`
+        // (and never falls back to unconfined execution when sandbox/engine fails).
         let bad_warm_dir = dir.path().join("bad-warm");
         let bad_state_dir = dir.path().join("bad-state");
         std::fs::create_dir_all(&bad_state_dir).unwrap();
@@ -3175,15 +3544,68 @@ mod tests {
             b"import sys\nsys.exit(2)\n".to_vec(),
         );
         package::write_warm(&bad_warm_dir, &cap, None, &bad_files).unwrap();
-        let bad_warm = Warm {
-            package: Some(bad_warm_dir),
-            state_dir: Some(bad_state_dir),
-            ..warm
+        let missing_engine_warm = Warm {
+            capsule_id: warm.capsule_id.clone(),
+            form: warm.form,
+            eval_arm: warm.eval_arm.clone(),
+            name: warm.name.clone(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(bad_warm_dir.clone()),
+            state_dir: Some(bad_state_dir.clone()),
+            engine: Some(dir.path().join("nonexistent-engine")),
+            codex: None,
+            direct_dispatch: true,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
         };
-        match try_direct_execute(&bad_warm, &workspace, "g-fail", None) {
-            DirectDispatchOutcome::Fallback { program_failed, .. } => assert!(program_failed),
+        match try_direct_execute(&missing_engine_warm, &workspace, "g-noeng", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            } => {
+                assert!(
+                    reason.contains("sandbox_unavailable") || reason.contains("sandbox_"),
+                    "missing engine must fail closed without unconfined execution: {reason}"
+                );
+                assert!(!program_failed);
+            }
             DirectDispatchOutcome::Completed { .. } => {
-                panic!("expected fallback when direct execution failed");
+                panic!("missing engine must not complete unconfined");
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mock_dir = dir.path().join("mock-engine-bin");
+            std::fs::create_dir_all(&mock_dir).unwrap();
+            let mock_engine = mock_dir.join("infra-engine");
+            std::fs::write(
+                &mock_engine,
+                "#!/bin/sh\necho '{\"status\":\"program_failed\",\"diagnostics\":{\"reason\":\"nonzero_exit\",\"attempts\":1}}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&mock_engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let bad_warm = Warm {
+                package: Some(bad_warm_dir),
+                state_dir: Some(bad_state_dir),
+                engine: Some(mock_engine),
+                ..warm
+            };
+            match try_direct_execute(&bad_warm, &workspace, "g-fail", None) {
+                DirectDispatchOutcome::Fallback {
+                    reason,
+                    program_failed,
+                } => {
+                    assert!(
+                        program_failed || reason.starts_with("sandbox_unavailable:"),
+                        "unexpected fallback reason={reason} program_failed={program_failed}"
+                    );
+                }
+                DirectDispatchOutcome::Completed { .. } => {
+                    panic!("expected fallback when direct execution failed");
+                }
             }
         }
         let _ = package::remove(&hybrid_instr_dir);
@@ -3225,6 +3647,8 @@ mod tests {
             bin: None,
             package: Some(param_cap_dir.clone()),
             state_dir: Some(dir.path().join("param-direct-state")),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
@@ -3346,5 +3770,387 @@ mod tests {
             other => panic!("expected normal warm hit, got {}", reason(&other)),
         }
         let _ = package::remove(&param_cap_dir);
+    }
+
+    #[test]
+    fn message_matches_mu_rejects_one_token_or_broad_hijack_and_ranks_toolchains() {
+        let cap_routes = json!({
+            "mu": {"name": "check-php-routes", "description": "Check php routes"}
+        });
+        assert!(!message_matches_mu("refactor routes", &cap_routes, None));
+        assert!(!message_matches_mu(
+            "fix the bug in php routes",
+            &cap_routes,
+            None
+        ));
+        assert!(message_matches_mu("check php routes", &cap_routes, None));
+        assert!(message_matches_mu(
+            "please check php routes",
+            &cap_routes,
+            None
+        ));
+        assert!(message_matches_mu("check-php-routes", &cap_routes, None));
+        assert!(message_matches_mu(
+            "anything",
+            &cap_routes,
+            Some("check-php-routes")
+        ));
+
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&[]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": ""});
+            for (cid, name, desc) in [
+                (
+                    "cap-broad",
+                    "check-routes-broad",
+                    "Check routes middleware controllers migrations tables",
+                ),
+                ("cap-exact", "check-routes", "Check routes"),
+            ] {
+                db::begin_capsule(&db, cid, cid, &project_id, "s", "g", &tc_ref, None).unwrap();
+                db::activate_capsule(
+                    &db,
+                    &db::Qualified {
+                        capsule_id: cid,
+                        mu_name: name,
+                        mu_description: desc,
+                        form: "textual",
+                        capsule_sha256: "a",
+                        package_sha256: "b",
+                        skill_files: &json!({}),
+                        env_fingerprint: &env_fp,
+                        engine_digest: &rt.engine_digest(),
+                        artifact_dir: "/tmp/nonexistent",
+                        capabilities: &json!({"network": "none", "runtimes": []}),
+                    },
+                )
+                .unwrap();
+                db::set_capsule_kind_meta(&db, cid, "tool_chain", "").unwrap();
+                db::set_capsule_read_only(&db, cid, true).unwrap();
+            }
+        }
+        let session = json!({"project_id": project_id});
+        let (chosen, _) = decide_toolchain_candidate(
+            &rt,
+            &session,
+            "codex",
+            None,
+            false,
+            &workspace,
+            "check routes",
+        )
+        .unwrap_or_else(|d| panic!("matching tool-chain expected: {}", reason(&d)));
+        assert_eq!(chosen["capsule_id"], "cap-exact");
+    }
+
+    #[test]
+    fn toolchain_in_edit_mode_requires_explicit_direct_dispatch_opt_in() {
+        let dir = crate::skillcache::test_support::scratch();
+        let workspace = dir.path().join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}\n").unwrap();
+        let tree_sha = trace::workspace_tree_sha(&workspace).unwrap();
+        let warm_dir = dir.path().join("caps/cap-tc-edit/warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-app-routes", "description": "Inspect app routes"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert(
+            "programs/scan/main.py",
+            b"print('{\"status\": \"complete\", \"result\": {\"summary\": \"ok\"}}')\n".to_vec(),
+        );
+        let pkg_sha = package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+        let loaded = package::load(&warm_dir).unwrap();
+
+        let store = SessionStore::open(&dir.path().join("store")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&["python3".into()]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": &tree_sha});
+            db::begin_capsule(
+                &db,
+                "cap-tc-edit",
+                "cmp-tc-edit",
+                &project_id,
+                "s",
+                "g",
+                &tc_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-tc-edit",
+                    mu_name: "inspect-app-routes",
+                    mu_description: "Inspect app routes",
+                    form: "hybrid",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: &rt.engine_digest(),
+                    artifact_dir: warm_dir.parent().unwrap().to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-tc-edit", "tool_chain", &tree_sha).unwrap();
+            db::set_capsule_read_only(&db, "cap-tc-edit", true).unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-tc-edit", 1, gate, true, &json!({"passed": true}))
+                    .unwrap();
+            }
+        }
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect app routes".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let edit_default = json!({
+            "id": "s-edit",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(
+            &rt,
+            &edit_default,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-edit"),
+        ) {
+            Decision::Hit(decided) => assert!(
+                !decided.direct_dispatch,
+                "ToolChain in edit mode must not set direct_dispatch=true without opt-in"
+            ),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let edit_opt_in = json!({
+            "id": "s-edit-opt",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true, "direct_dispatch": true},
+        });
+        match decide_for(
+            &rt,
+            &edit_opt_in,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-opt"),
+        ) {
+            Decision::Hit(decided) => assert!(
+                decided.direct_dispatch,
+                "explicit direct_dispatch opt-in should enable direct_dispatch in edit mode"
+            ),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let plan_mode = json!({
+            "id": "s-plan",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "plan",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(
+            &rt,
+            &plan_mode,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-plan"),
+        ) {
+            Decision::Hit(decided) => assert!(decided.direct_dispatch),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let _ = package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn build_direct_sandbox_spec_enforces_network_ro_workspace_and_protected_overlap() {
+        let dir = crate::skillcache::test_support::scratch();
+        let workspace = dir.path().join("workspace");
+        let pkg_dir = dir.path().join("warm");
+        let state_dir = dir.path().join("state");
+        let sandbox_ws = dir.path().join("sandbox/work");
+        let scratch = sandbox_ws.join(".harness-tmp");
+        let protected_dir = dir.path().join("protected-src");
+        let engine_file = dir.path().join("engine-bin/infra-engine");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        std::fs::create_dir_all(engine_file.parent().unwrap()).unwrap();
+        std::fs::write(&engine_file, b"#!/bin/sh\n").unwrap();
+
+        let cap_net = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "net-check", "description": "Net check"},
+            "source": {"skills": [{"name": "s", "path": ".agents/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "required", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/scan/main.py", b"print('{}')\n".to_vec());
+        package::write_warm(&pkg_dir, &cap_net, None, &files).unwrap();
+        let loaded = package::load(&pkg_dir).unwrap();
+
+        let engine = super::super::gates::Engine {
+            path: Some(engine_file),
+            codex: None,
+        };
+        let canon_pkg = infra_core::fs::canonicalize(&pkg_dir).unwrap();
+        let canon_ws = infra_core::fs::canonicalize(&workspace).unwrap();
+        let canon_state = infra_core::fs::canonicalize(&state_dir).unwrap();
+        let canon_scratch = infra_core::fs::canonicalize(&scratch).unwrap();
+        let canon_prot = infra_core::fs::canonicalize(&protected_dir).unwrap();
+
+        let (_, pkg, ws, state, spec_ro) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: std::slice::from_ref(&protected_dir),
+            stored: &loaded,
+            all_read_only: true,
+        })
+        .unwrap();
+        assert_eq!(pkg, canon_pkg);
+        assert_eq!(ws, canon_ws);
+        assert_eq!(state, canon_state);
+        assert!(spec_ro.network);
+        assert!(spec_ro.readable.contains(&canon_pkg));
+        assert!(spec_ro.readable.contains(&canon_ws));
+        assert_eq!(spec_ro.accounts, vec![canon_state.clone()]);
+        assert_eq!(spec_ro.protected, vec![canon_prot]);
+
+        let (_, _, _, _, spec_rw) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: &[],
+            stored: &loaded,
+            all_read_only: false,
+        })
+        .unwrap();
+        assert!(!spec_rw.readable.contains(&canon_ws));
+        assert!(spec_rw.accounts.contains(&canon_ws));
+
+        // Overlapping `protected` with `workspace` must be rejected by `sandbox::gate`.
+        let (_, _, _, _, overlap_spec) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: std::slice::from_ref(&workspace),
+            stored: &loaded,
+            all_read_only: true,
+        })
+        .unwrap();
+        let overlap_err = infra_host::sandbox::gate(
+            &overlap_spec,
+            &["infra-engine".into(), "skillcache".into(), "run".into()],
+        )
+        .expect_err("protected overlapping workspace must fail closed");
+        assert_eq!(overlap_err.code, "forbidden");
+
+        let env = super::super::gates::sandbox_environment(
+            &engine,
+            &canon_pkg,
+            &canon_ws,
+            &canon_scratch,
+            Some(&canon_state.join("plan-state.json")),
+            "g-env",
+        );
+        assert_eq!(
+            env.get("HOME").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("TMPDIR").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        let _ = package::remove(&pkg_dir);
     }
 }

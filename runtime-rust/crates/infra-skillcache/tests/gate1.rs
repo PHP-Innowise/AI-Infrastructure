@@ -754,3 +754,45 @@ fn gate1_allows_parameterized_multi_call_helper_reuse() {
     let report = gate(&cap, &pkg, None);
     assert!(report.passed, "{:?}", report.violations);
 }
+
+#[test]
+fn gate1_validates_allow_ignored_and_rejects_sensitive_or_traversal_entries() {
+    let valid = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "mu": {"name": "allow-dist", "description": "Read dist artifacts"},
+        "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+        "capabilities": {"network": "none", "runtimes": ["python3"], "allow_ignored": ["dist", "build"]},
+        "bindings": [],
+        "programs": [{
+            "id": "read_dist",
+            "entry": ["python3", "programs/read_dist/main.py"],
+            "inputs": [],
+            "outputs": [],
+            "check": ["python3", "programs/read_dist/main.py", "--check"],
+            "timeout_seconds": 30,
+            "read_only": true
+        }],
+        "steps": [{"kind": "program", "program": "read_dist"}],
+        "verification": []
+    });
+    let mut pkg = Files::new();
+    pkg.insert("programs/read_dist/main.py", b"print('ok')\n".to_vec());
+    let report = gate(&valid, &pkg, None);
+    assert!(report.passed, "{:?}", report.violations);
+
+    for bad_list in [
+        json!([".git"]),
+        json!(["../dist"]),
+        json!(["sub/dir"]),
+        json!(["dist", "dist"]),
+    ] {
+        let mut bad = valid.clone();
+        bad["capabilities"]["allow_ignored"] = bad_list.clone();
+        let report = gate(&bad, &pkg, None);
+        assert!(
+            !report.passed,
+            "expected allow_ignored {bad_list} to be rejected"
+        );
+    }
+}

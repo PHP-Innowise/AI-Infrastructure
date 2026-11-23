@@ -161,6 +161,17 @@ impl Stand {
             .env("SERVICE_CREDENTIAL", "not-for-programs")
             .env("SUDO_PASSWD", "not-for-programs")
             .env("OAUTH_HEADER", "not-for-programs")
+            .env("DATABASE_URL", "postgres://user:pass@host/db")
+            .env("REDIS_URI", "redis://secret@host")
+            .env("SENTRY_DSN", "https://key@sentry.invalid/1")
+            .env("PGPASSFILE", "/tmp/.pgpass")
+            .env("JWT", "eyJhbGciOiJIUzI1NiJ9")
+            .env("HTTP_BEARER", "bearer-secret")
+            .env("SESSION_COOKIE", "sid=secret")
+            .env("PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")
+            .env("KUBECONFIG", "/tmp/kubeconfig")
+            .env("NETRC", "/tmp/.netrc")
+            .env("DOCKER_CONFIG", "/tmp/.docker")
             .env("FIXTURE_PLAIN", "kept")
             .stdin(Stdio::null());
         command
@@ -456,6 +467,17 @@ fn executor_persists_state_before_program() {
         "SERVICE_CREDENTIAL",
         "SUDO_PASSWD",
         "OAUTH_HEADER",
+        "DATABASE_URL",
+        "REDIS_URI",
+        "SENTRY_DSN",
+        "PGPASSFILE",
+        "JWT",
+        "HTTP_BEARER",
+        "SESSION_COOKIE",
+        "PRIVATE_KEY",
+        "KUBECONFIG",
+        "NETRC",
+        "DOCKER_CONFIG",
         "SKILLCACHE_STATE_FILE",
         "SKILLCACHE_GENERATION",
     ] {

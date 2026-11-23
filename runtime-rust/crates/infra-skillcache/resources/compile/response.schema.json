@@ -45,7 +45,8 @@
           "required": ["network", "runtimes"],
           "properties": {
             "network": {"type": "string", "enum": ["none", "required"]},
-            "runtimes": {"type": "array", "items": {"type": "string"}}
+            "runtimes": {"type": "array", "items": {"type": "string"}},
+            "allow_ignored": {"type": "array", "items": {"type": "string"}}
           }
         },
         "bindings": {
