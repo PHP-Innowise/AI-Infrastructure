@@ -71,16 +71,26 @@ pub(crate) fn note(mode: &str, provider: &str, eligible: bool) -> String {
         return "SkillCache applies to ordinary sessions: not to Fleet, Clash, SDD, plan or review workflows.".into();
     }
     let base = match mode {
-        "observe" => "A turn that uses a skill keeps a redacted trace of its tool calls in the Harness's private state for 30 days, so that it can be compiled into a capsule. Nothing is added to the project, and nothing changes how the turn runs.",
-        "auto" => "A message that names one skill with a qualified capsule runs the capsule's plan instead of reading the skill again. Every other turn runs as usual and keeps a redacted trace of its tool calls for 30 days.",
-        "warm_only" => "A message that names one skill with a qualified capsule runs the capsule's plan instead of reading the skill again. Nothing is recorded.",
+        "observe" => {
+            "A turn that uses a skill keeps a redacted trace of its tool calls in the Harness's private state for 30 days, so that it can be compiled into a capsule. Nothing is added to the project, and nothing changes how the turn runs."
+        }
+        "auto" => {
+            "A message that names one skill with a qualified capsule runs the capsule's plan instead of reading the skill again. Every other turn runs as usual and keeps a redacted trace of its tool calls for 30 days."
+        }
+        "warm_only" => {
+            "A message that names one skill with a qualified capsule runs the capsule's plan instead of reading the skill again. Nothing is recorded."
+        }
         _ => return "Off. Nothing is recorded and no capsule is used.".into(),
     };
     let provider_note = match (mode, provider) {
         ("observe", _) => "",
         (_, "codex") => " In Codex, name the skill as `$skill`.",
-        (_, "claude") => " In Claude, name the skill as `$skill`. A Claude `/command` runs natively, so that turn is only observed.",
-        (_, "cursor") => " Cursor turns are observed and never run a capsule.",
+        (_, "claude") => {
+            " In Claude, name the skill as `$skill`. A Claude `/command` runs natively, so that turn is only observed."
+        }
+        (_, "cursor") => {
+            " In Cursor, name the skill with `$skill` or `/skill` to run a qualified written procedure (textual capsule)."
+        }
         _ => "",
     };
     format!("{base}{provider_note}")
@@ -147,7 +157,7 @@ pub(crate) fn miss_reason(reason: &str) -> &str {
     match reason {
         "native_route" => "native command",
         "plan_mode" => "plan mode",
-        "provider" => "this provider is observed only",
+        "provider" => "this provider runs written procedures only",
         "codex_manual" => "Codex Manual",
         "no_single_skill" => "no single skill named",
         "no_capsule" => "no qualified capsule",
@@ -173,6 +183,7 @@ pub(crate) fn phase_label(phase: &str) -> &'static str {
         "interrupted" => "Step resumed",
         "complete" => "Plan complete",
         "needs_recompile" => "Needs recompile",
+        "not_queued" => "Not queued",
         _ => "SkillCache",
     }
 }
@@ -180,20 +191,37 @@ pub(crate) fn phase_label(phase: &str) -> &'static str {
 pub(crate) fn phase_tone(event: &V) -> &'static str {
     match event["phase"].as_str().unwrap_or("") {
         "hit" | "complete" | "program_completed" | "observed" => "ok",
-        "program_failed" | "needs_recompile" => "warn",
+        "program_failed" | "needs_recompile" | "not_queued" => "warn",
         "miss" if event["reason"] == "stale" => "warn",
         _ => "muted",
+    }
+}
+
+fn non_observe_reason(reason: &str) -> &str {
+    match reason {
+        "no_tool_calls" => "no tool calls",
+        "no_skill" => "no skill used",
+        "low_roi" => "short turn",
+        "queue_full" => "queue full",
+        "storage" => "trace unavailable",
+        other => other,
     }
 }
 
 /// The stream shows what a person may act on; the run view's tab lists all.
 pub(crate) fn in_stream(event: &V) -> bool {
     match event["phase"].as_str().unwrap_or("") {
-        "hit" | "observed" | "needs_bindings" | "your_steps" | "program_failed" | "complete"
-        | "needs_recompile" => true,
+        "hit" | "observed" | "not_observed" | "not_queued" | "needs_bindings" | "your_steps"
+        | "program_failed" | "complete" | "needs_recompile" => true,
         "miss" => matches!(
             event["reason"].as_str().unwrap_or(""),
-            "stale" | "ambiguous" | "network" | "codex_manual" | "plan_mode" | "unavailable"
+            "stale"
+                | "ambiguous"
+                | "network"
+                | "codex_manual"
+                | "plan_mode"
+                | "provider"
+                | "unavailable"
         ),
         _ => false,
     }
@@ -354,6 +382,8 @@ pub(crate) fn render_run_pane_html(events: &[V], state: &V, error: &str) -> Stri
         if let Some(reason) = event["reason"].as_str().filter(|r| !r.is_empty()) {
             if phase == "miss" {
                 facts.push(miss_reason(reason).to_string());
+            } else if matches!(phase, "not_observed" | "not_queued") {
+                facts.push(non_observe_reason(reason).to_string());
             } else if phase == "program_failed" {
                 facts.push(format!("reason: {reason}"));
             }
@@ -398,11 +428,23 @@ pub(crate) fn render_run_pane_html(events: &[V], state: &V, error: &str) -> Stri
 
 /// The body of a stream card: its label, its sentence and its actions.
 pub(crate) fn stream_card_html(event: &V, state: &V) -> String {
+    let phase = event["phase"].as_str().unwrap_or("");
     let actions = event_actions_html(event, state);
+    let reason_detail = event["reason"]
+        .as_str()
+        .filter(|r| !r.is_empty() && matches!(phase, "not_observed" | "not_queued"))
+        .map(|r| {
+            format!(
+                " <span class=\"skillcache-phase-facts\">({})</span>",
+                esc(non_observe_reason(r))
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<p><span class=\"skillcache-phase-name\">{}</span> {}</p>{}",
-        phase_label(event["phase"].as_str().unwrap_or("")),
+        "<p><span class=\"skillcache-phase-name\">{}</span> {}{}</p>{}",
+        phase_label(phase),
         esc(&event_text(event)),
+        reason_detail,
         if actions.is_empty() {
             String::new()
         } else {
@@ -798,13 +840,17 @@ mod tests {
         assert!(note("observe", "claude", true).contains("30 days"));
         assert!(note("warm_only", "codex", true).contains("Nothing is recorded"));
         assert!(note("auto", "codex", true).contains("$skill"));
-        // Claude runs a capsule for a `$skill` mention; its `/command` stays
-        // native and is only observed. Cursor never runs a capsule.
+        // Claude and Cursor both run written procedures via `$skill`.
         let claude = note("auto", "claude", true);
         assert!(claude.contains("$skill") && claude.contains("`/command` runs natively"));
         assert!(!claude.contains("never run a capsule"));
-        assert!(note("warm_only", "cursor", true).contains("never run a capsule"));
+        let cursor = note("warm_only", "cursor", true);
+        assert!(cursor.contains("written procedure") && cursor.contains("$skill"));
         assert_eq!(miss_reason("native_route"), "native command");
+        assert_eq!(
+            miss_reason("provider"),
+            "this provider runs written procedures only"
+        );
         assert!(note("auto", "codex", false).contains("ordinary sessions"));
     }
 
@@ -1027,6 +1073,8 @@ mod tests {
         for shown in [
             "hit",
             "observed",
+            "not_observed",
+            "not_queued",
             "needs_bindings",
             "your_steps",
             "program_failed",
@@ -1035,14 +1083,18 @@ mod tests {
         ] {
             assert!(in_stream(&phase(shown)), "{shown}");
         }
-        for quiet in [
-            "started",
-            "program_completed",
-            "interrupted",
-            "not_observed",
-        ] {
+        for quiet in ["started", "program_completed", "interrupted"] {
             assert!(!in_stream(&phase(quiet)), "{quiet}");
         }
+        let not_obs = json!({
+            "kind": "skillcache",
+            "phase": "not_observed",
+            "reason": "low_roi",
+            "text": "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
+        });
+        let not_obs_card = stream_card_html(&not_obs, &V::Null);
+        assert!(not_obs_card.contains("No trace"));
+        assert!(not_obs_card.contains("(short turn)"));
         let miss = |reason: &str| json!({"kind": "skillcache", "phase": "miss", "reason": reason});
         // Every ordinary turn of an `auto` session is a miss; that is not news.
         assert!(!in_stream(&miss("no_single_skill")) && !in_stream(&miss("no_capsule")));

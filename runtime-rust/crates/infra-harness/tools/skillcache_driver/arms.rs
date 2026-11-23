@@ -570,6 +570,10 @@ fn rebind_project_in_db(store: &SessionStore, project_id: &str, workspace: &Path
         "UPDATE skillcache_capsules_fts SET project_id=?1",
         params![project_id],
     )?;
+    db.execute(
+        "UPDATE skillcache_compiles SET project_id=?1",
+        params![project_id],
+    )?;
     Ok(())
 }
 
@@ -901,5 +905,31 @@ pub async fn handle(
         _ => Err(HarnessError::invalid(
             "Request `phase` must be `prepare` or `attempt`.",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebind_project_in_db_updates_skillcache_compiles_project_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        {
+            let db = store.connection().unwrap();
+            crate::skillcache::db::begin_compile(
+                &db, "comp-1", "cap-1", "old-proj", "s1", "g1", "claude", None, None,
+            )
+            .unwrap();
+        }
+        rebind_project_in_db(&store, "new-proj", &ws).unwrap();
+        let db = store.connection().unwrap();
+        let row = crate::skillcache::db::compile(&db, "comp-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["project_id"], "new-proj");
     }
 }

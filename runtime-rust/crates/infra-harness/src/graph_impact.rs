@@ -1187,6 +1187,24 @@ impl<'a> TargetContext<'a> {
     }
 }
 
+/// Resolves deduplicated 1-hop incoming caller paths from `GraphIrStore` for `target_paths`,
+/// merging with `existing` callers (such as pre-removal callers) and excluding `target_paths`.
+pub(crate) fn resolve_incoming_caller_files(
+    ir: &GraphIrStore,
+    target_paths: &[String],
+    existing: &[String],
+) -> Vec<String> {
+    let mut callers: BTreeSet<String> = existing.iter().cloned().collect();
+    if let Ok(resolved) = ir.incoming_caller_files_for_paths(target_paths) {
+        callers.extend(resolved);
+    }
+    let skip: BTreeSet<&str> = target_paths.iter().map(String::as_str).collect();
+    callers
+        .into_iter()
+        .filter(|path| !skip.contains(path.as_str()))
+        .collect()
+}
+
 fn resolve_base(
     root: &Path,
     resolved: Option<&Resolved>,
@@ -7638,6 +7656,41 @@ mod tests {
         assert!(
             !r3.2.is_empty(),
             "expected new layer violation after rule change"
+        );
+    }
+
+    #[test]
+    fn resolve_incoming_caller_files_merges_and_excludes_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod core;\npub mod web;\n").unwrap();
+        std::fs::write(root.join("src/core.rs"), "pub fn core_fn() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/web.rs"),
+            "pub fn web_fn() -> i32 { crate::core::core_fn() }\n",
+        )
+        .unwrap();
+
+        let ir = GraphIrStore::open(&state, "impact-callers").unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let targets = vec!["src/core.rs".to_owned()];
+        let existing = vec!["src/pre_existing.rs".to_owned(), "src/core.rs".to_owned()];
+        let resolved = resolve_incoming_caller_files(&ir, &targets, &existing);
+        assert_eq!(
+            resolved,
+            vec![
+                "src/lib.rs".to_owned(),
+                "src/pre_existing.rs".to_owned(),
+                "src/web.rs".to_owned(),
+            ]
         );
     }
 }

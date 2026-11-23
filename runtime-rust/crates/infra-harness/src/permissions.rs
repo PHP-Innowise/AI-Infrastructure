@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -610,6 +611,181 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
     Ok(tokens)
 }
 
+type FileStamp = Option<(i64, u64)>;
+type Gate1CacheKey = (String, i64, u64, Vec<String>);
+type Gate1CacheResult = std::result::Result<bool, String>;
+
+const MAX_CACHED_WORKSPACES: usize = 64;
+const MAX_CACHED_PROGRAMS_PER_WS: usize = 256;
+const MAX_CACHED_GATE1_PER_WS: usize = 512;
+const MAX_CACHED_PROGRAM_BYTES: u64 = 1024 * 1024;
+
+struct CachedProgramFile {
+    mtime_ns: i64,
+    size: u64,
+    bytes: Vec<u8>,
+}
+
+struct WorkspaceReadOnlyCacheEntry {
+    analyzer_stamps: (FileStamp, FileStamp),
+    analyzer: Option<Arc<infra_generator::commands::CommandAnalyzer>>,
+    programs_dir_stamp: FileStamp,
+    programs: BTreeMap<String, CachedProgramFile>,
+    gate1_results: BTreeMap<Gate1CacheKey, Gate1CacheResult>,
+    #[cfg(test)]
+    analyzer_builds: usize,
+    #[cfg(test)]
+    program_reads: usize,
+    #[cfg(test)]
+    gate1_evals: usize,
+}
+
+#[derive(Default)]
+struct ReadOnlyWorkspaceCache {
+    workspaces: BTreeMap<PathBuf, WorkspaceReadOnlyCacheEntry>,
+}
+
+fn read_only_workspace_cache() -> &'static Mutex<ReadOnlyWorkspaceCache> {
+    static CACHE: OnceLock<Mutex<ReadOnlyWorkspaceCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ReadOnlyWorkspaceCache::default()))
+}
+
+fn path_stamp(path: &Path) -> FileStamp {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if infra_core::fs::linked(&meta) {
+        return None;
+    }
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0);
+    Some((mtime_ns, meta.len()))
+}
+
+fn workspace_analyzer_stamps(ws: &Path) -> (FileStamp, FileStamp) {
+    (
+        path_stamp(&ws.join("composer.json")),
+        path_stamp(&ws.join("package.json")),
+    )
+}
+
+fn ensure_workspace_entry<'a>(
+    cache: &'a mut ReadOnlyWorkspaceCache,
+    ws: &Path,
+) -> &'a mut WorkspaceReadOnlyCacheEntry {
+    if !cache.workspaces.contains_key(ws) && cache.workspaces.len() >= MAX_CACHED_WORKSPACES {
+        cache.workspaces.clear();
+    }
+    cache
+        .workspaces
+        .entry(ws.to_path_buf())
+        .or_insert_with(|| WorkspaceReadOnlyCacheEntry {
+            analyzer_stamps: (None, None),
+            analyzer: None,
+            programs_dir_stamp: None,
+            programs: BTreeMap::new(),
+            gate1_results: BTreeMap::new(),
+            #[cfg(test)]
+            analyzer_builds: 0,
+            #[cfg(test)]
+            program_reads: 0,
+            #[cfg(test)]
+            gate1_evals: 0,
+        })
+}
+
+fn cached_command_analyzer(ws: &Path) -> Option<Arc<infra_generator::commands::CommandAnalyzer>> {
+    let ws_canon = infra_core::fs::canonicalize(ws).ok()?;
+    let stamps = workspace_analyzer_stamps(&ws_canon);
+    if let Ok(guard) = read_only_workspace_cache().lock()
+        && let Some(entry) = guard.workspaces.get(&ws_canon)
+        && entry.analyzer.is_some()
+        && entry.analyzer_stamps == stamps
+    {
+        return entry.analyzer.clone();
+    }
+    let built = infra_generator::commands::CommandAnalyzer::new(&ws_canon)
+        .ok()
+        .map(Arc::new);
+    if let Ok(mut guard) = read_only_workspace_cache().lock() {
+        let entry = ensure_workspace_entry(&mut guard, &ws_canon);
+        #[cfg(test)]
+        {
+            entry.analyzer_builds += 1;
+        }
+        entry.analyzer_stamps = stamps;
+        entry.analyzer = built.clone();
+    }
+    built
+}
+
+/// Pre-warms cached `CommandAnalyzer` and `programs/` entries for `workspace`.
+pub(crate) fn warm_read_only_cache(workspace: &Path) {
+    let Ok(ws_canon) = infra_core::fs::canonicalize(workspace) else {
+        return;
+    };
+    let _ = cached_command_analyzer(&ws_canon);
+    let prog_dir = ws_canon.join("programs");
+    let dir_stamp = path_stamp(&prog_dir);
+    let mut loaded_programs = BTreeMap::new();
+    if let Ok(entries) = std::fs::read_dir(&prog_dir) {
+        for item in entries.flatten().take(MAX_CACHED_PROGRAMS_PER_WS) {
+            let path = item.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if infra_core::fs::linked(&meta)
+                || !meta.is_file()
+                || meta.len() > MAX_CACHED_PROGRAM_BYTES
+            {
+                continue;
+            }
+            let Some((mtime_ns, size)) = path_stamp(&path) else {
+                continue;
+            };
+            let Ok(rel) = path.strip_prefix(&ws_canon) else {
+                continue;
+            };
+            let rel_key = rel.to_string_lossy().replace('\\', "/");
+            if let Ok(bytes) = std::fs::read(&path) {
+                loaded_programs.insert(
+                    rel_key,
+                    CachedProgramFile {
+                        mtime_ns,
+                        size,
+                        bytes,
+                    },
+                );
+            }
+        }
+    }
+    if let Ok(mut guard) = read_only_workspace_cache().lock() {
+        let entry = ensure_workspace_entry(&mut guard, &ws_canon);
+        entry.programs_dir_stamp = dir_stamp;
+        if !loaded_programs.is_empty() {
+            entry.programs = loaded_programs;
+            entry.gate1_results.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+fn read_only_cache_counters(ws: &Path) -> (usize, usize, usize) {
+    let Ok(canon) = infra_core::fs::canonicalize(ws) else {
+        return (0, 0, 0);
+    };
+    let guard = read_only_workspace_cache().lock().unwrap();
+    guard.workspaces.get(&canon).map_or((0, 0, 0), |entry| {
+        (
+            entry.analyzer_builds,
+            entry.program_reads,
+            entry.gate1_evals,
+        )
+    })
+}
+
 fn check_read_only_capsule_program(
     workspace: &std::path::Path,
     tokens: &[String],
@@ -623,11 +799,90 @@ fn check_read_only_capsule_program(
     }) else {
         return Ok(false);
     };
-    let prog_path = workspace.join(&rel_prog);
-    let body = std::fs::read(&prog_path)
+    let ws_canon = infra_core::fs::canonicalize(workspace)
         .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
+    let prog_path = ws_canon.join(&rel_prog);
+    let meta = std::fs::symlink_metadata(&prog_path)
+        .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
+    if infra_core::fs::linked(&meta) || !meta.is_file() {
+        return Err(format!(
+            "program_symlink_refused: linked or non-regular `{rel_prog}` is not admitted"
+        ));
+    }
+    let dir_stamp = path_stamp(&ws_canon.join("programs"));
+    let (mtime_ns, size) = path_stamp(&prog_path)
+        .ok_or_else(|| format!("program file `{rel_prog}` does not exist inside workspace"))?;
+    let eval_key = (rel_prog.clone(), mtime_ns, size, tokens.to_vec());
+
+    let mut cached_bytes: Option<Vec<u8>> = None;
+    if let Ok(guard) = read_only_workspace_cache().lock()
+        && let Some(entry) = guard.workspaces.get(&ws_canon)
+        && entry.programs_dir_stamp == dir_stamp
+    {
+        if let Some(hit) = entry.gate1_results.get(&eval_key) {
+            return hit.clone();
+        }
+        if let Some(prog) = entry.programs.get(&rel_prog)
+            && prog.mtime_ns == mtime_ns
+            && prog.size == size
+        {
+            cached_bytes = Some(prog.bytes.clone());
+        }
+    }
+
+    let mut did_read = false;
+    let body = match cached_bytes {
+        Some(bytes) => bytes,
+        None => {
+            did_read = true;
+            std::fs::read(&prog_path)
+                .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?
+        }
+    };
+    let outcome = evaluate_read_only_capsule_program(&rel_prog, &body, tokens);
+    if let Ok(mut guard) = read_only_workspace_cache().lock() {
+        let entry = ensure_workspace_entry(&mut guard, &ws_canon);
+        #[cfg(test)]
+        {
+            if did_read {
+                entry.program_reads += 1;
+            }
+            entry.gate1_evals += 1;
+        }
+        let _ = did_read;
+        if entry.programs_dir_stamp != dir_stamp {
+            entry.programs_dir_stamp = dir_stamp;
+            entry.programs.clear();
+            entry.gate1_results.clear();
+        }
+        if entry.programs.len() >= MAX_CACHED_PROGRAMS_PER_WS {
+            entry.programs.clear();
+        }
+        if size <= MAX_CACHED_PROGRAM_BYTES {
+            entry.programs.insert(
+                rel_prog,
+                CachedProgramFile {
+                    mtime_ns,
+                    size,
+                    bytes: body,
+                },
+            );
+        }
+        if entry.gate1_results.len() >= MAX_CACHED_GATE1_PER_WS {
+            entry.gate1_results.clear();
+        }
+        entry.gate1_results.insert(eval_key, outcome.clone());
+    }
+    outcome
+}
+
+fn evaluate_read_only_capsule_program(
+    rel_prog: &str,
+    body: &[u8],
+    tokens: &[String],
+) -> std::result::Result<bool, String> {
     let mut files = infra_skillcache::package::Files::new();
-    files.insert(&rel_prog, body);
+    files.insert(rel_prog, body.to_vec());
     let runtime = tokens.first().cloned().unwrap_or_default();
     let capsule_json = json!({
         "schema_version": infra_skillcache::SCHEMA_VERSION,
@@ -681,6 +936,76 @@ fn check_read_only_capsule_program(
     Ok(true)
 }
 
+const ALIGNED_READONLY_CLIS: &[&str] = &[
+    "ava",
+    "behat",
+    "cat",
+    "date",
+    "deptrac",
+    "diff",
+    "echo",
+    "eslint",
+    "false",
+    "find",
+    "flake8",
+    "gofmt",
+    "grep",
+    "head",
+    "jest",
+    "ls",
+    "mocha",
+    "mypy",
+    "parallel-lint",
+    "paratest",
+    "pest",
+    "phpcs",
+    "phploc",
+    "phpmd",
+    "phpspec",
+    "phpstan",
+    "phpunit",
+    "printf",
+    "psalm",
+    "pwd",
+    "pylint",
+    "pytest",
+    "rg",
+    "sort",
+    "stylelint",
+    "tail",
+    "test",
+    "true",
+    "tsc",
+    "uniq",
+    "unittest",
+    "vitest",
+    "wc",
+    "which",
+];
+
+const GENERATOR_MUTATE_FLAGS: &[&str] = &[
+    "--fix",
+    "--fix-dry-run=false",
+    "--write",
+    "-w",
+    "--apply",
+    "--update",
+    "--alter",
+    "--generate-baseline",
+    "--set-baseline",
+    "--update-baseline",
+    "--migrate-configuration",
+];
+
+fn has_mutating_flag(tokens: &[String]) -> bool {
+    tokens.iter().any(|arg| {
+        let base = arg.split('=').next().unwrap_or(arg.as_str());
+        GENERATOR_MUTATE_FLAGS.contains(&arg.as_str())
+            || GENERATOR_MUTATE_FLAGS.contains(&base)
+            || arg == "--fix-dry-run=false"
+    })
+}
+
 fn is_known_read_only_cli(tokens: &[String]) -> bool {
     let Some(cmd) = tokens.first().map(|s| {
         std::path::Path::new(s)
@@ -690,17 +1015,28 @@ fn is_known_read_only_cli(tokens: &[String]) -> bool {
     }) else {
         return false;
     };
+    if has_mutating_flag(tokens) {
+        return false;
+    }
     let lower = cmd.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "rg" | "grep" | "cat" | "head" | "tail" | "ls" | "stat" | "wc" | "pwd" | "find"
-    ) {
-        return !tokens.iter().any(|a| {
-            matches!(
-                a.as_str(),
-                "-delete" | "-exec" | "-execdir" | "-ok" | "-fprint"
-            )
-        });
+    if ALIGNED_READONLY_CLIS.contains(&lower.as_str()) {
+        if lower == "find" {
+            return !tokens.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "-delete"
+                        | "-exec"
+                        | "-execdir"
+                        | "-ok"
+                        | "-okdir"
+                        | "-fprint"
+                        | "-fprint0"
+                        | "-fprintf"
+                        | "-fls"
+                )
+            });
+        }
+        return true;
     }
     if lower == "git" {
         return tokens.get(1).is_some_and(|sub| {
@@ -766,8 +1102,9 @@ pub fn classify_read_only_program_command(
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
     }
     let generator_safe = workspace
-        .and_then(|ws| infra_generator::commands::is_verification_safe(ws, command).ok())
-        .unwrap_or(false);
+        .and_then(cached_command_analyzer)
+        .and_then(|analyzer| analyzer.analyze(command, true, None).ok())
+        .is_some_and(|analysis| analysis.verification_safe);
     if is_known_read_only_cli(&tokens) || generator_safe {
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
     }
@@ -1272,5 +1609,95 @@ mod tests {
         assert_eq!(evs[0]["state"], "allowed_session");
         assert_eq!(evs[0]["by"], "gate1_read_only_rule");
         assert!(desk.has_session_rule("s-ro", &capsule_key).unwrap());
+    }
+
+    #[test]
+    fn readonly_cli_alignment_and_workspace_cache_reuse_and_invalidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        std::fs::write(ws.join("programs/lint.py"), "print('ok')\n").unwrap();
+        std::fs::write(
+            ws.join("composer.json"),
+            r#"{"scripts":{"test":"phpunit"}}"#,
+        )
+        .unwrap();
+
+        // Aligned READONLY CLIs and rejection of mutating flags.
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "phpstan analyse src")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:phpstan analyse src")
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "pytest -q")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:pytest -q")
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "eslint --fix src").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "gofmt -w main.go").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "find . -exec rm {} +").unwrap(),
+            None
+        );
+        assert!(classify_read_only_program_command(Some(&ws), "find . -exec rm {} ;").is_err());
+
+        // Cache hit on repeated program + CommandAnalyzer lookups without mtime changes.
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:python3 programs/lint.py")
+        );
+        let (builds_1, reads_1, evals_1) = read_only_cache_counters(&ws);
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:python3 programs/lint.py")
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "composer test")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:composer test")
+        );
+        let (builds_2, reads_2, evals_2) = read_only_cache_counters(&ws);
+        assert_eq!(builds_2, builds_1, "CommandAnalyzer should be cached");
+        assert_eq!(reads_2, reads_1, "program bytes should be cached");
+        assert_eq!(evals_2, evals_1, "Gate-1 program result should be cached");
+
+        // Changing program bytes/size invalidates the program cache entry cleanly.
+        std::fs::write(ws.join("programs/lint.py"), "print('updated')\n").unwrap();
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:python3 programs/lint.py")
+        );
+        let (_, reads_3, evals_3) = read_only_cache_counters(&ws);
+        assert!(reads_3 > reads_2);
+        assert!(evals_3 > evals_2);
+
+        // Changing composer.json invalidates CommandAnalyzer cache cleanly.
+        std::fs::write(
+            ws.join("composer.json"),
+            r#"{"scripts":{"test":"rm -rf build"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "composer test").unwrap(),
+            None
+        );
+        let (builds_4, _, _) = read_only_cache_counters(&ws);
+        assert!(builds_4 > builds_2);
     }
 }

@@ -42,6 +42,16 @@ pub struct Fleet {
 fn cost(v: &Value) -> Option<f64> {
     v.as_f64().filter(|n| n.is_finite() && *n >= 0.)
 }
+fn reviewer_event_status(ok: bool, schema_error: Option<&str>) -> &'static str {
+    if !ok {
+        "failed"
+    } else if schema_error.is_some() {
+        "schema_error"
+    } else {
+        "completed"
+    }
+}
+
 /// Strictly validates Fleet JSON findings (`{"findings": [...]}`) without creating
 /// heuristic `"severity": "unparsed"` placeholder items.
 pub fn parse_findings_strict(text: &str, lens: &str) -> std::result::Result<Vec<Value>, String> {
@@ -196,6 +206,22 @@ impl Fleet {
         legacy_database: Option<&Path>,
         action: Option<&str>,
     ) -> Result<()> {
+        self.initialize_with_precheck(thread, scope, task, c, legacy_database, action, None)
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Fleet initialization accepts optional precheck settings alongside legacy checkpoint import."
+    )]
+    pub fn initialize_with_precheck(
+        &self,
+        thread: &str,
+        scope: &str,
+        task: &str,
+        c: &Config,
+        legacy_database: Option<&Path>,
+        action: Option<&str>,
+        precheck: Option<&Value>,
+    ) -> Result<()> {
         if c.lenses.is_empty()
             || c.lenses.len() > 40
             || c.concurrency == 0
@@ -207,6 +233,7 @@ impl Fleet {
         }
         {
             let db = self.store.connection()?;
+            let _ = crate::clash::ensure_health_table(&db);
             if db
                 .query_row(
                     "SELECT 1 FROM native_fleet_runs WHERE thread_id=?1",
@@ -225,7 +252,25 @@ impl Fleet {
         {
             return legacy::persist(&self.store, &run);
         }
-        let state = json!({"scope":scope,"task_id":task,"thread_id":thread,"lenses":c.lenses,"findings":[],"cost_usd":0.0,"usage_components":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_write_5m_input_tokens":0,"cache_write_1h_input_tokens":0,"model_calls":0},"skipped":[]});
+        let precheck_val = match precheck.filter(|v| !v.is_null()) {
+            Some(v) => crate::clash::validate_precheck(Some(v))?,
+            None => {
+                let stored = self
+                    .store
+                    .get(thread)
+                    .ok()
+                    .and_then(|s| s.get("fleet").and_then(|f| f.get("precheck")).cloned())
+                    .filter(|v| !v.is_null());
+                match stored {
+                    Some(v) => crate::clash::validate_precheck(Some(&v))?,
+                    None => Value::Null,
+                }
+            }
+        };
+        let mut state = json!({"scope":scope,"task_id":task,"thread_id":thread,"lenses":c.lenses,"findings":[],"cost_usd":0.0,"usage_components":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_write_5m_input_tokens":0,"cache_write_1h_input_tokens":0,"model_calls":0},"skipped":[]});
+        if !precheck_val.is_null() {
+            state["precheck"] = precheck_val;
+        }
         self.store.connection()?.execute(
             "INSERT INTO native_fleet_runs(thread_id,state,stage)VALUES(?1,?2,'scope')",
             params![thread, state.to_string()],
@@ -345,8 +390,28 @@ impl Fleet {
                 errs.push(json!({"lens": lens, "error": err}));
             }
             state["schema_errors"] = json!(errs);
+            tx.execute(
+                "UPDATE native_fleet_tasks SET status='schema_error',output=?1,error=?2 WHERE thread_id=?3 AND task_id=?4",
+                params![
+                    json!({"findings":findings,"cost_usd":result.cost_usd,"usage_components":usage_components,"schema_error":err}).to_string(),
+                    err,
+                    thread,
+                    tid
+                ],
+            )?;
+            tx.execute(
+                "UPDATE native_fleet_runs SET state=?1,revision=revision+1 WHERE thread_id=?2",
+                params![state.to_string(), thread],
+            )?;
+            tx.commit()?;
+            return Err(HarnessError::unavailable(format!(
+                "Fleet reviewer `{lens}` failed strict findings schema validation: {err}"
+            )));
         }
-        tx.execute("UPDATE native_fleet_tasks SET status='completed',output=?1,error=NULL WHERE thread_id=?2 AND task_id=?3",params![json!({"findings":findings,"cost_usd":result.cost_usd,"usage_components":usage_components,"schema_error":schema_err}).to_string(),thread,tid])?;
+        if let Some(errs) = state["schema_errors"].as_array_mut() {
+            errs.retain(|e| e["lens"] != lens);
+        }
+        tx.execute("UPDATE native_fleet_tasks SET status='completed',output=?1,error=NULL WHERE thread_id=?2 AND task_id=?3",params![json!({"findings":findings,"cost_usd":result.cost_usd,"usage_components":usage_components,"schema_error":Value::Null}).to_string(),thread,tid])?;
         tx.execute(
             "UPDATE native_fleet_runs SET state=?1,revision=revision+1 WHERE thread_id=?2",
             params![state.to_string(), thread],
@@ -406,7 +471,7 @@ impl Fleet {
                         tx.commit()?;
                     }
                     if !c.dry_run
-                        && let Some(pre) = state.get("precheck")
+                        && let Some(pre) = state.get("precheck").filter(|v| !v.is_null())
                         && let Some(record) =
                             crate::clash::run_precheck_sandboxed(&c.project, pre).await
                     {
@@ -418,11 +483,28 @@ impl Fleet {
                 }
                 "review" => {
                     emit(json!({"kind":"fleet_stage","stage":"review","status":"running"}))?;
-                    let pre_note = state["deterministic_precheck"]["summary"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .map(|s| format!("\n**Deterministic pre-stage check** -\n{s}\n"))
-                        .unwrap_or_default();
+                    let pre_note = match state
+                        .get("deterministic_precheck")
+                        .filter(|v| v.is_object())
+                    {
+                        Some(pre) => {
+                            let summary = pre["summary"].as_str().unwrap_or("").trim();
+                            if !summary.is_empty() {
+                                format!("\n**Deterministic pre-stage check** -\n{summary}\n")
+                            } else if pre["ok"] == false {
+                                let code = pre["exit_code"]
+                                    .as_i64()
+                                    .map(|c| format!(" (exit code {c})"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "\n**Deterministic pre-stage check** -\nPrecheck failed{code}.\n"
+                                )
+                            } else {
+                                String::new()
+                            }
+                        }
+                        None => String::new(),
+                    };
                     let semaphore = Arc::new(tokio::sync::Semaphore::new(c.concurrency));
                     let mut running = tokio::task::JoinSet::new();
                     for (tid, input) in self.tasks(thread)? {
@@ -474,23 +556,43 @@ impl Fleet {
                                 .await?
                             };
                             if !cfg.dry_run {
-                                engine.blackboard.dispatch_complete(
-                                    task,
-                                    lens,
-                                    if result.ok { &result.text } else { "Reviewer failed." },
-                                )?;
+                                let note = if !result.ok {
+                                    "Reviewer failed."
+                                } else if let Some(err) = &schema_error {
+                                    err.as_str()
+                                } else {
+                                    &result.text
+                                };
+                                engine.blackboard.dispatch_complete(task, lens, note)?;
                             }
+                            let reviewer_status =
+                                reviewer_event_status(result.ok, schema_error.as_deref());
                             emit(json!({
                                 "kind":"fleet_reviewer",
                                 "lens":lens,
-                                "status":if result.ok{"completed"}else{"failed"},
+                                "status":reviewer_status,
                                 "cost_usd":result.cost_usd,
                                 "usage_components":usage_components,
                                 "schema_error":schema_error,
                                 "duration_seconds":result.duration_seconds,
                                 "limit_reached":result.limit_reached
                             }))?;
-                            engine.finish(&thread, &tid, &result, &usage_components, schema_error.as_deref())
+                            let finish_res = engine.finish(&thread, &tid, &result, &usage_components, schema_error.as_deref());
+                            if !cfg.dry_run {
+                                crate::clash::record_workflow_health(
+                                    &engine.store,
+                                    "fleet",
+                                    &cfg.provider,
+                                    cfg.model.as_deref(),
+                                    &format!("{thread}:{tid}"),
+                                    reviewer_status,
+                                    schema_error.is_some() || finish_res.is_err(),
+                                    !result.ok || schema_error.is_some(),
+                                    result.cost_usd,
+                                    result.duration_seconds,
+                                );
+                            }
+                            finish_res
                         });
                     }
                     let mut failure = None;
@@ -519,8 +621,14 @@ impl Fleet {
                     emit(json!({"kind":"fleet_stage","stage":"gate","status":"waiting"}))?;
                 }
                 "gate" => {
+                    let warnings = crate::clash::workflow_health_warnings(
+                        &self.store,
+                        "fleet",
+                        &c.provider,
+                        c.model.as_deref(),
+                    );
                     return Ok(
-                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
                     );
                 }
                 "record" => {
@@ -557,8 +665,14 @@ impl Fleet {
                     self.transition(thread, rev, &state, "done")?;
                 }
                 "done" => {
+                    let warnings = crate::clash::workflow_health_warnings(
+                        &self.store,
+                        "fleet",
+                        &c.provider,
+                        c.model.as_deref(),
+                    );
                     return Ok(
-                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
                     );
                 }
                 _ => return Err(HarnessError::invalid("Invalid native Fleet stage.")),
@@ -707,5 +821,234 @@ mod tests {
         assert_eq!(acc["output_tokens"], 5);
         assert_eq!(acc["cache_read_input_tokens"], 80);
         assert_eq!(acc["model_calls"], 1);
+    }
+
+    struct NoopBlackboard;
+    impl Blackboard for NoopBlackboard {
+        fn available(&self) -> bool {
+            false
+        }
+        fn ensure_task(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn dispatch_spawn(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn dispatch_complete(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn progress(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fleet_initialize_with_precheck_persists_precheck_and_rejects_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let fleet = Fleet {
+            store: store.clone(),
+            blackboard: Arc::new(NoopBlackboard),
+        };
+        let cfg = Config {
+            project: dir.path().to_path_buf(),
+            provider: "claude".into(),
+            executable: dir.path().join("fake-cli"),
+            lenses: vec!["code-reviewer".into()],
+            model: None,
+            effort: None,
+            budget: None,
+            seconds: 30,
+            concurrency: 1,
+            dry_run: true,
+            reports: dir.path().join("reports"),
+            adapter: None,
+            runner_lock: None,
+        };
+
+        assert!(
+            fleet
+                .initialize_with_precheck(
+                    "t-bad",
+                    "scope",
+                    "harness/t-bad",
+                    &cfg,
+                    None,
+                    None,
+                    Some(&json!({"argv": []})),
+                )
+                .is_err()
+        );
+
+        let precheck = json!({"argv": ["composer", "validate"], "timeout_seconds": 20});
+        fleet
+            .initialize_with_precheck(
+                "t-pre",
+                "scope",
+                "harness/t-pre",
+                &cfg,
+                None,
+                None,
+                Some(&precheck),
+            )
+            .unwrap();
+        let (state, stage, _, _) = fleet.snapshot("t-pre").unwrap();
+        assert_eq!(stage, "scope");
+        assert_eq!(state["precheck"], precheck);
+    }
+
+    #[tokio::test]
+    async fn fleet_schema_error_never_marks_task_completed_and_retries_cleanly() {
+        assert_eq!(reviewer_event_status(false, None), "failed");
+        assert_eq!(
+            reviewer_event_status(true, Some("bad json")),
+            "schema_error"
+        );
+        assert_eq!(reviewer_event_status(true, None), "completed");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let fleet = Fleet {
+            store: store.clone(),
+            blackboard: Arc::new(NoopBlackboard),
+        };
+        let cfg = Config {
+            project: dir.path().to_path_buf(),
+            provider: "claude".into(),
+            executable: dir.path().join("fake-cli"),
+            lenses: vec!["code-reviewer".into(), "security-reviewer".into()],
+            model: None,
+            effort: None,
+            budget: None,
+            seconds: 30,
+            concurrency: 2,
+            dry_run: true,
+            reports: dir.path().join("reports"),
+            adapter: None,
+            runner_lock: None,
+        };
+        let thread = "t-schema";
+        fleet
+            .initialize(thread, "src/", "harness/t-schema", &cfg, None, None)
+            .unwrap();
+        // Seed both tasks in `review` stage mirroring `scope`.
+        let (state, _, _, rev) = fleet.snapshot(thread).unwrap();
+        fleet.transition(thread, rev, &state, "review").unwrap();
+        let mut tids = Vec::new();
+        {
+            let db = store.connection().unwrap();
+            for (n, lens) in cfg.lenses.iter().enumerate() {
+                let tid = store::sha(format!("{thread}\0{n}\0{lens}").as_bytes());
+                let input = json!({"scope":"src/","task_id":"harness/t-schema","thread_id":thread,"lens":lens,"budget_usd":null});
+                db.execute(
+                    "INSERT INTO native_fleet_tasks(thread_id,task_id,lens,ordinal,status,input)VALUES(?1,?2,?3,?4,'pending',?5)",
+                    params![thread, tid, lens, n as i64, input.to_string()],
+                )
+                .unwrap();
+                tids.push(tid);
+            }
+        }
+
+        let usage = json!({"input_tokens": 10, "output_tokens": 5, "model_calls": 1});
+        // Lens 0 succeeds with valid structured JSON.
+        fleet
+            .finish(
+                thread,
+                &tids[0],
+                &WorkerResult {
+                    text: r#"{"findings":[{"file":"a.php","line":1,"severity":"medium","claim":"Check","evidence":"e"}]}"#.into(),
+                    ok: true,
+                    cost_usd: Some(0.02),
+                    session_id: None,
+                    duration_seconds: 1.0,
+                    error: None,
+                    limit_reached: None,
+                },
+                &usage,
+                None,
+            )
+            .unwrap();
+
+        // Lens 1 returns invalid prose after repair -> must NOT mark task `completed`!
+        let err = fleet
+            .finish(
+                thread,
+                &tids[1],
+                &WorkerResult {
+                    text: "No JSON findings here".into(),
+                    ok: true,
+                    cost_usd: Some(0.03),
+                    session_id: None,
+                    duration_seconds: 1.0,
+                    error: None,
+                    limit_reached: None,
+                },
+                &usage,
+                Some("reviewer output is not a valid JSON object"),
+            )
+            .unwrap_err();
+        assert!(err.message.contains("security-reviewer"), "{}", err.message);
+
+        let (task_status, task_err): (String, Option<String>) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT status, error FROM native_fleet_tasks WHERE thread_id=?1 AND task_id=?2",
+                params![thread, tids[1]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(task_status, "schema_error");
+        assert!(task_err.is_some());
+
+        let (state_after_err, stage_after_err, _, _) = fleet.snapshot(thread).unwrap();
+        assert_eq!(stage_after_err, "review");
+        assert_eq!(state_after_err["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            state_after_err["schema_errors"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            state_after_err["schema_errors"][0]["lens"],
+            "security-reviewer"
+        );
+
+        // Pending tasks for resume include ONLY the schema_error lens.
+        let pending = fleet.tasks(thread).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, tids[1]);
+
+        // Retry succeeds -> clears schema_error for that lens and advances cleanly via drive().
+        fleet
+            .finish(
+                thread,
+                &tids[1],
+                &WorkerResult {
+                    text: r#"{"findings":[{"file":"b.php","line":4,"severity":"high","claim":"Auth bypass","evidence":"missing check"}]}"#.into(),
+                    ok: true,
+                    cost_usd: Some(0.02),
+                    session_id: None,
+                    duration_seconds: 1.0,
+                    error: None,
+                    limit_reached: None,
+                },
+                &usage,
+                None,
+            )
+            .unwrap();
+        assert!(fleet.tasks(thread).unwrap().is_empty());
+
+        let gated = fleet
+            .drive(
+                thread,
+                &cfg,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(|_| Ok(())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gated["status"], "awaiting_approval");
+        assert_eq!(gated["findings"].as_array().unwrap().len(), 2);
+        assert_eq!(gated["schema_errors"].as_array().unwrap().len(), 0);
     }
 }

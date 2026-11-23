@@ -347,12 +347,19 @@ fn stream_url() -> String {
     build_stream_url(&last_id, &project_id)
 }
 
+fn prepare_sse_project_scope_reconnect(client: &mut SseClient) -> bool {
+    client.last_event_id.clear();
+    client.attempt = 0;
+    client.enabled
+}
+
 /// Reopens the live SSE stream when the active workspace project changes.
 pub fn reconnect_sse_for_project_scope() {
-    if !cfg!(target_arch = "wasm32") || model::read(|s| s.auth_failed) {
+    if model::read(|s| s.auth_failed) {
         return;
     }
-    if SSE.with(|sse| sse.borrow().enabled) {
+    let should_start = SSE.with(|sse| prepare_sse_project_scope_reconnect(&mut sse.borrow_mut()));
+    if cfg!(target_arch = "wasm32") && should_start {
         start_sse();
     }
 }
@@ -364,12 +371,22 @@ pub fn start_sse() {
     }
     dom::cancel_timer("sse-reconnect");
     close_sse_source();
-    SSE.with(|sse| sse.borrow_mut().enabled = true);
+    let attempt = SSE.with(|sse| {
+        let mut sse = sse.borrow_mut();
+        sse.enabled = true;
+        sse.attempt
+    });
+    sync_sse_status_dom(false, false, attempt);
     let init = web_sys::EventSourceInit::new();
     init.set_with_credentials(true);
     let Ok(source) = web_sys::EventSource::new_with_event_source_init_dict(&stream_url(), &init)
     else {
         schedule_sse_reconnect();
+        let (attempt, auth_failed) = (
+            SSE.with(|sse| sse.borrow().attempt),
+            model::read(|s| s.auth_failed),
+        );
+        sync_sse_status_dom(false, auth_failed, attempt);
         return;
     };
     let open_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
@@ -609,5 +626,68 @@ mod sse_contract_tests {
             build_stream_url("ev:42", "proj-a"),
             "/api/events/stream?last_event_id=ev%3A42&project_id=proj-a"
         );
+    }
+
+    #[test]
+    fn project_scope_reconnect_clears_last_event_id_and_resets_attempt() {
+        model::write(|s| {
+            s.auth_failed = false;
+            s.workspace.project_id = "proj-a".into();
+        });
+        SSE.with(|sse| {
+            let mut s = sse.borrow_mut();
+            s.enabled = true;
+            s.connected = true;
+            s.attempt = 3;
+            s.last_event_id = "128".into();
+        });
+        assert_eq!(
+            stream_url(),
+            "/api/events/stream?last_event_id=128&project_id=proj-a"
+        );
+
+        model::set_current_project("proj-b");
+        reconnect_sse_for_project_scope();
+
+        SSE.with(|sse| {
+            let s = sse.borrow();
+            assert!(s.last_event_id.is_empty());
+            assert_eq!(s.attempt, 0);
+            assert!(s.enabled);
+        });
+        assert_eq!(stream_url(), "/api/events/stream?project_id=proj-b");
+        assert_eq!(sse_status_badge(false, false, 0).0, "connecting");
+        assert_eq!(sse_status_badge(false, false, 1).0, "reconnecting");
+        assert_eq!(sse_status_badge(false, true, 1).0, "offline");
+
+        // Auth failure preserves early-return guard without touching SSE state.
+        SSE.with(|sse| {
+            let mut s = sse.borrow_mut();
+            s.last_event_id = "200".into();
+            s.attempt = 2;
+        });
+        model::write(|s| s.auth_failed = true);
+        reconnect_sse_for_project_scope();
+        SSE.with(|sse| {
+            let s = sse.borrow();
+            assert_eq!(s.last_event_id, "200");
+            assert_eq!(s.attempt, 2);
+        });
+
+        // When disabled and not auth-failed, scope switch still drops stale cursor without enabling SSE.
+        model::write(|s| s.auth_failed = false);
+        SSE.with(|sse| {
+            let mut s = sse.borrow_mut();
+            s.enabled = false;
+            s.last_event_id = "200".into();
+            s.attempt = 2;
+        });
+        reconnect_sse_for_project_scope();
+        SSE.with(|sse| {
+            let s = sse.borrow();
+            assert!(s.last_event_id.is_empty());
+            assert_eq!(s.attempt, 0);
+            assert!(!s.enabled);
+        });
     }
 }

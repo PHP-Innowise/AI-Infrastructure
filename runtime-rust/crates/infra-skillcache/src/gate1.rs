@@ -5,7 +5,7 @@
 //! see in one pass, each with a stable code, so one repair round can answer
 //! all of them. Gate 1T is the lighter check of the textual form.
 use crate::capsule::{
-    BINDING_BYTES, Examples, Form, SkillCapsule, Step, Violation, is_admitted_value,
+    BINDING_BYTES, CapsuleKind, Examples, Form, SkillCapsule, Step, Violation, is_admitted_value,
     is_relative_path,
 };
 use crate::package::Files;
@@ -377,25 +377,150 @@ fn normalized(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_string()
 }
 
-fn contains_literal(capsule_text: &str, literal: &str) -> bool {
-    if capsule_text.contains(literal) {
+fn is_compound_or_path_literal(text: &str) -> bool {
+    text.contains(['/', '\\', ':', '\n'])
+        || text.contains(char::is_whitespace)
+        || (text.contains('.') && text.chars().any(char::is_alphanumeric))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn contains_literal(haystack: &str, literal: &str) -> bool {
+    if literal.is_empty() {
+        return false;
+    }
+    if is_compound_or_path_literal(literal) {
+        return haystack.contains(literal);
+    }
+    let mut start = 0;
+    while let Some(found) = haystack[start..].find(literal) {
+        let idx = start + found;
+        let end = idx + literal.len();
+        let left_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let right_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word_char(c));
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + haystack[idx..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// Collects text strings from `capsule` that carry author-written descriptions
+/// or commands, excluding JSON structure keys.
+fn capsule_authored_strings(capsule: &SkillCapsule) -> Vec<&str> {
+    let mut strings = vec![capsule.mu.name.as_str(), capsule.mu.description.as_str()];
+    for binding in &capsule.bindings {
+        if let Some(desc) = &binding.description {
+            strings.push(desc.as_str());
+        }
+    }
+    for program in &capsule.programs {
+        if let Some(desc) = &program.description {
+            strings.push(desc.as_str());
+        }
+        strings.extend(program.entry.iter().map(String::as_str));
+        strings.extend(program.check.iter().map(String::as_str));
+    }
+    for step in capsule.steps.iter().chain(capsule.verification.iter()) {
+        match step {
+            Step::Instruction { text, .. } | Step::Inspection { text, .. } => {
+                strings.push(text.as_str())
+            }
+            Step::Program { .. } => {}
+        }
+    }
+    strings
+}
+
+/// Extracts quoted string literals (`'...'`, `"..."`, `` `...` ``, triple quotes)
+/// from a package source file, ignoring comment-only prose.
+fn extract_source_literals(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'#' || (b == b'/' && bytes.get(i + 1) == Some(&b'/')) {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if matches!(b, b'\'' | b'"' | b'`') {
+            let triple = b != b'`' && bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b);
+            let quote_len = if triple { 3 } else { 1 };
+            i += quote_len;
+            let mut literal = String::new();
+            while i < bytes.len() {
+                if triple {
+                    if bytes.get(i..i + 3) == Some(&[b, b, b]) {
+                        i += 3;
+                        break;
+                    }
+                } else if bytes[i] == b {
+                    i += 1;
+                    break;
+                }
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    let esc = bytes[i + 1];
+                    match esc {
+                        b'n' => literal.push('\n'),
+                        b'r' => literal.push('\r'),
+                        b't' => literal.push('\t'),
+                        _ => literal.push(esc as char),
+                    }
+                    i += 2;
+                    continue;
+                }
+                let ch = source[i..].chars().next().unwrap_or('\0');
+                literal.push(ch);
+                i += ch.len_utf8();
+            }
+            out.push(literal);
+            continue;
+        }
+        i += source[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+/// Non-comment lines of `source` for checking unquoted path-like literals.
+fn source_non_comment_code(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("--") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn source_contains_example_literal(source: &str, text: &str) -> bool {
+    if extract_source_literals(source)
+        .iter()
+        .any(|lit| contains_literal(lit, text))
+    {
         return true;
     }
-    serde_json::to_string(literal)
-        .ok()
-        .and_then(|quoted| {
-            quoted
-                .len()
-                .checked_sub(2)
-                .map(|_| quoted[1..quoted.len() - 1].to_string())
-        })
-        .is_some_and(|escaped| capsule_text.contains(&escaped))
+    is_compound_or_path_literal(text) && contains_literal(&source_non_comment_code(source), text)
 }
 
 fn check_examples(
     capsule: &SkillCapsule,
     package_files: &Files,
-    capsule_text: &str,
+    _capsule_text: &str,
     examples: &Examples,
     context: &Context<'_>,
     violations: &mut Vec<Violation>,
@@ -492,7 +617,10 @@ fn check_examples(
                 break;
             }
             if text.chars().count() >= EXAMPLE_LITERAL_CHARS {
-                if contains_literal(capsule_text, &text) {
+                if capsule_authored_strings(capsule)
+                    .iter()
+                    .any(|field| contains_literal(field, &text))
+                {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
                         &at,
@@ -501,7 +629,8 @@ fn check_examples(
                     break;
                 }
                 if let Some((path, _)) = package_files.iter().find(|(_, content)| {
-                    std::str::from_utf8(content).is_ok_and(|source| contains_literal(source, &text))
+                    std::str::from_utf8(content)
+                        .is_ok_and(|source| source_contains_example_literal(source, &text))
                 }) {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
@@ -600,6 +729,24 @@ fn check_secrets(label: &str, text: &str, violations: &mut Vec<Violation>) {
 /// executor applies them again before it runs anything of a stored package.
 pub fn structure(capsule: &SkillCapsule, files: &Files) -> Vec<Violation> {
     let mut violations = Vec::new();
+    if capsule.kind == CapsuleKind::ToolChain {
+        if !capsule.skills.is_empty() {
+            violations.push(Violation::new(
+                "tool_chain_has_skill",
+                "source.skills",
+                "A tool-chain capsule has no source skill.",
+            ));
+        }
+        for (index, program) in capsule.programs.iter().enumerate() {
+            if !program.read_only {
+                violations.push(Violation::new(
+                    "tool_chain_not_read_only",
+                    format!("programs[{index}].read_only"),
+                    "A tool-chain capsule only runs read-only or verification programs.",
+                ));
+            }
+        }
+    }
     if capsule.programs.is_empty() {
         violations.push(Violation::new(
             "hybrid_without_programs",
@@ -764,7 +911,9 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
                     continue;
                 }
                 let literal = normalized(raw);
-                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS && text.contains(&literal) {
+                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS
+                    && contains_literal(text, &literal)
+                {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
                         format!("examples.bindings.{name}"),
@@ -776,4 +925,194 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
         }
     }
     Report::of("gate1t", violations)
+}
+
+fn find_non_portable_path(text: &str) -> Option<&'static str> {
+    for marker in [
+        "/Users/",
+        "/home/",
+        "file:///Users/",
+        "file:///home/",
+        "\\\\Users\\\\",
+        "/.worktrees/",
+    ] {
+        if text.contains(marker) {
+            return Some(marker);
+        }
+    }
+    let bytes = text.as_bytes();
+    for (idx, window) in bytes.windows(2).enumerate() {
+        let prev = idx.checked_sub(1).and_then(|i| bytes.get(i).copied());
+        let boundary =
+            prev.is_none_or(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'='));
+        if boundary && window == b"~/" {
+            return Some("~/");
+        }
+    }
+    for (idx, window) in bytes.windows(3).enumerate() {
+        let prev = idx.checked_sub(1).and_then(|i| bytes.get(i).copied());
+        let boundary =
+            prev.is_none_or(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'='));
+        if boundary
+            && window[0].is_ascii_alphabetic()
+            && window[1] == b':'
+            && matches!(window[2], b'\\' | b'/')
+        {
+            return Some("drive-path");
+        }
+    }
+    None
+}
+
+fn check_portable_text(label: &str, text: &str, violations: &mut Vec<Violation>) {
+    check_secrets(label, text, violations);
+    if let Some(marker) = find_non_portable_path(text) {
+        violations.push(Violation::new(
+            "template_non_portable_path",
+            label,
+            format!(
+                "Edition template capsules must not embed host-specific or absolute paths ({marker})."
+            ),
+        ));
+    }
+}
+
+/// Gate 1 portability check for edition templates before storage or target admission.
+pub fn check_portable_template(capsule: &[u8], files: &Files, markdown: Option<&[u8]>) -> Report {
+    let mut violations = Vec::new();
+    let parsed = match SkillCapsule::parse(capsule) {
+        Ok(parsed) => Some(parsed),
+        Err(found) => {
+            violations.extend(found);
+            None
+        }
+    };
+    violations.extend(files.violations());
+    let text = String::from_utf8_lossy(capsule);
+    check_portable_text("capsule", &text, &mut violations);
+    for (path, content) in files.iter() {
+        if let Ok(content) = std::str::from_utf8(content) {
+            check_portable_text(path, content, &mut violations);
+        }
+    }
+    if let Some(markdown) = markdown
+        && let Ok(md_text) = std::str::from_utf8(markdown)
+    {
+        check_portable_text("capsule.md", md_text, &mut violations);
+    }
+    if let Some(parsed) = parsed {
+        if parsed.skills.is_empty() {
+            violations.push(Violation::new(
+                "missing_field",
+                "source.skills",
+                "An edition template names the edition skill it came from.",
+            ));
+        }
+        if parsed.form == Form::Hybrid {
+            violations.extend(structure(&parsed, files));
+        }
+    }
+    Report::of("gate1_template", violations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::Files;
+    use serde_json::json;
+
+    #[test]
+    fn contains_literal_ignores_comments_and_partial_identifier_substrings() {
+        assert!(!contains_literal("documentation helper", "document"));
+        assert!(!contains_literal(
+            "build_invoice_data_cache",
+            "invoice_data"
+        ));
+        assert!(contains_literal("read \"document\" here", "document"));
+        assert!(contains_literal("invoices/2026-q3/", "invoices/2026-q3/"));
+
+        let py = b"# example comment: invoices/2026-q3/ and document\ndef build_document_id():\n    return 1\n";
+        let src = std::str::from_utf8(py).unwrap();
+        assert!(!source_contains_example_literal(src, "invoices/2026-q3/"));
+        assert!(!source_contains_example_literal(src, "document"));
+        assert!(source_contains_example_literal(
+            "print('invoices/2026-q3/')\n",
+            "invoices/2026-q3/"
+        ));
+    }
+
+    #[test]
+    fn tool_chain_capsule_requires_read_only_programs() {
+        let mut val = json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "repo-verify", "description": "Read-only repo inspection"},
+            "source": {"skills": [], "tool_chain": {"tree_sha256": "b".repeat(64)}},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": false
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        });
+        let files = Files::from_response(&json!([
+            {"path": "programs/inspect/main.py", "content": "print('ok')\n"}
+        ]));
+        let parsed = SkillCapsule::from_value(&val).unwrap();
+        let bad = structure(&parsed, &files);
+        assert!(bad.iter().any(|v| v.code == "tool_chain_not_read_only"));
+
+        val["programs"][0]["read_only"] = json!(true);
+        let parsed_ok = SkillCapsule::from_value(&val).unwrap();
+        let good = structure(&parsed_ok, &files);
+        assert!(good.is_empty(), "{good:?}");
+    }
+
+    #[test]
+    fn portable_template_rejects_host_paths_and_secrets() {
+        let cap = json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "template",
+            "mu": {"name": "laravel-check", "description": "Check Laravel migrations"},
+            "source": {
+                "edition": "Laravel",
+                "skills": [{"name": "laravel-check", "path": ".claude/skills/laravel-check/SKILL.md", "tree_sha256": "c".repeat(64)}]
+            },
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "check",
+                "entry": ["python3", "programs/check/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/check/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "check"}],
+            "verification": []
+        });
+        let bytes = serde_json::to_vec(&cap).unwrap();
+        let bad_files = Files::from_response(&json!([
+            {"path": "programs/check/main.py", "content": "PATH = '/home/alice/secret/app'\n"}
+        ]));
+        let bad = check_portable_template(&bytes, &bad_files, None);
+        assert!(!bad.passed);
+        assert!(bad.has("template_non_portable_path"));
+
+        let good_files = Files::from_response(&json!([
+            {"path": "programs/check/main.py", "content": "#!/usr/bin/env python3\nprint('portable')\n"}
+        ]));
+        let good = check_portable_template(&bytes, &good_files, None);
+        assert!(good.passed, "{:?}", good.violations);
+    }
 }

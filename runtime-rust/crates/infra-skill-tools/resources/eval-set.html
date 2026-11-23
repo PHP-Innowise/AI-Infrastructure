@@ -4,12 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eval Set Review - __SKILL_NAME_PLACEHOLDER__</title>
+  <link rel="icon" href="data:,">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     [hidden] { display: none !important; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     body { font-family: Georgia, 'Times New Roman', serif; background: #faf9f5; padding: 2rem; color: #141413; }
     h1 { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 0.5rem; font-size: 1.5rem; }
-    .description { color: #b0aea5; margin-bottom: 1.5rem; font-style: italic; max-width: 900px; }
+    .description { color: #5f5d55; margin-bottom: 1.5rem; font-style: italic; max-width: 900px; }
     .controls { margin-bottom: 1rem; display: flex; gap: 0.5rem; }
     .btn { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 0.5rem 1rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
     .btn-add { background: #6a9bcc; color: white; }
@@ -24,15 +26,18 @@
     .section-header td { background: #e8e6dc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 500; font-size: 0.8rem; color: #141413; text-transform: uppercase; letter-spacing: 0.05em; }
     .query-input { width: 100%; padding: 0.4rem; border: 1px solid #e8e6dc; border-radius: 4px; font-size: 0.875rem; font-family: Georgia, 'Times New Roman', serif; resize: vertical; min-height: 60px; }
     .query-input:focus { outline: none; border-color: #d97757; box-shadow: 0 0 0 2px rgba(217,119,87,0.15); }
+    .toggle-wrap { display: inline-flex; align-items: center; gap: 0.5rem; }
     .toggle { position: relative; display: inline-block; width: 44px; height: 24px; }
     .toggle input { opacity: 0; width: 0; height: 0; }
     .toggle .slider { position: absolute; inset: 0; background: #b0aea5; border-radius: 24px; cursor: pointer; transition: 0.2s; }
     .toggle .slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
     .toggle input:checked + .slider { background: #d97757; }
     .toggle input:checked + .slider::before { transform: translateX(20px); }
+    .toggle input:focus-visible + .slider { outline: 2px solid #d97757; outline-offset: 2px; }
+    .trigger-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 0.875rem; font-weight: 500; color: #141413; cursor: pointer; }
     .btn-delete { background: #c44; color: white; padding: 0.3rem 0.6rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
     .btn-delete:hover { background: #a33; }
-    .summary { margin-top: 1rem; color: #b0aea5; font-size: 0.875rem; }
+    .summary { margin-top: 1rem; color: #5f5d55; font-size: 0.875rem; }
   </style>
 </head>
 <body>
@@ -40,8 +45,8 @@
   <p class="description">Current description: <span id="skill-desc">__SKILL_DESCRIPTION_PLACEHOLDER__</span></p>
 
   <div class="controls">
-    <button class="btn btn-add" data-editor-action="add">+ Add Query</button>
-    <button class="btn btn-export" data-editor-action="export">Export Eval Set</button>
+    <button type="button" class="btn btn-add" data-editor-action="add">+ Add Query</button>
+    <button type="button" class="btn btn-export" data-editor-action="export">Export Eval Set</button>
   </div>
 
   <table>
@@ -55,7 +60,7 @@
     <tbody id="eval-body"></tbody>
   </table>
 
-  <p class="summary" id="summary"></p>
+  <p class="summary" id="summary" role="status" aria-live="polite"></p>
 
   <script id="eval-viewer-data" type="application/json">__EVAL_DATA__</script>
 <script type="module" src="__BOOT_URL__"></script>

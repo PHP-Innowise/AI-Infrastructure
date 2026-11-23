@@ -47,6 +47,46 @@ fn history(item: &mut Value, record: Value) {
         a.push(record);
     }
 }
+/// Validates an optional deterministic `precheck` specification (`{argv, timeout_seconds?}`).
+pub(crate) fn validate_precheck(value: Option<&Value>) -> Result<Value> {
+    let Some(value) = value else {
+        return Ok(Value::Null);
+    };
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    if !crate::store::exact(value, &["argv"], &["timeout_seconds"]) {
+        return Err(HarnessError::invalid("Invalid precheck settings."));
+    }
+    let argv_raw = value["argv"]
+        .as_array()
+        .ok_or_else(|| HarnessError::invalid("Precheck argv must be a non-empty array."))?;
+    if argv_raw.is_empty() || argv_raw.len() > 64 {
+        return Err(HarnessError::invalid(
+            "Precheck argv must contain 1–64 arguments.",
+        ));
+    }
+    let mut argv = Vec::with_capacity(argv_raw.len());
+    for arg in argv_raw {
+        let s = arg
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.contains('\0'))
+            .ok_or_else(|| {
+                HarnessError::invalid("Precheck argv entries must be non-empty strings.")
+            })?;
+        argv.push(s.to_owned());
+    }
+    let timeout = match value.get("timeout_seconds") {
+        None | Some(Value::Null) => 30,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (1..=120).contains(n))
+            .ok_or_else(|| {
+                HarnessError::invalid("Precheck timeout_seconds must be an integer from 1 to 120.")
+            })?,
+    };
+    Ok(json!({"argv": argv, "timeout_seconds": timeout}))
+}
 pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<Value>> {
     if value.is_null() {
         return Ok(None);
@@ -55,7 +95,12 @@ pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<
         || !crate::store::exact(
             value,
             &["challenger"],
-            &["rounds", "challenger_model", "challenger_thinking_effort"],
+            &[
+                "rounds",
+                "challenger_model",
+                "challenger_thinking_effort",
+                "precheck",
+            ],
         )
     {
         return Err(HarnessError::invalid("Invalid Clash settings."));
@@ -71,9 +116,17 @@ pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<
             "Choose a different challenger and one to three rounds.",
         ));
     }
-    Ok(Some(
-        json!({"challenger":challenger,"rounds":rounds,"challenger_model":value["challenger_model"],"challenger_thinking_effort":value["challenger_thinking_effort"]}),
-    ))
+    let precheck = validate_precheck(value.get("precheck"))?;
+    let mut out = json!({
+        "challenger": challenger,
+        "rounds": rounds,
+        "challenger_model": value["challenger_model"],
+        "challenger_thinking_effort": value["challenger_thinking_effort"],
+    });
+    if !precheck.is_null() {
+        out["precheck"] = precheck;
+    }
+    Ok(Some(out))
 }
 pub fn new_state(session: &Value, stage: &str, previous: Option<&Value>) -> Value {
     let settings = &session["clash"];
@@ -845,6 +898,19 @@ impl Cycle {
         if turns.len() > MAX {
             turns.drain(..turns.len() - MAX);
         }
+        let model = self.session["model"].as_str();
+        record_workflow_health(
+            &self.store,
+            "clash",
+            provider,
+            model,
+            &session_id,
+            if output.ok { "completed" } else { "failed" },
+            false,
+            !output.ok,
+            output.cost_usd,
+            output.duration_seconds,
+        );
         self.persist(state)?;
         Ok(output)
     }
@@ -932,9 +998,6 @@ impl Cycle {
                     emit.clone(),
                 )
                 .await?;
-            if let Some(message) = budget.post_turn_violation(&res) {
-                return self.incomplete(state, message);
-            }
             (res, Ok(json!({})))
         };
         if let Some(message) = budget.post_turn_violation(&result) {
@@ -949,6 +1012,27 @@ impl Cycle {
                 Ok(valid) => valid,
                 Err(reason) => {
                     record_schema_error(&mut state, role, 0, &reason);
+                    record_workflow_health(
+                        &self.store,
+                        "clash",
+                        &protagonist_provider,
+                        self.session["model"].as_str(),
+                        self.session["id"].as_str().unwrap_or(""),
+                        "schema_error",
+                        true,
+                        true,
+                        None,
+                        0.0,
+                    );
+                    let warnings = workflow_health_warnings(
+                        &self.store,
+                        "clash",
+                        &protagonist_provider,
+                        self.session["model"].as_str(),
+                    );
+                    if !warnings.is_empty() {
+                        state["health_warnings"] = json!(warnings);
+                    }
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -979,13 +1063,18 @@ impl Cycle {
             } else {
                 "{\"verdict\":\"accept|reject\",\"assessments\":[],\"responses\":[],\"additional\":[]}"
             };
+            let chal_required: &[&str] = if stage == "implement" {
+                &["verdict", "objections"]
+            } else {
+                &["verdict", "assessments"]
+            };
             let (result, chal_payload) = self
                 .complete_structured_turn(
                     &mut state,
                     "challenger",
                     round,
                     challenge,
-                    &["verdict", "objections", "assessments"],
+                    chal_required,
                     chal_schema,
                     &mut budget,
                     cancel.clone(),
@@ -1002,6 +1091,27 @@ impl Cycle {
                 Ok(valid) => valid,
                 Err(reason) => {
                     record_schema_error(&mut state, "challenger", round, &reason);
+                    record_workflow_health(
+                        &self.store,
+                        "clash",
+                        &challenger_provider,
+                        self.session["model"].as_str(),
+                        self.session["id"].as_str().unwrap_or(""),
+                        "schema_error",
+                        true,
+                        true,
+                        None,
+                        0.0,
+                    );
+                    let warnings = workflow_health_warnings(
+                        &self.store,
+                        "clash",
+                        &challenger_provider,
+                        self.session["model"].as_str(),
+                    );
+                    if !warnings.is_empty() {
+                        state["health_warnings"] = json!(warnings);
+                    }
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -1035,13 +1145,18 @@ impl Cycle {
             } else {
                 "{\"assessments\":[{\"id\":1,\"stance\":\"agree|dispute|unverified\",\"evidence\":\"...\"}],\"responses\":[{\"id\":1,\"action\":\"defend|withdraw\",\"note\":\"...\"}]}"
             };
+            let resp_required: &[&str] = if stage == "implement" {
+                &["responses"]
+            } else {
+                &["responses", "assessments"]
+            };
             let (result, payload) = self
                 .complete_structured_turn(
                     &mut state,
                     role,
                     round,
                     response,
-                    &["responses", "assessments"],
+                    resp_required,
                     schema_spec,
                     &mut budget,
                     cancel.clone(),
@@ -1058,6 +1173,27 @@ impl Cycle {
                 Ok(valid) => valid,
                 Err(reason) => {
                     record_schema_error(&mut state, role, round, &reason);
+                    record_workflow_health(
+                        &self.store,
+                        "clash",
+                        &protagonist_provider,
+                        self.session["model"].as_str(),
+                        self.session["id"].as_str().unwrap_or(""),
+                        "schema_error",
+                        true,
+                        true,
+                        None,
+                        0.0,
+                    );
+                    let warnings = workflow_health_warnings(
+                        &self.store,
+                        "clash",
+                        &protagonist_provider,
+                        self.session["model"].as_str(),
+                    );
+                    if !warnings.is_empty() {
+                        state["health_warnings"] = json!(warnings);
+                    }
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -1207,19 +1343,147 @@ pub(crate) fn extract_json_fence(text: &str) -> Option<&str> {
     Some(rest[..end].trim())
 }
 
-fn validate_clash_schema(value: &Value) -> std::result::Result<(), String> {
-    if let Some(verdict) = value.get("verdict")
-        && let Some(v) = verdict.as_str()
-        && !["accept", "reject", "continue"].contains(&v)
+fn check_optional_string(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get(key)
+        && !v.is_null()
+        && !v.is_string()
     {
-        return Err(format!("invalid verdict `{v}`"));
+        return Err(format!("`{ctx}.{key}` must be a string"));
     }
-    for array_key in ["objections", "findings", "responses", "assessments"] {
-        if let Some(val) = value.get(array_key)
-            && !val.is_null()
-            && !val.is_array()
-        {
+    Ok(())
+}
+
+fn check_optional_u64(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get(key)
+        && !v.is_null()
+        && !v.is_u64()
+    {
+        return Err(format!("`{ctx}.{key}` must be a non-negative integer"));
+    }
+    Ok(())
+}
+
+fn check_optional_severity(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get("severity")
+        && !v.is_null()
+    {
+        let sev = v
+            .as_str()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !["critical", "high", "medium", "low", "info", "unrated"].contains(&sev.as_str()) {
+            return Err(format!("`{ctx}.severity` has invalid value `{sev}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_clash_schema(value: &Value) -> std::result::Result<(), String> {
+    if let Some(verdict) = value.get("verdict") {
+        let Some(v) = verdict.as_str() else {
+            return Err("`verdict` must be a string".into());
+        };
+        if !["accept", "reject", "continue"].contains(&v) {
+            return Err(format!("invalid verdict `{v}`"));
+        }
+    }
+    if let Some(resolved) = value.get("resolved")
+        && !resolved.is_null()
+    {
+        let Some(arr) = resolved.as_array() else {
+            return Err("`resolved` must be an array".into());
+        };
+        for (idx, item) in arr.iter().enumerate() {
+            if !item.is_u64() {
+                return Err(format!("`resolved[{idx}]` must be a non-negative integer"));
+            }
+        }
+    }
+    for array_key in [
+        "objections",
+        "findings",
+        "additional",
+        "responses",
+        "assessments",
+    ] {
+        let Some(val) = value.get(array_key) else {
+            continue;
+        };
+        if val.is_null() {
+            continue;
+        }
+        let Some(arr) = val.as_array() else {
             return Err(format!("`{array_key}` must be an array"));
+        };
+        for (idx, item) in arr.iter().enumerate() {
+            let ctx = format!("{array_key}[{idx}]");
+            let Some(obj) = item.as_object() else {
+                return Err(format!("`{ctx}` must be an object"));
+            };
+            match array_key {
+                "objections" => {
+                    check_optional_u64(obj, &ctx, "id")?;
+                    let has_id = obj.get("id").is_some_and(Value::is_u64);
+                    if !has_id || obj.get("claim").is_some_and(|v| !v.is_null()) {
+                        let valid_claim = obj
+                            .get("claim")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.trim().is_empty());
+                        if !valid_claim {
+                            return Err(format!("`{ctx}.claim` must be a non-empty string"));
+                        }
+                    }
+                    check_optional_severity(obj, &ctx)?;
+                    check_optional_u64(obj, &ctx, "line")?;
+                    check_optional_string(obj, &ctx, "file")?;
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                "findings" | "additional" => {
+                    let valid_claim = obj
+                        .get("claim")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                    if !valid_claim {
+                        return Err(format!("`{ctx}.claim` must be a non-empty string"));
+                    }
+                    check_optional_severity(obj, &ctx)?;
+                    check_optional_u64(obj, &ctx, "line")?;
+                    check_optional_string(obj, &ctx, "file")?;
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                "responses" => {
+                    if !obj.get("id").is_some_and(Value::is_u64) {
+                        return Err(format!("`{ctx}.id` must be a non-negative integer"));
+                    }
+                    let action = obj.get("action").and_then(Value::as_str).unwrap_or("");
+                    if !["fixed", "rebutted", "deferred", "defend", "withdraw"].contains(&action) {
+                        return Err(format!("`{ctx}.action` has invalid value `{action}`"));
+                    }
+                    check_optional_string(obj, &ctx, "note")?;
+                }
+                "assessments" => {
+                    if !obj.get("id").is_some_and(Value::is_u64) {
+                        return Err(format!("`{ctx}.id` must be a non-negative integer"));
+                    }
+                    let stance = obj.get("stance").and_then(Value::as_str).unwrap_or("");
+                    if !["agree", "dispute", "unverified"].contains(&stance) {
+                        return Err(format!("`{ctx}.stance` has invalid value `{stance}`"));
+                    }
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -1290,19 +1554,273 @@ pub(crate) fn merge_usage_components(acc: &mut Value, turn: &Value) {
     }
 }
 
+fn precheck_workspace(session: &Value) -> &std::path::Path {
+    let workspace = session["project_path"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            session["_workspace_path"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("");
+    std::path::Path::new(workspace)
+}
+
 async fn run_clash_precheck(session: &Value) -> Option<(String, Value)> {
-    let precheck = session.get("clash").and_then(|c| c.get("precheck"))?;
-    let cwd = std::path::Path::new(session["_workspace_path"].as_str().unwrap_or(""));
+    let precheck = session
+        .get("clash")
+        .and_then(|c| c.get("precheck"))
+        .filter(|p| !p.is_null())?;
+    let cwd = precheck_workspace(session);
     let record = run_precheck_sandboxed(cwd, precheck).await?;
     let summary = record["summary"].as_str().unwrap_or("").to_owned();
     Some((summary, record))
 }
 
+/// Nanosecond stat racy-window threshold matching `infra_skillcache::fingerprint::RACY_NS`.
+pub(crate) const PRECHECK_RACY_NS: i128 = 2_000_000_000;
+
+pub(crate) fn ensure_health_table(db: &rusqlite::Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_health_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            run_key TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            schema_error INTEGER NOT NULL DEFAULT 0,
+            deopt INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            duration_seconds REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workflow_health_lookup
+            ON workflow_health_runs(workflow, provider, model, id DESC);",
+    )?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Health ledger row columns mirror skillcache_runs explicitly."
+)]
+pub(crate) fn record_workflow_health(
+    store: &SessionStore,
+    workflow: &str,
+    provider: &str,
+    model: Option<&str>,
+    run_key: &str,
+    outcome: &str,
+    schema_error: bool,
+    deopt: bool,
+    cost_usd: Option<f64>,
+    duration_seconds: f64,
+) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    if ensure_health_table(&db).is_err() {
+        return;
+    }
+    let _ = db.execute(
+        "INSERT INTO workflow_health_runs(workflow,provider,model,run_key,outcome,schema_error,deopt,cost_usd,duration_seconds,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        rusqlite::params![
+            workflow,
+            provider,
+            model.unwrap_or("default"),
+            run_key,
+            outcome,
+            i64::from(schema_error),
+            i64::from(deopt),
+            cost_usd.unwrap_or(0.0),
+            duration_seconds,
+            crate::store::now(),
+        ],
+    );
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WorkflowHealthSummary {
+    pub total_runs: usize,
+    pub schema_error_runs: usize,
+    pub deopt_runs: usize,
+    pub total_cost_usd: f64,
+    pub schema_error_rate: f64,
+    pub deopt_rate: f64,
+    pub warnings: Vec<String>,
+}
+
+pub(crate) fn summarize_workflow_health(
+    store: &SessionStore,
+    workflow: &str,
+    provider: &str,
+    model: Option<&str>,
+) -> WorkflowHealthSummary {
+    let mut summary = WorkflowHealthSummary::default();
+    let Ok(db) = store.connection() else {
+        return summary;
+    };
+    if ensure_health_table(&db).is_err() {
+        return summary;
+    }
+    let model_key = model.unwrap_or("default");
+    let Ok(mut stmt) = db.prepare(
+        "SELECT schema_error, deopt, cost_usd
+         FROM workflow_health_runs
+         WHERE workflow=?1 AND provider=?2 AND model=?3
+         ORDER BY id DESC LIMIT 20",
+    ) else {
+        return summary;
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params![workflow, provider, model_key], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    }) else {
+        return summary;
+    };
+    for row in rows.flatten() {
+        summary.total_runs += 1;
+        if row.0 != 0 {
+            summary.schema_error_runs += 1;
+        }
+        if row.1 != 0 {
+            summary.deopt_runs += 1;
+        }
+        if row.2.is_finite() && row.2 > 0.0 {
+            summary.total_cost_usd += row.2;
+        }
+    }
+    if summary.total_runs > 0 {
+        summary.schema_error_rate = summary.schema_error_runs as f64 / summary.total_runs as f64;
+        summary.deopt_rate = summary.deopt_runs as f64 / summary.total_runs as f64;
+    }
+    if summary.total_runs >= 3 {
+        if summary.schema_error_rate > 0.25 {
+            summary.warnings.push(format!(
+                "High schema error rate for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
+                summary.schema_error_rate * 100.0,
+                summary.schema_error_runs,
+                summary.total_runs
+            ));
+        }
+        if summary.deopt_rate > 0.30 {
+            summary.warnings.push(format!(
+                "Degraded ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% deopted ({}/{})",
+                summary.deopt_rate * 100.0,
+                summary.deopt_runs,
+                summary.total_runs
+            ));
+        }
+    }
+    summary
+}
+
+pub(crate) fn workflow_health_warnings(
+    store: &SessionStore,
+    workflow: &str,
+    provider: &str,
+    model: Option<&str>,
+) -> Vec<String> {
+    summarize_workflow_health(store, workflow, provider, model).warnings
+}
+
+fn time_to_unix_ns(time: std::time::SystemTime) -> Option<i128> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
+        Err(err) => i128::try_from(err.duration().as_nanos())
+            .ok()
+            .and_then(|ns| ns.checked_neg()),
+    }
+}
+
+fn now_unix_ns() -> i128 {
+    time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
+}
+
+fn precheck_workspace_stamp(root: &std::path::Path) -> Option<(String, i128)> {
+    const MAX_ENTRIES: usize = 2000;
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut stamps = Vec::new();
+    let mut max_mtime_ns = root
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(time_to_unix_ns)
+        .unwrap_or(0);
+    while let Some(dir) = queue.pop_front() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        let mut children: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        children.sort_by_key(|e| e.file_name());
+        for entry in children {
+            let name = entry.file_name();
+            let name_s = name.to_string_lossy();
+            if matches!(
+                name_s.as_ref(),
+                ".git" | "target" | "vendor" | "node_modules" | ".phpunit.cache" | ".infra-work"
+            ) {
+                continue;
+            }
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if meta.file_type().is_symlink() {
+                return None;
+            }
+            if meta.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+            if meta.is_file() {
+                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+                max_mtime_ns = max_mtime_ns.max(mtime);
+                let rel = path
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                stamps.push(format!("{rel}:{}:{mtime}", meta.len()));
+                if stamps.len() >= MAX_ENTRIES {
+                    return None;
+                }
+            }
+        }
+    }
+    let digest = crate::store::sha(stamps.join("\n").as_bytes());
+    Some((digest, max_mtime_ns))
+}
+
+fn precheck_cache_settled(max_mtime_ns: i128, now_ns: i128) -> bool {
+    max_mtime_ns > 0 && now_ns > PRECHECK_RACY_NS && max_mtime_ns <= now_ns - PRECHECK_RACY_NS
+}
+
+type PrecheckExec<'a> = &'a (
+        dyn Fn(
+    &[String],
+    &std::path::Path,
+    &BTreeMap<String, String>,
+) -> std::result::Result<(i32, String), String>
+            + Sync
+    );
+
 /// Runs a configured deterministic precheck command inside a network-off `Profile::Gate`
-/// sandbox with scrubbed env and zero-token attribution.
+/// sandbox with scrubbed env, `PRECHECK_RACY_NS`-keyed receipt reuse, and zero-token attribution.
 pub(crate) async fn run_precheck_sandboxed(
     workspace: &std::path::Path,
     precheck: &Value,
+) -> Option<Value> {
+    run_precheck_sandboxed_at(workspace, precheck, now_unix_ns(), None).await
+}
+
+async fn run_precheck_sandboxed_at(
+    workspace: &std::path::Path,
+    precheck: &Value,
+    now_ns: i128,
+    exec: Option<PrecheckExec<'_>>,
 ) -> Option<Value> {
     let argv: Vec<String> = precheck
         .get("argv")
@@ -1320,6 +1838,45 @@ pub(crate) async fn run_precheck_sandboxed(
     }
     let cwd_canon = infra_core::fs::canonicalize(workspace).ok()?;
     let env = infra_host::sandbox::scrub_env(std::env::vars(), &BTreeMap::new());
+    let timeout = precheck["timeout_seconds"]
+        .as_u64()
+        .unwrap_or(30)
+        .clamp(1, 120);
+    let cache_enabled = precheck.get("no_cache").and_then(Value::as_bool) != Some(true)
+        && std::env::var("HARNESS_DISABLE_CHECK_CACHE").as_deref() != Ok("1");
+    static PRECHECK_CACHE: std::sync::OnceLock<Mutex<BTreeMap<String, Value>>> =
+        std::sync::OnceLock::new();
+    let cache = PRECHECK_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let stamp = if cache_enabled {
+        precheck_workspace_stamp(&cwd_canon)
+    } else {
+        None
+    };
+    let cache_key = stamp.as_ref().and_then(|(tree_digest, max_mtime)| {
+        precheck_cache_settled(*max_mtime, now_ns).then(|| {
+            let env_digest =
+                crate::store::sha(serde_json::to_vec(&env).unwrap_or_default().as_slice());
+            crate::store::sha(
+                json!({
+                    "cwd": cwd_canon.to_string_lossy(),
+                    "argv": argv,
+                    "timeout": timeout,
+                    "env": env_digest,
+                    "tree": tree_digest,
+                })
+                .to_string()
+                .as_bytes(),
+            )
+        })
+    });
+    if let Some(key) = &cache_key
+        && let Ok(guard) = cache.lock()
+        && let Some(mut hit) = guard.get(key).cloned()
+    {
+        hit["cached"] = json!(true);
+        return Some(hit);
+    }
+
     let path_env = std::env::var("PATH").ok();
     let wrapped = if infra_host::sandbox::available() {
         let spec = infra_host::sandbox::Spec {
@@ -1338,40 +1895,53 @@ pub(crate) async fn run_precheck_sandboxed(
         argv.clone()
     };
     let cap = infra_skillcache::tool::DIAGNOSTIC_BYTES;
-    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let sink = out.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let timeout = precheck["timeout_seconds"]
-        .as_u64()
-        .unwrap_or(30)
-        .clamp(1, 120);
-    let res = infra_host::process::run_raw_with_lock(
-        &wrapped,
-        &cwd_canon,
-        &env,
-        &[],
-        infra_host::process::Limits {
-            seconds: Some(timeout),
-            output: infra_skillcache::tool::STDOUT_BYTES,
-            line: infra_skillcache::tool::STDOUT_BYTES,
-        },
-        cancel,
-        None,
-        move |chunk| {
-            let mut buf = sink.lock().map_err(|_| {
-                infra_host::HarnessError::unavailable("Precheck buffer lock failed")
-            })?;
-            let left = infra_skillcache::tool::STDOUT_BYTES.saturating_sub(buf.len());
-            buf.extend_from_slice(&chunk[..chunk.len().min(left)]);
-            Ok(())
-        },
-    )
-    .await;
-    let raw = out
-        .lock()
-        .map(|g| String::from_utf8_lossy(&g).into_owned())
-        .unwrap_or_default();
-    let masked = infra_core::domain::mask_secrets(raw.trim())
+    let (ok, code, raw, err_msg): (bool, Option<i32>, String, Option<String>) =
+        if let Some(runner) = exec {
+            match runner(&wrapped, &cwd_canon, &env) {
+                Ok((exit_code, output)) => (exit_code == 0, Some(exit_code), output, None),
+                Err(err) => (false, None, String::new(), Some(err)),
+            }
+        } else {
+            let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let sink = out.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let res = infra_host::process::run_raw_with_lock(
+                &wrapped,
+                &cwd_canon,
+                &env,
+                &[],
+                infra_host::process::Limits {
+                    seconds: Some(timeout),
+                    output: infra_skillcache::tool::STDOUT_BYTES,
+                    line: infra_skillcache::tool::STDOUT_BYTES,
+                },
+                cancel,
+                None,
+                move |chunk| {
+                    let mut buf = sink.lock().map_err(|_| {
+                        infra_host::HarnessError::unavailable("Precheck buffer lock failed")
+                    })?;
+                    let left = infra_skillcache::tool::STDOUT_BYTES.saturating_sub(buf.len());
+                    buf.extend_from_slice(&chunk[..chunk.len().min(left)]);
+                    Ok(())
+                },
+            )
+            .await;
+            let raw = out
+                .lock()
+                .map(|g| String::from_utf8_lossy(&g).into_owned())
+                .unwrap_or_default();
+            let ok = res.as_ref().is_ok_and(|o| o.code == 0);
+            let code = res.as_ref().ok().map(|o| o.code);
+            let err_msg = res.err().map(|e| e.message);
+            (ok, code, raw, err_msg)
+        };
+    let diagnostic_input = if raw.trim().is_empty() {
+        err_msg.as_deref().unwrap_or("")
+    } else {
+        raw.trim()
+    };
+    let masked = infra_core::domain::mask_secrets(diagnostic_input)
         .map(|(t, _)| t)
         .unwrap_or_else(|_| "[redacted]".into());
     let mut end = masked.len().min(cap);
@@ -1379,13 +1949,12 @@ pub(crate) async fn run_precheck_sandboxed(
         end -= 1;
     }
     let summary = masked[..end].to_owned();
-    let ok = res.as_ref().is_ok_and(|o| o.code == 0);
-    let code = res.as_ref().ok().map(|o| o.code);
-    Some(json!({
+    let record = json!({
         "ok": ok,
         "exit_code": code,
         "summary": summary,
         "deterministic": true,
+        "cached": false,
         "usage_components": {
             "input_tokens": 0u64,
             "output_tokens": 0u64,
@@ -1395,7 +1964,17 @@ pub(crate) async fn run_precheck_sandboxed(
             "model_calls": 0u64,
             "source": "deterministic"
         }
-    }))
+    });
+    if ok
+        && let Some(key) = cache_key
+        && let Ok(mut guard) = cache.lock()
+    {
+        if guard.len() >= 128 {
+            guard.clear();
+        }
+        guard.insert(key, record.clone());
+    }
+    Some(record)
 }
 
 #[cfg(test)]
@@ -1472,5 +2051,252 @@ mod tests {
         assert_eq!(acc["cache_read_input_tokens"], 40);
         assert_eq!(acc["cache_write_5m_input_tokens"], 30);
         assert_eq!(acc["model_calls"], 2);
+    }
+
+    #[test]
+    fn clash_validate_accepts_precheck_and_rejects_invalid_precheck() {
+        let valid = validate(
+            &json!({
+                "challenger": "codex",
+                "rounds": 2,
+                "precheck": {"argv": ["php", "-l", "src/App.php"], "timeout_seconds": 15}
+            }),
+            "native",
+            "claude",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            valid["precheck"]["argv"],
+            json!(["php", "-l", "src/App.php"])
+        );
+        assert_eq!(valid["precheck"]["timeout_seconds"], 15);
+
+        let defaulted = validate(
+            &json!({
+                "challenger": "codex",
+                "precheck": {"argv": ["cargo", "check"]}
+            }),
+            "review",
+            "claude",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(defaulted["precheck"]["timeout_seconds"], 30);
+
+        for bad in [
+            json!({"challenger": "codex", "precheck": {"argv": []}}),
+            json!({"challenger": "codex", "precheck": {"argv": [""]}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "timeout_seconds": 0}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "timeout_seconds": 121}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "extra": true}}),
+        ] {
+            assert!(validate(&bad, "native", "claude").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn validate_clash_schema_enforces_item_level_contracts_without_breaking_valid_payloads() {
+        // Valid implement-stage challenge (including id-only maintenance + resolved IDs).
+        assert!(
+            parse_strict_payload(
+                r#"{"verdict":"reject","objections":[{"id":1},{"severity":"high","file":"a.php","line":10,"claim":"Null deref","evidence":"line 10"}],"resolved":[2]}"#,
+                &["verdict"],
+            )
+            .is_ok()
+        );
+        // Valid review-stage payload.
+        assert!(
+            parse_strict_payload(
+                r#"{"verdict":"accept","assessments":[{"id":1,"stance":"agree","evidence":"verified"}],"responses":[{"id":2,"action":"defend","note":"valid"}],"additional":[{"severity":"low","file":"b.php","line":3,"claim":"Check","evidence":"e"}]}"#,
+                &["verdict"],
+            )
+            .is_ok()
+        );
+        // Invalid item-level shapes rejected cleanly.
+        for bad in [
+            r#"{"verdict":null,"objections":[]}"#,
+            r#"{"verdict":"accept","resolved":["bad"]}"#,
+            r#"{"verdict":"reject","objections":[{"severity":"bogus","claim":"x"}]}"#,
+            r#"{"verdict":"reject","objections":[{"file":"a.php"}]}"#,
+            r#"{"findings":[{"severity":"high","file":"a.php"}]}"#,
+            r#"{"responses":[{"id":1,"action":"ignored"}]}"#,
+            r#"{"assessments":[{"id":1,"stance":"unsure"}]}"#,
+        ] {
+            assert!(
+                validate_clash_schema(&serde_json::from_str(bad).unwrap()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    fn echo_argv(message: &str) -> Value {
+        if cfg!(windows) {
+            json!(["cmd", "/C", format!("echo {message}")])
+        } else {
+            json!(["/bin/sh", "-c", format!("echo {message}")])
+        }
+    }
+
+    #[tokio::test]
+    async fn run_clash_precheck_reads_project_path_and_falls_back_to_workspace_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let missing = ws.join("does-not-exist");
+
+        // Persisted `SessionStore` rows carry `project_path` (no `_workspace_path`).
+        let persisted_session = json!({
+            "project_path": ws,
+            "_workspace_path": missing,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": echo_argv("clash-precheck-project-path"), "timeout_seconds": 10}
+            }
+        });
+        assert_eq!(precheck_workspace(&persisted_session), ws.as_path());
+        let (_summary, record) = run_clash_precheck(&persisted_session).await.expect(
+            "precheck should resolve persisted project_path even when _workspace_path is missing",
+        );
+        assert_eq!(record["deterministic"], true);
+        assert_eq!(record["usage_components"]["model_calls"], 0);
+        assert_eq!(record["usage_components"]["source"], "deterministic");
+
+        // Fallback to transient `_workspace_path` when `project_path` is absent/empty.
+        let transient_session = json!({
+            "project_path": "",
+            "_workspace_path": ws,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": echo_argv("clash-precheck-fallback"), "timeout_seconds": 10}
+            }
+        });
+        assert_eq!(precheck_workspace(&transient_session), ws.as_path());
+        let (_fallback_summary, fallback_record) = run_clash_precheck(&transient_session)
+            .await
+            .expect("precheck should fall back to _workspace_path");
+        assert_eq!(fallback_record["deterministic"], true);
+
+        // Missing or empty paths return None cleanly.
+        let missing_session = json!({
+            "project_path": missing,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": echo_argv("unreachable"), "timeout_seconds": 10}
+            }
+        });
+        assert!(run_clash_precheck(&missing_session).await.is_none());
+    }
+
+    #[test]
+    fn workflow_health_ledger_tracks_schema_errors_and_emits_roi_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        for i in 0..4 {
+            record_workflow_health(
+                &store,
+                "fleet",
+                "codex",
+                Some("gpt-5"),
+                &format!("run-{i}"),
+                if i < 2 { "schema_error" } else { "completed" },
+                i < 2,
+                i < 2,
+                Some(0.05),
+                1.2,
+            );
+        }
+        let summary = summarize_workflow_health(&store, "fleet", "codex", Some("gpt-5"));
+        assert_eq!(summary.total_runs, 4);
+        assert_eq!(summary.schema_error_runs, 2);
+        assert_eq!(summary.deopt_runs, 2);
+        assert!((summary.schema_error_rate - 0.5).abs() < 1e-6);
+        assert!(
+            summary
+                .warnings
+                .iter()
+                .any(|w| w.contains("schema error rate"))
+        );
+        assert!(summary.warnings.iter().any(|w| w.contains("ROI/deopt")));
+    }
+
+    #[tokio::test]
+    async fn run_precheck_sandboxed_reuses_racy_ns_settled_receipt_and_invalidates_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let file = ws.join("app.php");
+        std::fs::write(&file, "<?php\n").unwrap();
+
+        let precheck = json!({
+            "argv": echo_argv("precheck-ok"),
+            "timeout_seconds": 10
+        });
+        let (_digest, max_mtime) =
+            precheck_workspace_stamp(&infra_core::fs::canonicalize(&ws).unwrap()).unwrap();
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let run_local =
+            move |cmd: &[String],
+                  cwd: &std::path::Path,
+                  env: &std::collections::BTreeMap<String, String>| {
+                calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let out = std::process::Command::new(&cmd[0])
+                    .args(&cmd[1..])
+                    .current_dir(cwd)
+                    .env_clear()
+                    .envs(env)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !out.stderr.is_empty() {
+                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                }
+                Ok((out.status.code().unwrap_or(-1), text))
+            };
+
+        // Inside 2s RACY_NS window: never hits or populates cache.
+        let racy_rec = run_precheck_sandboxed_at(
+            &ws,
+            &precheck,
+            max_mtime + PRECHECK_RACY_NS - 1,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert_eq!(racy_rec["ok"], true);
+        assert_eq!(racy_rec["cached"], false);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Outside RACY_NS window: first run computes and caches, second hits cache.
+        let settled_now = max_mtime + PRECHECK_RACY_NS + 100;
+        let first = run_precheck_sandboxed_at(&ws, &precheck, settled_now, Some(&run_local))
+            .await
+            .unwrap();
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["cached"], false);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let second = run_precheck_sandboxed_at(&ws, &precheck, settled_now + 50, Some(&run_local))
+            .await
+            .unwrap();
+        assert_eq!(second["cached"], true);
+        assert_eq!(second["summary"], first["summary"]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // Updating workspace file invalidates cached precheck cleanly.
+        std::fs::write(&file, "<?php\necho 1;\n").unwrap();
+        let (_, new_mtime) =
+            precheck_workspace_stamp(&infra_core::fs::canonicalize(&ws).unwrap()).unwrap();
+        let after_edit = run_precheck_sandboxed_at(
+            &ws,
+            &precheck,
+            new_mtime + PRECHECK_RACY_NS + 100,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after_edit["ok"], true);
+        assert_eq!(after_edit["cached"], false);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

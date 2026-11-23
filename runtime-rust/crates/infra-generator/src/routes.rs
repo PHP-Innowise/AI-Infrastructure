@@ -83,6 +83,179 @@ fn registry(request: &Value) -> Result<PathBuf> {
     let root = path(request, "generator_root")?;
     Ok(root.join(".agents/skills/skill-forge/references/candidate-registry.json"))
 }
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+struct Violation {
+    severity: String,
+    code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    message: String,
+}
+
+fn classify_generated_violation(message: &str) -> Violation {
+    let trimmed = message.trim();
+    let (code, path) = if let Some(rest) = trimmed.strip_prefix("manifest sha256 mismatch for ") {
+        ("MANIFEST_HASH_MISMATCH".into(), Some(rest.to_owned()))
+    } else if let Some(rest) = trimmed.strip_prefix("manifest unsafe or missing path ") {
+        (
+            "MANIFEST_MISSING_FILE".into(),
+            rest.split(':').next().map(str::trim).map(str::to_owned),
+        )
+    } else if trimmed.starts_with("manifest ")
+        || trimmed.starts_with("manifest_version ")
+        || trimmed.starts_with("generator_version ")
+    {
+        (
+            "MANIFEST_INVALID".into(),
+            Some(".infra-manifest.json".into()),
+        )
+    } else if trimmed.contains("AGENTS stamp") || trimmed.contains("AGENTS first line") {
+        ("MANIFEST_AGENTS_STAMP".into(), Some("AGENTS.md".into()))
+    } else if let Some(rest) =
+        trimmed.strip_prefix("generated native hook policy resource must be manifest-owned: ")
+    {
+        ("HOOK_POLICY_UNOWNED".into(), Some(rest.trim().to_owned()))
+    } else if trimmed.starts_with("hook policy ")
+        || trimmed.starts_with("native hook policy:")
+        || trimmed.starts_with("generated validation requires actual approved-profile")
+    {
+        (
+            "HOOK_POLICY_INVALID".into(),
+            Some(crate::hook_policy::PATH.into()),
+        )
+    } else if trimmed == "CLI editions do not match manifest editions" {
+        (
+            "EDITION_MISMATCH".into(),
+            Some(".infra-manifest.json".into()),
+        )
+    } else if trimmed.starts_with("Native runtime artifact is not manifest-owned: ") {
+        (
+            "NATIVE_ARTIFACT_UNOWNED".into(),
+            trimmed.split(": ").nth(1).map(|p| p.trim().to_owned()),
+        )
+    } else if trimmed == "Native runtime artifact is not executable" {
+        (
+            "NATIVE_ARTIFACT_NOT_EXECUTABLE".into(),
+            crate::assets::required_artifact().ok(),
+        )
+    } else if let Some(rest) = trimmed
+        .strip_prefix("runtime skeleton directory missing: ")
+        .or_else(|| trimmed.strip_prefix("runtime skeleton file missing or not owned: "))
+    {
+        (
+            "RUNTIME_SKELETON_MISSING".into(),
+            Some(rest.trim().to_owned()),
+        )
+    } else if trimmed.starts_with("runtime framework ")
+        || trimmed.starts_with("runtime canonical_edition ")
+        || trimmed.starts_with("runtime configuration:")
+    {
+        (
+            "RUNTIME_CONFIG_INVALID".into(),
+            Some("project-brain/config/runtime.json".into()),
+        )
+    } else if trimmed.starts_with("memory-bank: ") {
+        ("MEMORY_BANK_INVALID".into(), Some("memory-bank".into()))
+    } else if let Some(rest) = trimmed.strip_prefix("project-brain source ") {
+        (
+            "PROJECT_BRAIN_INVALID".into(),
+            rest.split(':').next().map(str::trim).map(str::to_owned),
+        )
+    } else if trimmed.starts_with("project-brain ") || trimmed.starts_with("project-brain:") {
+        ("PROJECT_BRAIN_INVALID".into(), Some("project-brain".into()))
+    } else if trimmed.starts_with("native runtime ")
+        || trimmed.starts_with("status missing automatic_memory")
+        || trimmed.contains("automatic_memory")
+    {
+        ("NATIVE_RUNTIME_STATUS".into(), None)
+    } else if trimmed.contains(": unresolved placeholder matching ") {
+        (
+            "UNRESOLVED_PLACEHOLDER".into(),
+            trimmed
+                .split(": unresolved placeholder")
+                .next()
+                .map(str::to_owned),
+        )
+    } else if let Some((tag, body)) = trimmed.strip_prefix('[').and_then(|s| s.split_once("] ")) {
+        if let Some(root) = body.strip_prefix("selected edition root missing: ") {
+            ("EDITION_ROOT_MISSING".into(), Some(root.trim().to_owned()))
+        } else if body.starts_with("unselected edition") {
+            ("EDITION_UNSELECTED_FILES".into(), None)
+        } else if body.starts_with("selected skills tree missing") {
+            ("EDITION_SKILLS_MISSING".into(), None)
+        } else if body.starts_with("runtime guide missing:") {
+            ("RUNTIME_GUIDE_MISSING".into(), None)
+        } else if body.starts_with("runtime agent wrapper not manifest-owned:") {
+            ("AGENT_WRAPPER_UNOWNED".into(), None)
+        } else if body.starts_with("runtime command wrapper not manifest-owned:") {
+            ("COMMAND_WRAPPER_UNOWNED".into(), None)
+        } else if body.starts_with("policy import missing:")
+            || body.starts_with("CLAUDE.md must import")
+        {
+            (
+                "CLAUDE_POLICY_IMPORT".into(),
+                Some(".claude/CLAUDE.md".into()),
+            )
+        } else if body.contains("required hook")
+            || body.contains("hook wiring")
+            || body.contains("exec-only adapter")
+        {
+            let hook_path = body
+                .split([':', ' '])
+                .find(|tok| {
+                    tok.ends_with(".sh") || tok.ends_with(".json") || tok.ends_with(".toml")
+                })
+                .map(|p| p.trim_end_matches(':').to_owned());
+            ("HOST_HOOK_INVALID".into(), hook_path)
+        } else if tag.starts_with("semantic[") {
+            let sub = body.split(':').next().unwrap_or("SEMANTIC").trim();
+            (format!("SEMANTIC_{sub}"), None)
+        } else if tag.starts_with("routing[") {
+            let sub = body.split(':').next().unwrap_or("ROUTING").trim();
+            (format!("ROUTING_{sub}"), None)
+        } else if tag.starts_with("flow-routing[") || tag.starts_with("flow-contract[") {
+            ("FLOW_CONTRACT_INVALID".into(), None)
+        } else {
+            let candidate_path = body
+                .split(": ")
+                .next()
+                .filter(|p| p.contains('/') || p.ends_with(".md"))
+                .map(str::to_owned);
+            ("EDITION_CONTRACT_INVALID".into(), candidate_path)
+        }
+    } else if let Some((file_part, rest)) = trimmed.split_once(": ") {
+        let code = if rest.contains("not executable") {
+            "HOST_HOOK_NOT_EXECUTABLE"
+        } else if rest.contains("Memory MCP") {
+            "HOST_MCP_INVALID"
+        } else {
+            "HOST_WIRING_INVALID"
+        };
+        (code.into(), Some(file_part.trim().to_owned()))
+    } else {
+        ("GENERATED_VALIDATION_OTHER".into(), None)
+    };
+
+    Violation {
+        severity: "error".into(),
+        code,
+        path,
+        message: trimmed.to_owned(),
+    }
+}
+
+fn violation_report(items: Vec<Violation>) -> Value {
+    let items: Vec<Violation> = items
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    object!({
+        "valid": !items.iter().any(|item| item.severity == "error"),
+        "diagnostics": items
+    })
+}
+
 fn emit_diagnostics(
     items: Vec<Diagnostic>,
     as_json: bool,
@@ -278,16 +451,12 @@ pub fn execute(
             };
             let errors = generated::validate(&options, services)?;
             if flag(request, "json") {
-                let items: Vec<Diagnostic> = errors
+                let items: Vec<Violation> = errors
                     .iter()
-                    .map(|message| Diagnostic {
-                        severity: "error".into(),
-                        code: "GENERATED_VALIDATION".into(),
-                        message: message.clone(),
-                    })
+                    .map(|message| classify_generated_violation(message))
                     .collect();
                 let count = errors.len();
-                let mut payload = report(items);
+                let mut payload = violation_report(items);
                 payload["error_count"] = object!(count);
                 payload["errors"] = object!(errors);
                 return GeneratorOutput::json(&payload, i32::from(count > 0));
@@ -760,9 +929,25 @@ mod tests {
         assert_eq!(payload["valid"], false);
         assert!(payload["error_count"].as_u64().unwrap_or(0) > 0);
         assert!(
-            payload["diagnostics"].as_array().is_some_and(
-                |items| !items.is_empty() && items[0]["code"] == "GENERATED_VALIDATION"
-            )
+            payload["diagnostics"].as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items.iter().all(|item| {
+                        item["code"]
+                            .as_str()
+                            .is_some_and(|c| !c.is_empty() && c != "GENERATED_VALIDATION")
+                            && item["message"].as_str().is_some_and(|m| !m.is_empty())
+                    })
+            }),
+            "{payload}"
         );
+        let placeholder =
+            classify_generated_violation(r"AGENTS.md: unresolved placeholder matching \bTODO\b");
+        assert_eq!(placeholder.code, "UNRESOLVED_PLACEHOLDER");
+        assert_eq!(placeholder.path.as_deref(), Some("AGENTS.md"));
+        let skeleton = classify_generated_violation(
+            "runtime skeleton file missing or not owned: specs/MANIFEST.md",
+        );
+        assert_eq!(skeleton.code, "RUNTIME_SKELETON_MISSING");
+        assert_eq!(skeleton.path.as_deref(), Some("specs/MANIFEST.md"));
     }
 }

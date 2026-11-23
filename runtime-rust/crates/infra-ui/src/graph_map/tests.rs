@@ -10197,6 +10197,15 @@ fn progressive_lod_urls_and_cross_graph_code_map_context_are_preserved() {
     assert_eq!(file_st["target"], json!("commit:abc1234"));
     assert_eq!(file_st["semantic_kind"], json!("di_binds"));
     assert_eq!(file_st["filter"], json!("invoice"));
+
+    let min_only = json!({"auto_lod": false, "min_weight": 5, "scope": ""});
+    assert_eq!(
+        surfaces::progressive_lod_for_state(&min_only, None),
+        (None, Some(5))
+    );
+    let url_min = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &min_only, false);
+    assert!(!url_min.contains("lod="), "{url_min}");
+    assert!(url_min.contains("min_weight=5"), "{url_min}");
 }
 
 #[test]

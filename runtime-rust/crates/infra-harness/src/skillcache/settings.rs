@@ -17,6 +17,34 @@ pub const EVAL_ARMS: [&str; 6] = [
     "skillcache_no_replay",
 ];
 pub const EVAL_SETTING: &str = "skillcache.eval_arms";
+pub const WORKSPACE_ALLOWLIST: &str = "skillcache.workspace_allowlist";
+/// Opt-in flag enabling skillless read-only `ToolChain` capsule capture/reuse.
+pub const TOOLCHAIN_CAPSULES: &str = "skillcache.tool_chain_capsules";
+
+/// Whether skillless read-only `ToolChain` capsules are enabled for `session`.
+pub fn tool_chain_enabled(store: &crate::store::SessionStore, session: &Value) -> bool {
+    session["skillcache"]["tool_chain"] == true
+        || store
+            .setting(TOOLCHAIN_CAPSULES)
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == true || value["enabled"] == true)
+}
+
+/// Optional project/store-wide safe directory allowlist overriding default
+/// dependency ignores (`node_modules`, `vendor`, `.venv`, `dist`, `build`, `.next`).
+pub fn workspace_allowlist(store: &crate::store::SessionStore) -> Vec<String> {
+    store
+        .setting(WORKSPACE_ALLOWLIST)
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_owned))
+        .filter(|name| infra_skillcache::executor::is_safe_allowlist_name(name))
+        .collect()
+}
 
 fn optional_id(value: Option<&Value>, label: &str) -> Result<Option<String>> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
@@ -68,6 +96,8 @@ pub fn validate(value: &Value) -> Result<Value> {
             "eval_arm",
             "trace_generation",
             "capsule_id",
+            "tool_chain",
+            "edition",
         ]
         .contains(&key.as_str())
     }) {
@@ -128,6 +158,21 @@ pub fn validate(value: &Value) -> Result<Value> {
     };
     let trace_generation = optional_id(settings.get("trace_generation"), "trace_generation")?;
     let capsule_id = optional_id(settings.get("capsule_id"), "capsule_id")?;
+    let tool_chain = match settings.get("tool_chain") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => return Err(invalid()),
+    };
+    let edition = match settings.get("edition") {
+        None | Some(Value::Null) => None,
+        Some(val) => {
+            let text = crate::store::text(val, "edition", 64)?;
+            if text.contains("..") || text.contains(['/', '\\']) {
+                return Err(HarnessError::invalid("Invalid SkillCache edition."));
+            }
+            Some(text)
+        }
+    };
     if mode == "off" && eval_arm.is_none() && trace_generation.is_none() && capsule_id.is_none() {
         return Ok(Value::Null);
     }
@@ -144,6 +189,12 @@ pub fn validate(value: &Value) -> Result<Value> {
     }
     if let Some(capsule) = capsule_id {
         stored["capsule_id"] = capsule.into();
+    }
+    if tool_chain {
+        stored["tool_chain"] = true.into();
+    }
+    if let Some(edition) = edition {
+        stored["edition"] = edition.into();
     }
     Ok(stored)
 }

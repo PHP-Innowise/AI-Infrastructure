@@ -1047,12 +1047,16 @@ fn retrieve_inner(
         );
     }
     warnings.extend(binding_notices);
-    let (mut candidates, diagnostics) = query::rank_candidates_observed(
-        &store.conn,
+    let (mut candidates, diagnostics) = cached_or_rank_candidates(
+        store,
         &query,
         request.limit.saturating_mul(10).max(20),
         scope.as_deref(),
-        Some(&mut trace),
+        request.task_id.as_deref().unwrap_or(""),
+        &profile,
+        task.as_ref(),
+        !request.trace_paths.is_empty(),
+        &mut trace,
     )?;
     let mut graph_anchor_count = 0usize;
     let mut graph_candidate_count = 0usize;
@@ -2190,4 +2194,236 @@ fn prune_manifests(directory: &Path, retention: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+static QUERY_PLAN_CACHE_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static QUERY_PLAN_CACHE_MISSES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep query-plan cache lookup dimensions explicit at the FTS5 boundary."
+)]
+fn cached_or_rank_candidates(
+    store: &mut Store,
+    query: &str,
+    limit: usize,
+    scope: Option<&[String]>,
+    task_id: &str,
+    capsule_profile: &str,
+    task: Option<&Value>,
+    has_watched_paths: bool,
+    trace: &mut crate::observability::Trace,
+) -> Result<(Vec<Candidate>, Diagnostics)> {
+    let plan_key = if !has_watched_paths {
+        crate::storage::index_generation(&store.conn)
+            .ok()
+            .map(|index_generation| {
+                let scope_digest = scope
+                    .map(|paths| {
+                        serde_json::to_vec(paths)
+                            .map(|bytes| query::sha256(&bytes))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_else(|| "all".into());
+                let task_rev = task
+                    .and_then(|record| record["revision"].as_u64())
+                    .unwrap_or(0);
+                let task_updated = task
+                    .and_then(|record| record["updated_at"].as_str())
+                    .unwrap_or("");
+                let today = crate::domain::clock::today().to_string();
+                crate::storage::QueryPlanKey {
+                    word_tokens: query::word_tokens(query),
+                    task_id: task_id.to_owned(),
+                    capsule_profile: capsule_profile.to_owned(),
+                    index_generation,
+                    working_rev: format!(
+                        "{task_rev}:{task_updated}:{limit}:{scope_digest}:{today}"
+                    ),
+                }
+            })
+    } else {
+        None
+    };
+
+    if let Some(key) = &plan_key
+        && let Some(hit) = crate::storage::QueryPlanCache::lookup(&store.conn, key)
+    {
+        #[cfg(test)]
+        QUERY_PLAN_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        trace.evidence_terms = hit.evidence_terms;
+        trace.required_terms = hit.required_terms;
+        if let Some(events) = hit.funnel_events {
+            trace.funnel["events"] = events;
+        }
+        return Ok((hit.candidates, hit.diagnostics));
+    }
+
+    #[cfg(test)]
+    QUERY_PLAN_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let (candidates, diagnostics) =
+        query::rank_candidates_observed(&store.conn, query, limit, scope, Some(trace))?;
+    if let Some(key) = &plan_key {
+        crate::storage::QueryPlanCache::store(store, key, &candidates, &diagnostics, Some(trace));
+    }
+    Ok((candidates, diagnostics))
+}
+
+#[cfg(test)]
+mod query_plan_cache_tests {
+    use super::*;
+    use crate::domain::uuid4;
+    use std::sync::atomic::Ordering;
+
+    struct OwnedDir(PathBuf);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn retrieval_hits_query_plan_cache_and_falls_back_when_index_or_cache_changes() {
+        let root = std::env::temp_dir().join(format!("infra-qpc-ret-{}", uuid4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let _dir = OwnedDir(root.clone());
+        let mut store = Store::open(
+            root.join("context.db"),
+            crate::storage::OpenOptions::refresh(None),
+        )
+        .unwrap();
+        store
+            .transaction(|conn| {
+                conn.execute(
+                    "INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?1,'semantic','finding',?2,?3,?4)",
+                    rusqlite::params![
+                        "memory-bank/chunks/MEM-20260101-abcd1234-invoice.md",
+                        "Invoice numbering rules",
+                        "Invoices reset yearly per tenant",
+                        "Invoices reset yearly per tenant in InvoiceRepository"
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO document_metadata(path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation) VALUES(?1,'durable','team','*','verified','active',?2,NULL,'[]','[]',?3,1.0,'')",
+                    rusqlite::params![
+                        "memory-bank/chunks/MEM-20260101-abcd1234-invoice.md",
+                        "1".repeat(64),
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let roots = crate::Roots::discover(&root, &root).unwrap();
+        let config = RuntimeConfig::load(&roots).unwrap();
+        let mut t1 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
+        let before_misses = QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed);
+        let before_hits = QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed);
+
+        let (first, d1) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            false,
+            &mut t1,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
+            before_misses + 1
+        );
+        assert_eq!(QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed), before_hits);
+        assert_eq!(first.len(), 1);
+
+        let mut t2 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
+        let (second, d2) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            false,
+            &mut t2,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed),
+            before_hits + 1
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].document.path, first[0].document.path);
+        assert_eq!(second[0].snippet, first[0].snippet);
+        assert_eq!(d2.coverage, d1.coverage);
+        assert_eq!(t2.funnel["events"], t1.funnel["events"]);
+
+        // Corrupt cached JSON -> automatic live FTS5 fallback keeps retrieval working.
+        store
+            .transaction(|conn| {
+                conn.execute("UPDATE query_plan_cache SET payload='{corrupt'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let mut t3 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
+        let (third, _) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            false,
+            &mut t3,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
+            before_misses + 2
+        );
+        assert_eq!(third.len(), 1);
+
+        // Changing capsule_profile or index_generation invalidates cache cleanly.
+        store
+            .transaction(|conn| {
+                conn.execute(
+                    "UPDATE document_metadata SET source_hash=?1 WHERE path=?2",
+                    rusqlite::params![
+                        "2".repeat(64),
+                        "memory-bank/chunks/MEM-20260101-abcd1234-invoice.md"
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut t4 = crate::observability::Trace::new(config, &[]).unwrap();
+        let (fourth, _) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            false,
+            &mut t4,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
+            before_misses + 3
+        );
+        assert_eq!(fourth.len(), 1);
+    }
 }

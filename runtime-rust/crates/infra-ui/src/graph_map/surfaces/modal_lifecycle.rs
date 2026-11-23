@@ -1799,6 +1799,28 @@ pub async fn event(
                     "aria-expanded",
                     if next_hidden { "false" } else { "true" },
                 );
+                if !next_hidden {
+                    if let Some(html_pop) = pop.dyn_ref::<web_sys::HtmlElement>() {
+                        let style = html_pop.style();
+                        let _ = style.set_property("left", "0px");
+                        let _ = style.set_property("right", "auto");
+                        let vw = dom::window()
+                            .inner_width()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1280.0);
+                        let rect = pop.get_bounding_client_rect();
+                        if rect.right() > vw - 12.0 {
+                            let _ = style.set_property("left", "auto");
+                            let _ = style.set_property("right", "0px");
+                            let flipped = pop.get_bounding_client_rect();
+                            if flipped.left() < 12.0 {
+                                let shift = 12.0 - flipped.left();
+                                let _ = style.set_property("right", &format!("-{shift:.0}px"));
+                            }
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -2049,6 +2071,26 @@ pub async fn event(
         }
         ("change", "graph-map-no-incoming", _) => {
             state["no_incoming"] = json!(checked);
+        }
+        ("change", "graph-map-lod", _) => {
+            let clean = value.trim().to_ascii_lowercase();
+            if matches!(clean.as_str(), "crate" | "folder" | "file" | "symbol") {
+                state["lod"] = json!(clean);
+            } else {
+                state["lod"] = V::Null;
+                state["auto_lod"] = json!(true);
+            }
+            state["offset"] = json!(0);
+        }
+        ("change", "graph-map-min-weight", _) => {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|&w| w >= 1)
+                .map(|w| w.min(1_000_000));
+            state["min_weight"] = parsed.map_or(V::Null, |w| json!(w));
+            state["offset"] = json!(0);
         }
         ("change", "graph-map-modules", _) => {
             state = unfollowed(state);

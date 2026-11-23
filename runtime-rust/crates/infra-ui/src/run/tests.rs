@@ -1769,6 +1769,18 @@ new file mode 100644
         assert!(!can_target_drawer_shortcut(false, false, false));
         assert!(can_target_drawer_shortcut(true, false, false));
         assert!(can_target_drawer_shortcut(false, true, false));
+        assert!(
+            super::super::permissions::should_toggle_approvals_drawer_on_alt_a(false, false, false)
+        );
+        assert!(
+            super::super::permissions::should_toggle_approvals_drawer_on_alt_a(true, false, false)
+        );
+        assert!(
+            !super::super::permissions::should_toggle_approvals_drawer_on_alt_a(true, true, false)
+        );
+        assert!(
+            !super::super::permissions::should_toggle_approvals_drawer_on_alt_a(false, false, true)
+        );
 
         m::write(|s| {
             s.sid = "active-sess".into();

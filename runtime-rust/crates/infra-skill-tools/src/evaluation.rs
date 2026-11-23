@@ -5,11 +5,130 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     time::Duration,
 };
+
+const MAX_DESCRIPTION_CHARS: usize = 4096;
+const MAX_QUERY_MEMO_ENTRIES: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct QueryMemoKey {
+    platform: String,
+    project_sha256: String,
+    description_sha256: String,
+    query_sha256: String,
+    model: String,
+    sample_index: usize,
+}
+
+#[derive(Default)]
+struct QueryMemoCache {
+    entries: HashMap<QueryMemoKey, bool>,
+    order: VecDeque<QueryMemoKey>,
+    hits: u64,
+    misses: u64,
+}
+
+impl QueryMemoCache {
+    fn get(&mut self, key: &QueryMemoKey) -> Option<bool> {
+        if let Some(&hit) = self.entries.get(key) {
+            self.hits += 1;
+            Some(hit)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, key: QueryMemoKey, result: bool) {
+        self.misses += 1;
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        if self.entries.len() >= MAX_QUERY_MEMO_ENTRIES
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.entries.remove(&evicted);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, result);
+    }
+}
+
+fn query_memo() -> &'static Mutex<QueryMemoCache> {
+    static MEMO: OnceLock<Mutex<QueryMemoCache>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(QueryMemoCache::default()))
+}
+
+fn query_memo_key(
+    platform: &str,
+    project: &Path,
+    description: &str,
+    query: &str,
+    model: Option<&str>,
+    sample_index: usize,
+) -> QueryMemoKey {
+    QueryMemoKey {
+        platform: platform.to_string(),
+        project_sha256: infra_core::query::sha256(project.as_os_str().as_encoded_bytes()),
+        description_sha256: infra_core::query::sha256(description.as_bytes()),
+        query_sha256: infra_core::query::sha256(query.as_bytes()),
+        model: model.unwrap_or("").to_string(),
+        sample_index,
+    }
+}
+
+/// Static Gate-1-style pre-filters applied before probe execution or optimization rounds.
+pub fn static_prefilter_description(name: &str, description: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(RuntimeError::invalid("Skill name must not be empty"));
+    }
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return Err(RuntimeError::invalid("Skill description must not be empty"));
+    }
+    if description.chars().count() > MAX_DESCRIPTION_CHARS {
+        return Err(RuntimeError::invalid(format!(
+            "Skill description exceeds {MAX_DESCRIPTION_CHARS} characters"
+        )));
+    }
+    if let Some(label) = infra_core::domain::sensitive_label(description)? {
+        return Err(RuntimeError::invalid(format!(
+            "Skill description contains sensitive content ({label})"
+        )));
+    }
+    let (_, masked_count) = infra_core::domain::mask_secrets(description)?;
+    if masked_count > 0 {
+        return Err(RuntimeError::invalid(
+            "Skill description contains masked secret material",
+        ));
+    }
+    Ok(())
+}
+
+/// Static pre-filter validating both the candidate description and evaluation queries.
+pub fn static_prefilter(name: &str, description: &str, eval_set: &[Value]) -> Result<()> {
+    static_prefilter_description(name, description)?;
+    for item in eval_set {
+        let Some(query) = item["query"].as_str() else {
+            continue;
+        };
+        if let Some(label) = infra_core::domain::sensitive_label(query)? {
+            return Err(RuntimeError::invalid(format!(
+                "Eval query contains sensitive content ({label})"
+            )));
+        }
+        let (_, masked_count) = infra_core::domain::mask_secrets(query)?;
+        if masked_count > 0 {
+            return Err(RuntimeError::invalid(
+                "Eval query contains masked secret material",
+            ));
+        }
+    }
+    Ok(())
+}
 struct ProbeFile(std::path::PathBuf);
 impl Drop for ProbeFile {
     fn drop(&mut self) {
@@ -87,11 +206,57 @@ impl TriggerDetector {
         None
     }
 }
+fn run_single_query_with_memo(
+    key: QueryMemoKey,
+    name: &str,
+    description: &str,
+    exec: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    static_prefilter_description(name, description)?;
+    if let Ok(mut guard) = query_memo().lock()
+        && let Some(hit) = guard.get(&key)
+    {
+        return Ok(hit);
+    }
+    let result = exec()?;
+    if let Ok(mut guard) = query_memo().lock() {
+        guard.insert(key, result);
+    }
+    Ok(result)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Preserve the public trigger-evaluation API with independently supplied platform, query, skill metadata, timeout, project, model and environment."
 )]
 pub fn run_single_query(
+    config: &PlatformConfig,
+    query: &str,
+    name: &str,
+    description: &str,
+    timeout: Duration,
+    project: &Path,
+    model: Option<&str>,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    static_prefilter_description(name, description)?;
+    execute_single_query(
+        config,
+        query,
+        name,
+        description,
+        timeout,
+        project,
+        model,
+        environment,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the public trigger-evaluation API with independently supplied platform, query, skill metadata, timeout, project, model and environment."
+)]
+fn execute_single_query(
     config: &PlatformConfig,
     query: &str,
     name: &str,
@@ -304,10 +469,17 @@ pub fn run_eval(
     options: &EvalOptions,
     log: &mut String,
 ) -> Result<Value> {
+    static_prefilter(name, description, eval_set)?;
     let jobs = prepare_jobs(eval_set, options)?;
+    let mut sample_counts: HashMap<&str, usize> = HashMap::new();
     let mut queue = VecDeque::with_capacity(jobs.job_count);
-    for index in 0..eval_set.len() {
-        queue.extend(std::iter::repeat_n(index, options.runs));
+    for (index, item) in eval_set.iter().enumerate() {
+        let query = item["query"].as_str().expect("validated evaluation query");
+        let sample = sample_counts.entry(query).or_default();
+        for _ in 0..options.runs {
+            queue.push_back((index, *sample));
+            *sample += 1;
+        }
     }
     let queue = Arc::new(Mutex::new(queue));
     let (tx, rx) = mpsc::channel();
@@ -324,22 +496,32 @@ pub fn run_eval(
                         break;
                     }
                     let job = queue.lock().unwrap().pop_front();
-                    let Some(index) = job else {
+                    let Some((index, sample_index)) = job else {
                         break;
                     };
                     let query = eval_set[index]["query"]
                         .as_str()
                         .expect("validated evaluation query");
-                    let result = run_single_query(
-                        &options.config,
-                        query,
-                        name,
-                        description,
-                        options.timeout,
+                    let key = query_memo_key(
+                        options.config.key,
                         project,
+                        description,
+                        query,
                         options.model.as_deref(),
-                        &environment,
+                        sample_index,
                     );
+                    let result = run_single_query_with_memo(key, name, description, || {
+                        execute_single_query(
+                            &options.config,
+                            query,
+                            name,
+                            description,
+                            options.timeout,
+                            project,
+                            options.model.as_deref(),
+                            &environment,
+                        )
+                    });
                     if tx.send((index, result)).is_err() {
                         break;
                     }
@@ -642,5 +824,81 @@ mod job_tests {
         );
         assert_eq!(result["results"][0]["query"], "second");
         assert_eq!(result["summary"]["passed"], 2);
+    }
+
+    #[test]
+    fn query_memoization_reuses_result_by_description_query_and_model() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let project = Path::new("/tmp/memo-project-a");
+        let desc = "memo-test-desc-v1";
+        let q = "memo-test-query-alpha";
+        let first = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 0),
+            "memo-skill",
+            desc,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        let second = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 0),
+            "memo-skill",
+            desc,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        )
+        .unwrap();
+        let next_sample = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 1),
+            "memo-skill",
+            desc,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        )
+        .unwrap();
+        let diff_model = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("opus"), 0),
+            "memo-skill",
+            desc,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        )
+        .unwrap();
+        let diff_desc = run_single_query_with_memo(
+            query_memo_key("claude", project, "memo-test-desc-v2", q, Some("sonnet"), 0),
+            "memo-skill",
+            "memo-test-desc-v2",
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        )
+        .unwrap();
+        assert!(first);
+        assert!(second);
+        assert!(!next_sample);
+        assert!(!diff_model);
+        assert!(!diff_desc);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn static_prefilter_rejects_empty_oversize_and_secret_inputs() {
+        let valid = vec![json!({"query": "check migrations", "should_trigger": true})];
+        assert!(static_prefilter("skill", "", &valid).is_err());
+        let oversize = "a".repeat(MAX_DESCRIPTION_CHARS + 1);
+        assert!(static_prefilter("skill", &oversize, &valid).is_err());
+        let with_secret = "Use token ghp_1234567890abcdefghij1234567890abcdef";
+        assert!(static_prefilter("skill", with_secret, &valid).is_err());
+        assert!(static_prefilter("skill", "Clean skill description", &valid).is_ok());
     }
 }

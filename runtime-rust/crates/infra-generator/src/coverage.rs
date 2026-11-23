@@ -775,3 +775,46 @@ fn validate_inner(
     }
     Ok(())
 }
+
+/// Deterministic pre-scan surface and manifest inventory for `verified_scan_facts.json`.
+pub fn detect_pre_scan_surfaces(target: &Path) -> Value {
+    let mut items = Vec::new();
+    let surfaces = target_surfaces(target, &mut items);
+    let manifests: Vec<&str> = [
+        "composer.json",
+        "package.json",
+        "tsconfig.json",
+        "pyproject.toml",
+        "go.mod",
+        "Cargo.toml",
+        ".infra-manifest.json",
+    ]
+    .into_iter()
+    .filter(|name| target.join(name).is_file())
+    .collect();
+    serde_json::json!({
+        "surface_count": surfaces.len(),
+        "surfaces": surfaces,
+        "manifests": manifests,
+        "diagnostics": items.iter().map(|d| &d.code).collect::<Vec<_>>(),
+    })
+}
+
+/// Filters staged update slices against `.infra-manifest.json` validation stamps so
+/// unchanged verified slices can be skipped cleanly during `infra-update`.
+pub fn partition_update_slices(target: &Path, staging: &Path, manifest: &Value) -> Result<Value> {
+    let unchanged = crate::ownership::unchanged_verified_slices(target, staging, manifest)?;
+    let unchanged_set: BTreeSet<String> = unchanged.iter().cloned().collect();
+    let all = crate::ownership::staged_files(staging)?
+        .into_keys()
+        .filter(|path| path != crate::ownership::MANIFEST)
+        .collect::<Vec<_>>();
+    let pending: Vec<String> = all
+        .into_iter()
+        .filter(|path| !unchanged_set.contains(path))
+        .collect();
+    Ok(serde_json::json!({
+        "skipped_unchanged": unchanged,
+        "pending_slices": pending,
+    }))
+}

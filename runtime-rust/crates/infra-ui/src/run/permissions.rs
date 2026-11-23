@@ -1865,7 +1865,8 @@ pub(crate) fn schedule_approvals_queue_refresh() {
     });
 }
 
-/// Computes total pending approval count across sessions, system runs, and creator runs.
+/// Computes total pending approval count across sessions and extra runs.
+#[cfg(test)]
 pub(crate) fn compute_total_pending_approvals_count(
     sessions: &[V],
     waiting_counts: &std::collections::BTreeMap<String, usize>,
@@ -1873,6 +1874,66 @@ pub(crate) fn compute_total_pending_approvals_count(
     current_pending: usize,
     extra_run_pending: usize,
 ) -> usize {
+    let extra =
+        (extra_run_pending > 0).then(|| json!({ "waiting_permissions": extra_run_pending }));
+    let runs: Vec<&V> = extra.iter().collect();
+    compute_total_pending_approvals_with_runs(
+        sessions,
+        waiting_counts,
+        active_sid,
+        current_pending,
+        &runs,
+    )
+}
+
+fn background_run_session_id(run_val: &V) -> String {
+    run_val["session_id"]
+        .as_str()
+        .or_else(|| run_val["session"]["id"].as_str())
+        .or_else(|| run_val["run"]["session_id"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+fn background_run_pending_count(run_val: &V) -> usize {
+    if let Some(arr) = run_val["waiting_permissions"].as_array() {
+        arr.len()
+    } else if let Some(n) = run_val["waiting_permissions"].as_u64() {
+        n as usize
+    } else {
+        0
+    }
+}
+
+pub(crate) fn compute_total_pending_approvals_with_runs(
+    sessions: &[V],
+    waiting_counts: &std::collections::BTreeMap<String, usize>,
+    active_sid: &str,
+    current_pending: usize,
+    background_runs: &[&V],
+) -> usize {
+    let mut extra_by_sid = std::collections::BTreeMap::<String, usize>::new();
+    let mut unnamed_extra = 0usize;
+    for run_val in background_runs {
+        if run_val.is_null() {
+            continue;
+        }
+        let count = background_run_pending_count(run_val);
+        if count == 0 {
+            continue;
+        }
+        let sid = background_run_session_id(run_val);
+        if sid.is_empty() {
+            unnamed_extra += count;
+        } else {
+            extra_by_sid
+                .entry(sid)
+                .and_modify(|prev| *prev = (*prev).max(count))
+                .or_insert(count);
+        }
+    }
+
     let mut total = 0usize;
     let mut counted_current = false;
     for session in sessions {
@@ -1885,19 +1946,29 @@ pub(crate) fn compute_total_pending_approvals_count(
             count = count.max(current_pending);
             counted_current = true;
         }
+        if let Some(extra) = extra_by_sid.remove(&sid) {
+            count = count.max(extra);
+        }
         total += count;
     }
     if !counted_current {
-        total += current_pending;
+        let mut current = current_pending;
+        if !active_sid.is_empty() {
+            if let Some(extra) = extra_by_sid.remove(active_sid) {
+                current = current.max(extra);
+            }
+        }
+        total += current;
     }
     for (sid, &count) in waiting_counts {
         if !sessions.iter().any(|sess| m::text(sess, "id") == *sid)
             && (counted_current || *sid != active_sid)
         {
-            total += count;
+            let extra = extra_by_sid.remove(sid).unwrap_or(0);
+            total += count.max(extra);
         }
     }
-    total + extra_run_pending
+    total + extra_by_sid.into_values().sum::<usize>() + unnamed_extra
 }
 
 pub(crate) fn total_pending_approvals_count() -> usize {
@@ -1908,22 +1979,14 @@ pub(crate) fn total_pending_approvals_count() -> usize {
             .and_then(|v| v.as_object())
             .map(|o| o.len())
             .unwrap_or(0);
-        let mut extra_run_pending = 0usize;
-        for key in ["system-run", "creator-detail", "creator-run"] {
-            if let Some(run_val) = s.data.get(key) {
-                if let Some(arr) = run_val["waiting_permissions"].as_array() {
-                    extra_run_pending += arr.len();
-                } else if let Some(n) = run_val["waiting_permissions"].as_u64() {
-                    extra_run_pending += n as usize;
-                }
-            }
-        }
-        compute_total_pending_approvals_count(
+        let bg_keys = ["system-run", "creator-detail"];
+        let runs: Vec<&V> = bg_keys.iter().filter_map(|k| s.data.get(*k)).collect();
+        compute_total_pending_approvals_with_runs(
             &s.sessions,
             &s.approvals.waiting_counts,
             &s.sid,
             current_pending,
-            extra_run_pending,
+            &runs,
         )
     })
 }
@@ -2149,6 +2212,14 @@ pub(crate) fn can_target_drawer_shortcut(
     in_pending_card || in_drawer_list || in_queue_item
 }
 
+pub(crate) fn should_toggle_approvals_drawer_on_alt_a(
+    drawer_open: bool,
+    has_pending_action: bool,
+    palette_open: bool,
+) -> bool {
+    !palette_open && (!drawer_open || !has_pending_action)
+}
+
 enum ApprovalQueueEntry {
     Card {
         key: String,
@@ -2211,17 +2282,20 @@ fn inject_approval_button_payloads(
     }
 }
 
-fn collect_background_run_approvals(entries: &mut Vec<ApprovalQueueEntry>) {
+const APPROVALS_DRAWER_SESSION_CAP: usize = 12;
+
+pub(crate) fn approvals_cap_notice(shown: usize, total: usize) -> Option<String> {
+    (total > shown).then(|| format!("Showing {shown} of {total} sessions with pending approvals."))
+}
+
+fn collect_background_run_approvals(
+    entries: &mut Vec<ApprovalQueueEntry>,
+    covered_sids: &mut std::collections::BTreeSet<String>,
+) {
     for (run_key, origin_kind, title, target_view) in [
         ("system-run", "system", "System orchestration", "systems"),
         (
             "creator-detail",
-            "creator",
-            "Infrastructure Creator",
-            "creator",
-        ),
-        (
-            "creator-run",
             "creator",
             "Infrastructure Creator",
             "creator",
@@ -2231,20 +2305,18 @@ fn collect_background_run_approvals(entries: &mut Vec<ApprovalQueueEntry>) {
         if run_val.is_null() {
             continue;
         }
+        let sid = background_run_session_id(&run_val);
+        if !sid.is_empty() && covered_sids.contains(&sid) {
+            continue;
+        }
         let run_id = if run_key == "creator-detail" {
             m::text(&run_val["run"], "id")
         } else {
             m::text(&run_val, "id")
         };
-        let sid = run_val["session_id"]
-            .as_str()
-            .or_else(|| run_val["session"]["id"].as_str())
-            .or_else(|| run_val["run"]["session_id"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_owned();
         let waiting = m::array(&run_val["waiting_permissions"]);
         if !waiting.is_empty() && !sid.is_empty() {
+            covered_sids.insert(sid.clone());
             for (idx, mut ask) in waiting.into_iter().enumerate() {
                 if ask["state"].is_null() {
                     ask["state"] = json!("pending");
@@ -2269,12 +2341,11 @@ fn collect_background_run_approvals(entries: &mut Vec<ApprovalQueueEntry>) {
             }
             continue;
         }
-        let pending_count = run_val["waiting_permissions"]
-            .as_array()
-            .map(|a| a.len())
-            .or_else(|| run_val["waiting_permissions"].as_u64().map(|n| n as usize))
-            .unwrap_or(0);
+        let pending_count = background_run_pending_count(&run_val);
         if pending_count > 0 {
+            if !sid.is_empty() {
+                covered_sids.insert(sid);
+            }
             entries.push(ApprovalQueueEntry::Notice {
                 key: format!("notice:{run_key}"),
                 title: title.to_owned(),
@@ -2297,7 +2368,7 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
     };
     let sessions = m::read(|s| s.sessions.clone());
     let waiting_counts = m::read(|s| s.approvals.waiting_counts.clone());
-    let waiting_sids: Vec<(String, String, usize)> = sessions
+    let all_waiting_sids: Vec<(String, String, usize)> = sessions
         .iter()
         .filter_map(|s| {
             let sid = m::text(s, "id");
@@ -2307,7 +2378,11 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
                 .unwrap_or_else(|| s["waiting_permissions"].as_u64().unwrap_or(0) as usize);
             (count > 0).then(|| (sid, m::summary(s), count))
         })
-        .take(12)
+        .collect();
+    let total_waiting_sessions = all_waiting_sids.len();
+    let waiting_sids: Vec<(String, String, usize)> = all_waiting_sids
+        .into_iter()
+        .take(APPROVALS_DRAWER_SESSION_CAP)
         .collect();
 
     APPROVALS_SESSION_CACHE.with(|cache| {
@@ -2322,55 +2397,94 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
     let to_fetch = APPROVALS_SESSION_CACHE
         .with(|cache| approvals_sessions_to_fetch(&waiting_sids, &cache.borrow(), force_all));
 
+    if !to_fetch.is_empty()
+        && container
+            .query_selector("[data-approval-key]")
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        container.set_text_content(None);
+        dom::add(
+            &container,
+            &dom::el(
+                "p",
+                "muted approvals-queue-loading",
+                "Loading pending approvals…",
+            ),
+        );
+    }
+
     let fetches = js_sys::Array::new();
     for (sid, _label) in to_fetch {
         let url = format!("/api/sessions/{}?limit=1&tail=1", dom::enc(&sid));
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let session = api::get(&url).await.unwrap_or(V::Null);
-            let item = json!({ "sid": sid, "session": session });
+            let item = match api::get(&url).await {
+                Ok(session) => json!({ "sid": sid, "ok": true, "session": session }),
+                Err(e) => {
+                    json!({ "sid": sid, "ok": false, "aborted": e.aborted, "error": e.message })
+                }
+            };
             Ok(wasm_bindgen::JsValue::from_str(&item.to_string()))
         });
         fetches.push(&promise);
     }
+    let mut fetch_errors = Vec::<String>::new();
     if fetches.length() > 0 {
-        if let Ok(resolved) =
-            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&fetches)).await
-        {
-            for val in js_sys::Array::from(&resolved).iter() {
-                let Some(raw) = val.as_string() else {
-                    continue;
-                };
-                let Ok(parsed) = serde_json::from_str::<V>(&raw) else {
-                    continue;
-                };
-                let sid = m::text(&parsed, "sid");
-                let waiting_for_sid = m::array(&parsed["session"]["waiting_permissions"]);
-                if parsed["session"].is_object() {
-                    let count = waiting_for_sid.len();
-                    m::write(|s| {
-                        apply_session_waiting_count(
-                            &mut s.sessions,
-                            &mut s.approvals.waiting_counts,
-                            &sid,
-                            count,
-                        );
-                    });
-                    APPROVALS_SESSION_CACHE.with(|cache| {
-                        cache
-                            .borrow_mut()
-                            .insert(sid.clone(), (count, waiting_for_sid));
-                    });
+        match wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&fetches)).await {
+            Ok(resolved) => {
+                for val in js_sys::Array::from(&resolved).iter() {
+                    let Some(raw) = val.as_string() else {
+                        continue;
+                    };
+                    let Ok(parsed) = serde_json::from_str::<V>(&raw) else {
+                        continue;
+                    };
+                    let sid = m::text(&parsed, "sid");
+                    if parsed["ok"] != true {
+                        if parsed["aborted"] != true {
+                            let err_msg = m::text(&parsed, "error");
+                            if !err_msg.is_empty() {
+                                fetch_errors.push(err_msg);
+                            } else {
+                                fetch_errors.push(format!("Could not load session {sid}"));
+                            }
+                        }
+                        continue;
+                    }
+                    let waiting_for_sid = m::array(&parsed["session"]["waiting_permissions"]);
+                    if parsed["session"].is_object() {
+                        let count = waiting_for_sid.len();
+                        m::write(|s| {
+                            apply_session_waiting_count(
+                                &mut s.sessions,
+                                &mut s.approvals.waiting_counts,
+                                &sid,
+                                count,
+                            );
+                        });
+                        APPROVALS_SESSION_CACHE.with(|cache| {
+                            cache
+                                .borrow_mut()
+                                .insert(sid.clone(), (count, waiting_for_sid));
+                        });
+                    }
                 }
+            }
+            Err(_) => {
+                fetch_errors.push("Could not load pending session approvals.".into());
             }
         }
     }
 
     let mut entries = Vec::<ApprovalQueueEntry>::new();
+    let mut covered_sids = std::collections::BTreeSet::<String>::new();
     let cached_map = APPROVALS_SESSION_CACHE.with(|cache| cache.borrow().clone());
     for (sid, label, _) in &waiting_sids {
         let Some((_, waiting_for_sid)) = cached_map.get(sid) else {
             continue;
         };
+        covered_sids.insert(sid.clone());
         for (idx, mut ask) in waiting_for_sid.iter().cloned().enumerate() {
             ask["state"] = json!("pending");
             let req_id = m::text(&ask, "request_id");
@@ -2392,7 +2506,7 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
             });
         }
     }
-    collect_background_run_approvals(&mut entries);
+    collect_background_run_approvals(&mut entries, &mut covered_sids);
 
     let scroll_top = container.scroll_top();
     let focused_key = dom::document()
@@ -2419,14 +2533,16 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
     }
 
     if entries.is_empty() {
-        dom::add(
-            &container,
-            &dom::el(
-                "p",
-                "muted approvals-queue-empty",
-                "No pending permission approvals across sessions.",
-            ),
-        );
+        if fetch_errors.is_empty() {
+            dom::add(
+                &container,
+                &dom::el(
+                    "p",
+                    "muted approvals-queue-empty",
+                    "No pending permission approvals across sessions.",
+                ),
+            );
+        }
     } else {
         for (idx, entry) in entries.iter().enumerate() {
             let key = entry.key();
@@ -2526,6 +2642,26 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
             }
         }
     }
+    if !fetch_errors.is_empty() {
+        let msg = if fetch_errors.len() == 1 {
+            format!("Could not load pending approvals: {}", fetch_errors[0])
+        } else {
+            format!(
+                "Could not load pending approvals for {} sessions ({}).",
+                fetch_errors.len(),
+                fetch_errors[0]
+            )
+        };
+        let err_el = dom::el("p", "error-text approvals-queue-error", &msg);
+        let _ = err_el.set_attribute("role", "alert");
+        dom::add(&container, &err_el);
+    }
+    if let Some(cap_msg) = approvals_cap_notice(waiting_sids.len(), total_waiting_sessions) {
+        dom::add(
+            &container,
+            &dom::el("p", "muted approvals-queue-cap", &cap_msg),
+        );
+    }
     container.set_scroll_top(scroll_top);
     if let Some(prev_key) = focused_key {
         if !next_keys.contains(&prev_key) && m::read(|s| s.approvals.drawer_open) {
@@ -2549,27 +2685,42 @@ pub(crate) async fn open_approvals_drawer() {
         focus_node(&close);
     }
     let sid = m::read(|s| s.sid.clone());
-    refresh_approvals_queue().await;
-    if m::read(|s| s.approvals.drawer_open) {
-        let active_is_close_or_outside = dom::document().active_element().is_none_or(|active| {
-            active.id() == "approvals-drawer-close" || active.tag_name() == "BODY"
-        });
-        if active_is_close_or_outside {
-            if let Some(first_action) = dom::get("approvals-drawer-list").and_then(|list| {
-                list.query_selector(
-                    ".conversation-permission[data-state=\"pending\"] button[data-action=\"permission-decide\"]",
-                )
-                .ok()
-                .flatten()
-            }) {
-                focus_node(&first_action);
+    let queue_promise = wasm_bindgen_futures::future_to_promise(async move {
+        refresh_approvals_queue().await;
+        if m::read(|s| s.approvals.drawer_open) {
+            let active_is_close_or_outside =
+                dom::document().active_element().is_none_or(|active| {
+                    active.id() == "approvals-drawer-close" || active.tag_name() == "BODY"
+                });
+            if active_is_close_or_outside {
+                if let Some(first_action) = dom::get("approvals-drawer-list").and_then(|list| {
+                    list.query_selector(
+                        ".conversation-permission[data-state=\"pending\"] button[data-action=\"permission-decide\"]",
+                    )
+                    .ok()
+                    .flatten()
+                }) {
+                    focus_node(&first_action);
+                }
             }
         }
-    }
-    load_permission_rules(&sid).await;
+        Ok(wasm_bindgen::JsValue::UNDEFINED)
+    });
+    let rules_promise = wasm_bindgen_futures::future_to_promise(async move {
+        load_permission_rules(&sid).await;
+        Ok(wasm_bindgen::JsValue::UNDEFINED)
+    });
+    let pair = js_sys::Array::new();
+    pair.push(&queue_promise);
+    pair.push(&rules_promise);
+    let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&pair)).await;
 }
 
 pub(crate) fn close_approvals_drawer() {
+    close_approvals_drawer_with_restore(true);
+}
+
+pub(crate) fn close_approvals_drawer_with_restore(restore_focus: bool) {
     let was_open = m::read(|s| s.approvals.drawer_open)
         || dom::get("approvals-drawer")
             .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
@@ -2578,7 +2729,7 @@ pub(crate) fn close_approvals_drawer() {
     if !was_open {
         return;
     }
-    dom::hidden("approvals-drawer", true);
+    dom::hidden_with_restore("approvals-drawer", true, restore_focus);
 }
 
 pub(crate) async fn toggle_approvals_drawer() {
@@ -2589,16 +2740,19 @@ pub(crate) async fn toggle_approvals_drawer() {
     }
 }
 
-/// Scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer item.
+/// Global Alt+A (open/toggle Approvals drawer when not acting on a pending approval card)
+/// and scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer item.
 pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool {
     if !event.alt_key() || event.ctrl_key() || event.meta_key() || event.is_composing() {
         return false;
     }
     let key = event.key().to_ascii_lowercase();
-    let target_decision = match (key.as_str(), event.shift_key()) {
-        ("a", false) => "allow",
-        ("a", true) => "allow_session",
-        ("d", false) => "deny",
+    let is_a_key = key == "a" || event.code() == "KeyA";
+    let is_d_key = key == "d" || event.code() == "KeyD";
+    let target_decision = match (is_a_key, is_d_key, event.shift_key()) {
+        (true, false, false) => "allow",
+        (true, false, true) => "allow_session",
+        (false, true, false) => "deny",
         _ => return false,
     };
     let Some(active) = dom::document().active_element() else {
@@ -2619,38 +2773,118 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
         && (active.closest("#approvals-drawer").ok().flatten().is_some()
             || active.tag_name() == "BODY");
     let queue_item = active.closest(".approvals-queue-item").ok().flatten();
-    if !can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some()) {
+    let card =
+        if can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some())
+        {
+            pending_card
+                .as_ref()
+                .cloned()
+                .or_else(|| {
+                    queue_item.as_ref().and_then(|item| {
+                        item.query_selector(".conversation-permission[data-state=\"pending\"]")
+                            .ok()
+                            .flatten()
+                    })
+                })
+                .or_else(|| {
+                    dom::get("approvals-drawer-list").and_then(|list| {
+                        list.query_selector(".conversation-permission[data-state=\"pending\"]")
+                            .ok()
+                            .flatten()
+                    })
+                })
+        } else {
+            None
+        };
+    let has_pending_card = card.is_some();
+    let allow_btn = card.and_then(|c| {
+        let sel = format!(
+            "button[data-action=\"permission-decide\"][data-decision=\"{target_decision}\"]"
+        );
+        c.query_selector(&sel)
+            .ok()
+            .flatten()
+            .filter(|btn| !dom::is_disabled(btn))
+    });
+    if let Some(btn) = allow_btn {
+        if let Some(html) = btn.dyn_ref::<web_sys::HtmlElement>() {
+            html.click();
+            return true;
+        }
         return false;
     }
-    let card = pending_card
-        .or_else(|| {
-            queue_item.and_then(|item| {
-                item.query_selector(".conversation-permission[data-state=\"pending\"]")
-                    .ok()
-                    .flatten()
-            })
-        })
-        .or_else(|| {
-            dom::get("approvals-drawer-list").and_then(|list| {
-                list.query_selector(".conversation-permission[data-state=\"pending\"]")
-                    .ok()
-                    .flatten()
-            })
+    if target_decision == "allow"
+        && should_toggle_approvals_drawer_on_alt_a(
+            drawer_open,
+            has_pending_card,
+            crate::commands::palette_open(),
+        )
+    {
+        wasm_bindgen_futures::spawn_local(async {
+            toggle_approvals_drawer().await;
         });
-    let Some(card) = card else {
-        return false;
-    };
-    let sel =
-        format!("button[data-action=\"permission-decide\"][data-decision=\"{target_decision}\"]");
-    let Ok(Some(btn)) = card.query_selector(&sel) else {
-        return false;
-    };
-    if dom::is_disabled(&btn) {
-        return false;
-    }
-    if let Some(html) = btn.dyn_ref::<web_sys::HtmlElement>() {
-        html.click();
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_runs_dedup_by_session_id_and_cap_notice_formats_cleanly() {
+        let sessions = vec![
+            json!({"id": "s-sys", "waiting_permissions": 1}),
+            json!({"id": "s-chat", "waiting_permissions": 2}),
+        ];
+        let waiting_counts = std::collections::BTreeMap::from([
+            ("s-sys".to_owned(), 1usize),
+            ("s-chat".to_owned(), 2usize),
+        ]);
+        let sys_same_sid = json!({
+            "id": "sr-1",
+            "session_id": "s-sys",
+            "waiting_permissions": [{"request_id": "p1"}]
+        });
+        let creator_unlisted_sid = json!({
+            "run": {"id": "cr-1", "session_id": "s-creator"},
+            "waiting_permissions": [{"request_id": "p2"}, {"request_id": "p3"}]
+        });
+        let unnamed = json!({
+            "id": "sr-unnamed",
+            "waiting_permissions": 1
+        });
+        // s-sys (1) + s-chat (2) + s-creator (2) + unnamed (1) = 6 (no double-count of s-sys).
+        assert_eq!(
+            compute_total_pending_approvals_with_runs(
+                &sessions,
+                &waiting_counts,
+                "s-chat",
+                0,
+                &[&sys_same_sid, &creator_unlisted_sid, &unnamed],
+            ),
+            6
+        );
+
+        // When s.sessions has stale 0 for s-sys and waiting_counts lacks it, live run count wins via max().
+        let stale_sessions = vec![json!({"id": "s-sys", "waiting_permissions": 0})];
+        let empty_counts = std::collections::BTreeMap::new();
+        assert_eq!(
+            compute_total_pending_approvals_with_runs(
+                &stale_sessions,
+                &empty_counts,
+                "",
+                0,
+                &[&sys_same_sid],
+            ),
+            1
+        );
+
+        assert_eq!(approvals_cap_notice(12, 12), None);
+        assert_eq!(
+            approvals_cap_notice(12, 17).as_deref(),
+            Some("Showing 12 of 17 sessions with pending approvals.")
+        );
+    }
 }

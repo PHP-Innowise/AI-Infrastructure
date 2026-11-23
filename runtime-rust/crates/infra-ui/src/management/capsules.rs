@@ -112,7 +112,10 @@ pub(crate) fn render_capsule_row_html(capsule: &V, selected: bool) -> String {
         if reason.is_empty() || status == "active" {
             String::new()
         } else {
-            format!("<span class=\"skill-capsule-reason\">{}</span>", esc(&reason))
+            format!(
+                "<span class=\"skill-capsule-reason\">{}</span>",
+                esc(&reason)
+            )
         },
     )
 }
@@ -300,12 +303,20 @@ fn runs_html(detail: &V) -> String {
         (Some(since), Some(total)) if total > since => format!("{since} ({total} total)"),
         _ => count(&runs["count"]),
     };
+    let cost_per_turn = match (
+        amortization["compile_usd"].as_f64(),
+        runs["count"].as_i64().filter(|c| *c > 0),
+    ) {
+        (Some(usd), Some(n)) => format!("${:.4}", usd / n as f64),
+        _ => "—".into(),
+    };
     let body = format!(
-        "<dl class=\"skill-capsule-facts-grid\"><dt>Warm turns</dt><dd>{}</dd><dt>Completed</dt><dd>{}</dd><dt>Handed a step back</dt><dd>{}</dd><dt>Compilation cost</dt><dd>{}</dd><dt>Saving per reuse</dt><dd>{}</dd><dt>Break-even</dt><dd>{}</dd></dl><p class=\"skills-note\">A saving is measured by a sealed evaluation (<code>infra-engine eval skillcache-ab</code>), not read off these turns. Until one exists it is unknown.</p>{}",
+        "<dl class=\"skill-capsule-facts-grid\"><dt>Warm turns</dt><dd>{}</dd><dt>Completed</dt><dd>{}</dd><dt>Handed a step back</dt><dd>{}</dd><dt>Compilation cost</dt><dd>{}</dd><dt>Compile cost / warm turn</dt><dd>{}</dd><dt>Saving per reuse</dt><dd>{}</dd><dt>Break-even</dt><dd>{}</dd></dl><p class=\"skills-note\">A saving is measured by a sealed evaluation (<code>infra-engine eval skillcache-ab</code>), not read off these turns. Until one exists it is unknown.</p>{}",
         warm_turns_display,
         count(&runs["complete"]),
         count(&runs["handed_back"]),
         money(&amortization["compile_usd"]),
+        cost_per_turn,
         money(&amortization["saving_per_reuse_usd"]),
         count(&amortization["breakeven_reuses"]),
         if recent.is_empty() {
@@ -355,6 +366,30 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
     let status = detail["status"].as_str().unwrap_or("");
     let capsule = &detail["capsule"];
     let mut actions = String::new();
+    let has_source = detail["source_session_id"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty())
+        && detail["source_generation"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty());
+    if has_source && matches!(status, "failed" | "interrupted") {
+        actions.push_str(&button(
+            "Retry compile",
+            "skill-capsule-recompile",
+            id,
+            "",
+            pending,
+        ));
+    }
+    if has_source && matches!(status, "needs_recompile" | "stale") {
+        actions.push_str(&button(
+            "Recompile",
+            "skill-capsule-recompile",
+            id,
+            "",
+            pending,
+        ));
+    }
     if ["active", "stale", "needs_recompile", "retired"].contains(&status) {
         actions.push_str(&button(
             if status == "retired" {
@@ -432,7 +467,10 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
         if description.is_empty() {
             String::new()
         } else {
-            format!("<p class=\"skill-capsule-description\">{}</p>", esc(&description))
+            format!(
+                "<p class=\"skill-capsule-description\">{}</p>",
+                esc(&description)
+            )
         },
         if reason.is_empty() {
             String::new()
@@ -656,6 +694,16 @@ async fn act(action: &str, id: &str) {
     render_detail();
     let result = match action {
         "delete" => api::delete(&base).await,
+        "recompile" => {
+            let detail = m::data("skill-capsule-detail");
+            let session_id = detail["source_session_id"].as_str().unwrap_or("");
+            let generation = detail["source_generation"].as_str().unwrap_or("");
+            api::post(
+                &format!("/api/sessions/{}/skillcache/compile", dom::enc(session_id)),
+                json!({"generation": generation}),
+            )
+            .await
+        }
         _ => api::post(&format!("{base}/{action}"), json!({})).await,
     };
     m::take("skill-capsule-pending");
@@ -702,6 +750,7 @@ pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: 
             render_detail();
         }
         "skill-capsule-requalify" => act("requalify", capsule).await,
+        "skill-capsule-recompile" => act("recompile", capsule).await,
         "skill-capsule-invalidate" => act("invalidate", capsule).await,
         "skill-capsule-retire" => act("retire", capsule).await,
         "skill-capsule-delete" => {
@@ -724,6 +773,7 @@ mod tests {
         json!({
             "capsule_id": "c1", "project_id": "p1", "skill_name": "pdf",
             "skill_path": ".agents/skills/pdf/SKILL.md",
+            "source_session_id": "s1", "source_generation": "g1",
             "mu": {"name": "pdf-rows", "description": "Rows of a folder of <invoice> PDFs"},
             "form": "hybrid", "status": "active", "reason": null,
             "capsule": {
@@ -811,6 +861,7 @@ mod tests {
         assert!(html.contains("1000 input · 200 output · — cache read · — cache write"));
         // What compiling cost is known; what a reuse saves is not.
         assert!(html.contains("<dt>Compilation cost</dt><dd>$0.0500</dd>"));
+        assert!(html.contains("<dt>Compile cost / warm turn</dt><dd>$0.0167</dd>"));
         assert!(html.contains("<dt>Saving per reuse</dt><dd>—</dd>"));
         assert!(html.contains("<dt>Break-even</dt><dd>—</dd>"));
         assert!(html.contains("<dt>Handed a step back</dt><dd>1</dd>"));
@@ -830,6 +881,7 @@ mod tests {
         let actions = |status: &str, armed: bool| {
             let html = html_for(status, armed);
             [
+                "skill-capsule-recompile",
                 "skill-capsule-requalify",
                 "skill-capsule-invalidate",
                 "skill-capsule-retire",
@@ -853,12 +905,28 @@ mod tests {
         assert_eq!(
             actions("stale", false),
             [
+                "skill-capsule-recompile",
                 "skill-capsule-requalify",
                 "skill-capsule-retire",
                 "skill-capsule-arm"
             ]
         );
-        assert_eq!(actions("failed", false), ["skill-capsule-arm"]);
+        assert_eq!(
+            actions("needs_recompile", false),
+            [
+                "skill-capsule-recompile",
+                "skill-capsule-requalify",
+                "skill-capsule-invalidate",
+                "skill-capsule-retire",
+                "skill-capsule-arm"
+            ]
+        );
+        assert_eq!(
+            actions("failed", false),
+            ["skill-capsule-recompile", "skill-capsule-arm"]
+        );
+        assert!(html_for("failed", false).contains(">Retry compile<"));
+        assert!(html_for("needs_recompile", false).contains(">Recompile<"));
         assert_eq!(
             actions("retired", false),
             ["skill-capsule-requalify", "skill-capsule-arm"]
@@ -872,7 +940,11 @@ mod tests {
         // A delete is one more click, and it can be taken back.
         assert_eq!(
             actions("failed", true),
-            ["skill-capsule-delete", "skill-capsule-keep"]
+            [
+                "skill-capsule-recompile",
+                "skill-capsule-delete",
+                "skill-capsule-keep"
+            ]
         );
         let pending = render_capsule_detail_html(&detail(), false, true);
         assert_eq!(pending.matches(" disabled>").count(), 4);

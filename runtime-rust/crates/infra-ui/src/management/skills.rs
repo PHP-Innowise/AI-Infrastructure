@@ -571,12 +571,30 @@ pub(super) async fn installed_skills() {
     {
         Ok((e, v)) if m::current("skills-installed", e) && m::current_project() == p => {
             m::set("skills-installed", v);
+            m::set("skills-installed-project", json!(p));
             render_installed();
         }
         Ok(_) => {}
         Err(e) if !e.aborted => dom::error("skills-installed-error", &e.message),
         Err(_) => {}
     }
+}
+
+pub(crate) fn installed_skills_need_load(project: &str, loaded_project: &str, data: &V) -> bool {
+    let p = project.trim();
+    !p.is_empty() && (loaded_project.trim() != p || !data.is_object())
+}
+
+pub(crate) async fn ensure_installed_skills_loaded() -> bool {
+    let project = m::current_project();
+    let loaded_project = m::string(&m::data("skills-installed-project"));
+    let existing = m::data("skills-installed");
+    if !installed_skills_need_load(&project, &loaded_project, &existing) {
+        return false;
+    }
+    installed_skills().await;
+    m::string(&m::data("skills-installed-project")) == project
+        && m::data("skills-installed").is_object()
 }
 pub(super) fn render_installed() {
     let v = m::data("skills-installed");

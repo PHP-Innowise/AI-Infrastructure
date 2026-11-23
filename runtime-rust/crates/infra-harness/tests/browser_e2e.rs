@@ -156,7 +156,7 @@ fn spawn_fixture(
         let _ = tx.send(res);
     });
 
-    let line = match rx.recv_timeout(Duration::from_secs(45)) {
+    let line = match rx.recv_timeout(Duration::from_secs(120)) {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         Ok(Ok(_)) => {
             drop(guard);

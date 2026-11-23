@@ -26,10 +26,10 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, UNIX_EPOCH},
@@ -41,7 +41,6 @@ const DB_FILENAME: &str = "graph_ir.sqlite3";
 pub(crate) const MAX_IR_FILES: usize = 30_000;
 const MAX_WALK_DEPTH: usize = 64;
 const MAX_FILE_BYTES: u64 = crate::graph_map::SOURCE_LIMIT;
-const MAX_MANIFEST_READ_BYTES: u64 = 512 * 1024;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn default_max_ir_files() -> usize {
@@ -125,16 +124,31 @@ pub(crate) struct IrSyncStats {
     pub summary: IrSummary,
 }
 
-/// Incremental update summary + affected file lists returned by `update_paths_with_delta`.
+/// Incremental update summary + affected file lists returned by `update_paths_with_delta`
+/// and propagated over the Graph-IR invalidation bus.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IrUpdateDelta {
     #[cfg(test)]
     pub stats: IrSyncStats,
+    pub changed_paths: Vec<String>,
     pub edited_files: Vec<String>,
     pub re_resolved_files: Vec<String>,
     pub removed_files: Vec<String>,
+    pub incoming_caller_files: Vec<String>,
     pub manifest_changed: bool,
     pub semantic_changed: bool,
+    pub ir_revision: u64,
+}
+
+/// Result returned by [`GraphIrStore::verify_path_or_symbol`] for read-only verification
+/// of workspace paths and declared symbols against indexed Graph IR.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct IrPathSymbolVerification {
+    pub path_exists: bool,
+    pub symbol_exists: bool,
+    pub matched_files: Vec<String>,
+    pub matched_symbols: Vec<String>,
 }
 
 /// Incremental Graph IR elements exported strictly for dirty files and their incident edges.
@@ -410,6 +424,85 @@ impl GraphIrStore {
         Self::open_at_readonly(&db_path)
     }
 
+    /// Opens an existing `<state>/graphs/<project>/graph_ir.sqlite3` strictly read-only without
+    /// creating directories/files or executing any DDL/`ir_meta` writes, returning a shared cached
+    /// handle when the verified SQLite file identity is unchanged.
+    pub(crate) fn open_readonly_cached(state: &Path, project: &str) -> Result<Option<Arc<Self>>> {
+        validate_project_id(project)?;
+        if !Self::exists(state, project) {
+            return Ok(None);
+        }
+        let db_path = state.join("graphs").join(project).join(DB_FILENAME);
+        Self::open_at_readonly_cached(&db_path)
+    }
+
+    /// Opens an existing SQLite IR store at `db_path` strictly read-only with bounded process-wide
+    /// handle caching so concurrent readers reuse WAL read pools across calls.
+    pub(crate) fn open_at_readonly_cached(db_path: &Path) -> Result<Option<Arc<Self>>> {
+        const MAX_CACHED_RO_STORES: usize = 16;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        struct FileIdentity {
+            len: u64,
+            mtime_ns: u64,
+            ino: u64,
+        }
+        type CachedRoEntry = (PathBuf, FileIdentity, Arc<GraphIrStore>);
+        static RO_CACHE: OnceLock<Mutex<Vec<CachedRoEntry>>> = OnceLock::new();
+
+        let Some(verified) = verify_existing_sqlite_path(db_path)? else {
+            if let Ok(mut guard) = RO_CACHE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+                guard.retain(|(p, _, _)| p != db_path);
+            }
+            return Ok(None);
+        };
+        let meta = fs::symlink_metadata(&verified)?;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let ino = 0;
+        let ident = FileIdentity {
+            len: meta.len(),
+            mtime_ns,
+            ino,
+        };
+
+        let cache = RO_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+        if let Ok(mut guard) = cache.lock()
+            && let Some(pos) = guard
+                .iter()
+                .position(|(p, id, _)| *p == verified && *id == ident)
+        {
+            let hit = guard.remove(pos);
+            let cloned = Arc::clone(&hit.2);
+            guard.push(hit);
+            return Ok(Some(cloned));
+        }
+
+        let Some(opened) = Self::open_at_readonly(&verified)? else {
+            if let Ok(mut guard) = cache.lock() {
+                guard.retain(|(p, _, _)| *p != verified);
+            }
+            return Ok(None);
+        };
+        let shared = Arc::new(opened);
+        if let Ok(mut guard) = cache.lock() {
+            guard.retain(|(p, _, _)| *p != verified);
+            if guard.len() >= MAX_CACHED_RO_STORES {
+                guard.remove(0);
+            }
+            guard.push((verified, ident, Arc::clone(&shared)));
+        }
+        Ok(Some(shared))
+    }
+
     /// Opens an existing SQLite IR store at `db_path` strictly read-only without creating files
     /// or executing any DDL/`ir_meta` writes. Returns `Ok(None)` if missing or uninitialized.
     pub(crate) fn open_at_readonly(db_path: &Path) -> Result<Option<Self>> {
@@ -594,11 +687,8 @@ impl GraphIrStore {
         let files_skipped = files_scanned.saturating_sub(stale_paths.len());
         let files_removed = removed.len();
 
-        let manifests = ManifestIndex::from_root(&real_root);
-        let known_vec: Vec<String> = known_files.iter().cloned().collect();
-        let crate_map = CratePackageMap::from_reader(&known_vec, &|rel| {
-            read_bounded_text_file(&real_root, rel, MAX_MANIFEST_READ_BYTES)
-        });
+        let (manifests, crate_map) =
+            graph_deps::cached_manifests_for_root(&real_root, &known_files);
 
         let mut affected_targets = BTreeSet::new();
         for path in &removed {
@@ -816,16 +906,6 @@ impl GraphIrStore {
         let (parsed_units, parse_skipped) = parse_paths_parallel(&real_root, &parse_candidates_vec);
         skipped += parse_skipped;
 
-        let manifests = if parsed_units.is_empty() && !manifest_changed && removed.is_empty() {
-            ManifestIndex::default()
-        } else {
-            ManifestIndex::from_root(&real_root)
-        };
-        let manifest_stamp = if manifest_changed {
-            Some(compute_root_manifest_stamp(&real_root))
-        } else {
-            None
-        };
         let git_head = current_git_head(&real_root);
         let manifest_lang_vec: Vec<&str> = manifest_langs.into_iter().collect();
 
@@ -833,7 +913,17 @@ impl GraphIrStore {
         let files_parsed = parsed_units.len();
 
         let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
-        let (files_removed, summary, removed_out, re_resolved_out, semantic_changed) = loop {
+        let mut manifests = Arc::new(ManifestIndex::default());
+        let mut crate_map = Arc::new(CratePackageMap::default());
+        let mut cached_bundle_key_len: Option<usize> = None;
+        let (
+            files_removed,
+            summary,
+            removed_out,
+            re_resolved_out,
+            semantic_changed,
+            pre_tx_incoming,
+        ) = loop {
             let (
                 existing_files,
                 removed_files,
@@ -841,6 +931,7 @@ impl GraphIrStore {
                 affected_targets,
                 skip_re_resolve,
                 re_resolve_paths,
+                pre_tx_incoming,
                 epoch_before,
             ) = {
                 let conn = lock_conn(&self.conn)?;
@@ -882,17 +973,20 @@ impl GraphIrStore {
                     affected_targets.insert(unit.rel_path.clone());
                     skip_re_resolve.insert(unit.rel_path.clone());
                 }
-                let re_resolve_paths = if !affected_targets.is_empty() || manifest_changed {
-                    collect_affected_dependents(
-                        &conn,
-                        &affected_targets,
-                        &skip_re_resolve,
-                        manifest_changed,
-                        &manifest_lang_vec,
-                    )?
-                } else {
-                    Vec::new()
-                };
+                let (re_resolve_paths, pre_tx_incoming) =
+                    if !affected_targets.is_empty() || manifest_changed {
+                        let callers = query_incoming_callers_from_conn(&conn, &affected_targets)?;
+                        let re_resolve = collect_affected_dependents(
+                            &conn,
+                            &affected_targets,
+                            &skip_re_resolve,
+                            manifest_changed,
+                            &manifest_lang_vec,
+                        )?;
+                        (re_resolve, callers)
+                    } else {
+                        (Vec::new(), BTreeSet::new())
+                    };
                 let epoch = self.write_epoch.load(Ordering::Acquire);
                 (
                     existing_files,
@@ -901,9 +995,19 @@ impl GraphIrStore {
                     affected_targets,
                     skip_re_resolve,
                     re_resolve_paths,
+                    pre_tx_incoming,
                     epoch,
                 )
             };
+
+            if parsed_units.is_empty()
+                && removed_files.is_empty()
+                && re_resolve_paths.is_empty()
+                && !manifest_changed
+            {
+                let summary = self.summary_counts()?.unwrap_or_default();
+                break (0, summary, Vec::new(), Vec::new(), false, BTreeSet::new());
+            }
 
             let missing_re_resolve: Vec<String> = re_resolve_paths
                 .iter()
@@ -917,14 +1021,19 @@ impl GraphIrStore {
                 }
             }
 
-            let crate_map = if !parsed_units.is_empty() || !re_resolve_paths.is_empty() {
-                let known_vec: Vec<String> = existing_files.iter().cloned().collect();
-                CratePackageMap::from_reader(&known_vec, &|rel| {
-                    read_bounded_text_file(&real_root, rel, MAX_MANIFEST_READ_BYTES)
-                })
+            let manifest_stamp = if manifest_changed {
+                Some(compute_root_manifest_stamp(&real_root))
             } else {
-                CratePackageMap::default()
+                None
             };
+            if (!parsed_units.is_empty() || !re_resolve_paths.is_empty())
+                && cached_bundle_key_len != Some(existing_files.len())
+            {
+                let (m, cm) = graph_deps::cached_manifests_for_root(&real_root, &existing_files);
+                manifests = m;
+                crate_map = cm;
+                cached_bundle_key_len = Some(existing_files.len());
+            }
 
             let mut conn = lock_conn(&self.conn)?;
             if self.write_epoch.load(Ordering::Acquire) != epoch_before {
@@ -1012,10 +1121,28 @@ impl GraphIrStore {
                 removed_vec,
                 re_resolve_paths,
                 semantic_changed,
+                pre_tx_incoming,
             );
         };
 
+        let changed_paths: Vec<String> = normalized.into_iter().collect();
         let edited_files: Vec<String> = parsed_units.into_iter().map(|u| u.rel_path).collect();
+        let mut touched_targets: BTreeSet<String> = edited_files.iter().cloned().collect();
+        touched_targets.extend(removed_out.iter().cloned());
+        let mut incoming_set: BTreeSet<String> = pre_tx_incoming
+            .into_iter()
+            .filter(|p| !touched_targets.contains(p))
+            .collect();
+        if !touched_targets.is_empty() {
+            let target_list: Vec<String> = touched_targets.iter().cloned().collect();
+            if let Ok(post_callers) = self.incoming_caller_files_for_paths(&target_list) {
+                for src in post_callers {
+                    if !touched_targets.contains(&src) {
+                        incoming_set.insert(src);
+                    }
+                }
+            }
+        }
         #[cfg(not(test))]
         let _ = (
             files_scanned,
@@ -1033,11 +1160,14 @@ impl GraphIrStore {
                 files_removed,
                 summary,
             },
+            changed_paths,
             edited_files,
             re_resolved_files: re_resolved_out,
             removed_files: removed_out,
+            incoming_caller_files: incoming_set.into_iter().collect(),
             manifest_changed,
             semantic_changed,
+            ir_revision: 0,
         })
     }
 
@@ -1084,6 +1214,121 @@ impl GraphIrStore {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
+        })
+    }
+
+    /// Queries deduplicated 1-hop reverse-caller relative paths targeting any file in `target_paths`,
+    /// excluding self-matches within `target_paths`.
+    pub(crate) fn incoming_caller_files_for_paths(
+        &self,
+        target_paths: &[String],
+    ) -> Result<Vec<String>> {
+        let mut targets = BTreeSet::new();
+        for raw in target_paths {
+            let rel = clean_rel_key(raw);
+            if !rel.is_empty() {
+                targets.insert(rel);
+            }
+        }
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let callers =
+            self.with_read_conn(|conn| query_incoming_callers_from_conn(conn, &targets))?;
+        Ok(callers
+            .into_iter()
+            .filter(|src| !targets.contains(src))
+            .collect())
+    }
+
+    /// Read-only verification of an indexed relative file path and/or symbol declaration against
+    /// `ir_files` and `ir_symbols` (safe on cached read-only `GraphIrStore` handles).
+    ///
+    /// When `rel_path` is `None`, `path_exists` stays `false` while `matched_files` reports every
+    /// indexed file defining a matching symbol.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn verify_path_or_symbol(
+        &self,
+        rel_path: Option<&str>,
+        symbol: Option<&str>,
+    ) -> Result<IrPathSymbolVerification> {
+        let norm_path = rel_path.map(clean_rel_key).filter(|p| !p.is_empty());
+        let raw_sym = symbol.map(str::trim).filter(|s| !s.is_empty());
+        if norm_path.is_none() && raw_sym.is_none() {
+            return Ok(IrPathSymbolVerification::default());
+        }
+        self.with_read_conn(|conn| {
+            let mut matched_files = BTreeSet::new();
+            let mut matched_symbols = BTreeSet::new();
+            let path_exists = if let Some(ref rel) = norm_path {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM ir_files WHERE path = ?1)",
+                        [rel],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    matched_files.insert(rel.clone());
+                }
+                exists
+            } else {
+                false
+            };
+
+            if let Some(sym_query) = raw_sym {
+                let (qualifier, leaf) = split_symbol_query(sym_query);
+                let mut collect_row =
+                    |file_path: String,
+                     symbol_id: String,
+                     name: String,
+                     parent_name: Option<String>| {
+                        if symbol_matches_query(
+                            sym_query,
+                            qualifier,
+                            leaf,
+                            &symbol_id,
+                            &name,
+                            parent_name.as_deref(),
+                        ) {
+                            matched_files.insert(file_path);
+                            matched_symbols.insert(symbol_id);
+                        }
+                    };
+                if let Some(ref rel) = norm_path {
+                    let mut stmt = conn.prepare(
+                        "SELECT file_path, symbol_id, name, parent_name
+                         FROM ir_symbols
+                         WHERE file_path = ?1
+                           AND (symbol_id = ?2 OR name = ?2 OR name = ?3)
+                         ORDER BY start_line, id
+                         LIMIT 64",
+                    )?;
+                    let mut rows = stmt.query(params![rel, sym_query, leaf])?;
+                    while let Some(row) = rows.next()? {
+                        collect_row(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+                    }
+                } else {
+                    let mut stmt = conn.prepare(
+                        "SELECT file_path, symbol_id, name, parent_name
+                         FROM ir_symbols
+                         WHERE symbol_id = ?1 OR name = ?1 OR name = ?2
+                         ORDER BY file_path, start_line, id
+                         LIMIT 64",
+                    )?;
+                    let mut rows = stmt.query(params![sym_query, leaf])?;
+                    while let Some(row) = rows.next()? {
+                        collect_row(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+                    }
+                }
+            }
+
+            Ok(IrPathSymbolVerification {
+                path_exists,
+                symbol_exists: !matched_symbols.is_empty(),
+                matched_files: matched_files.into_iter().collect(),
+                matched_symbols: matched_symbols.into_iter().collect(),
+            })
         })
     }
 
@@ -1629,7 +1874,7 @@ impl GraphIrStore {
                 .filter(|f| file_set.contains(f.as_str()))
                 .cloned()
                 .collect();
-            let empty_comm = BTreeMap::new();
+            let communities = compute_file_communities_for_delta(conn, &files)?;
             let mut used_node_ids = BTreeSet::new();
             for path in &needed_symbol_files {
                 if !edited_files.contains(path) {
@@ -1640,7 +1885,7 @@ impl GraphIrStore {
                 &emit_files,
                 Some(&edited_files),
                 &symbols,
-                &empty_comm,
+                &communities,
                 &mut used_node_ids,
             );
             let (edge_links, _) = collect_resolved_edge_links(&edges, &file_set, &maps);
@@ -1748,23 +1993,40 @@ impl GraphIrStore {
     }
 
     /// Writes `live/graph.json` via a private temporary file and atomic rename without removing
-    /// the previous published `live/graph.json` while building.
+    /// the previous published `live/graph.json` while building, streaming directly without
+    /// building an intermediate `serde_json::Value` DOM.
     pub(crate) fn write_live_graph_atomic(&self, live_graph_path: &Path) -> Result<(u64, u64)> {
-        let (payload, node_count, link_count) = self.export_node_link_json_with_counts()?;
-        let bytes = serde_json::to_vec(&payload)?;
-        write_live_graph_json_bytes_atomic(live_graph_path, &bytes)?;
+        let rows = self.load_graph_rows()?;
+        let (node_specs, link_specs, node_count, link_count) =
+            collect_graph_elements(&rows.files, &rows.symbols, &rows.edges, &rows.sem_edges);
+        write_live_graph_from_elements_atomic(live_graph_path, &node_specs, &link_specs)?;
         Ok((node_count, link_count))
     }
 }
 
+/// Streams already-exported `IrNodeSpec` / `IrLinkSpec` slices directly into `live/graph.json`
+/// via a buffered temporary file and atomic rename without allocating `Value` or `Vec<u8>`.
+pub(crate) fn write_live_graph_from_elements_atomic(
+    live_graph_path: &Path,
+    node_specs: &[IrNodeSpec],
+    link_specs: &[IrLinkSpec],
+) -> Result<()> {
+    write_live_graph_json_stream_atomic(live_graph_path, |writer| {
+        write_node_link_payload_to_writer(writer, node_specs, link_specs)
+    })
+}
+
 /// Encodes already-exported `IrNodeSpec` / `IrLinkSpec` slices into `live/graph.json` bytes
-/// without performing another SQLite query.
+/// using a streaming serializer without allocating `serde_json::Value` DOM trees.
 pub(crate) fn encode_node_link_payload_from_elements(
     node_specs: &[IrNodeSpec],
     link_specs: &[IrLinkSpec],
 ) -> Result<Vec<u8>> {
-    let payload = node_link_payload_from_elements(node_specs, link_specs);
-    serde_json::to_vec(&payload).map_err(Into::into)
+    let mut bytes = Vec::with_capacity(
+        64 + node_specs.len().saturating_mul(160) + link_specs.len().saturating_mul(128),
+    );
+    write_node_link_payload_to_writer(&mut bytes, node_specs, link_specs)?;
+    Ok(bytes)
 }
 
 /// Atomically writes serialized `live/graph.json` bytes with directory/file custody checks.
@@ -1772,6 +2034,16 @@ pub(crate) fn write_live_graph_json_bytes_atomic(
     live_graph_path: &Path,
     bytes: &[u8],
 ) -> Result<()> {
+    write_live_graph_json_stream_atomic(live_graph_path, |writer| {
+        writer.write_all(bytes)?;
+        Ok(())
+    })
+}
+
+fn write_live_graph_json_stream_atomic<F>(live_graph_path: &Path, write_fn: F) -> Result<()>
+where
+    F: FnOnce(&mut BufWriter<File>) -> Result<()>,
+{
     let parent = live_graph_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1806,9 +2078,13 @@ pub(crate) fn write_live_graph_json_bytes_atomic(
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let write_result = (|| -> Result<()> {
-        let mut file = opts.open(&tmp_path)?;
-        file.write_all(bytes)?;
-        file.flush()?;
+        let file = opts.open(&tmp_path)?;
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
+        write_fn(&mut writer)?;
+        writer.flush()?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| HarnessError::from(err.into_error()))?;
         file.sync_all()?;
         drop(file);
         custody.check()?;
@@ -2129,6 +2405,79 @@ pub(crate) fn current_git_head(real_root: &Path) -> Option<String> {
     (!head.is_empty()).then_some(head)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn split_symbol_query(query: &str) -> (Option<&str>, &str) {
+    let trimmed = query.trim();
+    if let Some((q, leaf)) = trimmed.rsplit_once("::") {
+        return (Some(q.trim()).filter(|s| !s.is_empty()), leaf.trim());
+    }
+    if let Some((q, leaf)) = trimmed.rsplit_once('.') {
+        return (Some(q.trim()).filter(|s| !s.is_empty()), leaf.trim());
+    }
+    if trimmed.contains('\\') {
+        let leaf = trimmed.rsplit('\\').next().unwrap_or(trimmed).trim();
+        return (None, leaf);
+    }
+    (None, trimmed)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn symbol_matches_query(
+    raw_query: &str,
+    qualifier: Option<&str>,
+    leaf: &str,
+    symbol_id: &str,
+    name: &str,
+    parent_name: Option<&str>,
+) -> bool {
+    if symbol_id == raw_query {
+        return true;
+    }
+    if let Some(q) = qualifier {
+        if name != leaf {
+            return false;
+        }
+        let Some(parent) = parent_name.map(str::trim).filter(|p| !p.is_empty()) else {
+            return false;
+        };
+        if parent == q {
+            return true;
+        }
+        let q_short = q.rsplit([':', '\\', '.']).next().unwrap_or(q).trim();
+        return parent == q_short
+            || parent.ends_with(&format!("::{q}"))
+            || parent.ends_with(&format!("\\{q}"));
+    }
+    name == raw_query || name == leaf
+}
+
+fn query_incoming_callers_from_conn(
+    conn: &Connection,
+    affected_targets: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut callers = BTreeSet::new();
+    if affected_targets.is_empty() {
+        return Ok(callers);
+    }
+    let targets: Vec<&String> = affected_targets.iter().collect();
+    for chunk in targets.chunks(400) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT source_file FROM ir_edges WHERE target_file IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|s| *s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_vec.as_slice(), |row| row.get::<_, String>(0))?;
+        for row in rows {
+            callers.insert(row?);
+        }
+    }
+    Ok(callers)
+}
+
 fn collect_affected_dependents(
     conn: &Connection,
     affected_targets: &BTreeSet<String>,
@@ -2137,17 +2486,9 @@ fn collect_affected_dependents(
     manifest_langs: &[&str],
 ) -> Result<Vec<String>> {
     let mut candidates = BTreeSet::new();
-    {
-        let mut stmt = conn
-            .prepare_cached("SELECT DISTINCT source_file FROM ir_edges WHERE target_file = ?1")?;
-        for target in affected_targets {
-            let rows = stmt.query_map([target], |row| row.get::<_, String>(0))?;
-            for row in rows {
-                let src = row?;
-                if !skip_files.contains(&src) {
-                    candidates.insert(src);
-                }
-            }
+    for src in query_incoming_callers_from_conn(conn, affected_targets)? {
+        if !skip_files.contains(&src) {
+            candidates.insert(src);
         }
     }
 
@@ -2531,11 +2872,6 @@ fn read_bounded_bytes(
     let size = i64::try_from(buf.len()).unwrap_or(i64::MAX);
     let mtime_ns = mtime_nanos(&meta);
     Some((buf, size, mtime_ns))
-}
-
-fn read_bounded_text_file(real_root: &Path, rel_path: &str, max_bytes: u64) -> Option<String> {
-    let (bytes, _, _) = read_bounded_bytes(real_root, rel_path, max_bytes)?;
-    String::from_utf8(bytes).ok()
 }
 
 fn parse_workspace_file(real_root: &Path, rel_path: &str) -> Option<ParsedUnit> {
@@ -3298,16 +3634,13 @@ fn is_type_kind(kind: &str) -> bool {
     )
 }
 
-fn compute_file_communities<'a>(
-    files: &'a [String],
-    edges: &[StoredEdgeRow],
-) -> BTreeMap<&'a str, (u32, String)> {
+fn raw_dir_labels(files: &[String]) -> (Vec<String>, bool) {
     const GENERIC_ROOTS: &[&str] = &[
         "crates", "packages", "services", "apps", "modules", "src", "app", "lib", "pkg",
         "internal", "include",
     ];
     if files.is_empty() {
-        return BTreeMap::new();
+        return (Vec::new(), false);
     }
 
     let dir_segments: Vec<Vec<&str>> = files
@@ -3361,10 +3694,24 @@ fn compute_file_communities<'a>(
         raw_labels.push(label);
     }
 
+    let distinct: BTreeSet<&str> = raw_labels.iter().map(String::as_str).collect();
+    let needs_edge_components = distinct.len() <= 1 && files.len() >= 2;
+    (raw_labels, needs_edge_components)
+}
+
+fn finish_file_communities<'a>(
+    files: &'a [String],
+    mut raw_labels: Vec<String>,
+    split_components: bool,
+    edge_pairs: &[(&str, &str)],
+) -> BTreeMap<&'a str, (u32, String)> {
+    if files.is_empty() {
+        return BTreeMap::new();
+    }
+
     // Group connected flat files inside the same generic directory if directory structure alone
     // did not distinguish separate components.
-    let distinct: BTreeSet<&str> = raw_labels.iter().map(String::as_str).collect();
-    if distinct.len() <= 1 && files.len() >= 2 {
+    if split_components {
         let mut idx_by_file: BTreeMap<&str, usize> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
             idx_by_file.insert(f.as_str(), i);
@@ -3377,11 +3724,8 @@ fn compute_file_communities<'a>(
             }
             x
         }
-        for edge in edges {
-            if let (Some(&u), Some(&v)) = (
-                idx_by_file.get(edge.source_file.as_str()),
-                idx_by_file.get(edge.target_file.as_str()),
-            ) {
+        for &(src, dst) in edge_pairs {
+            if let (Some(&u), Some(&v)) = (idx_by_file.get(src), idx_by_file.get(dst)) {
                 let ru = find_root(&mut parent, u);
                 let rv = find_root(&mut parent, v);
                 if ru != rv {
@@ -3429,6 +3773,49 @@ fn compute_file_communities<'a>(
         out.insert(path.as_str(), (id, label));
     }
     out
+}
+
+fn compute_file_communities<'a>(
+    files: &'a [String],
+    edges: &[StoredEdgeRow],
+) -> BTreeMap<&'a str, (u32, String)> {
+    let (raw_labels, needs_edge_components) = raw_dir_labels(files);
+    let edge_pairs: Vec<(&str, &str)> = if needs_edge_components {
+        edges
+            .iter()
+            .map(|e| (e.source_file.as_str(), e.target_file.as_str()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    finish_file_communities(files, raw_labels, needs_edge_components, &edge_pairs)
+}
+
+fn compute_file_communities_for_delta<'a>(
+    conn: &Connection,
+    files: &'a [String],
+) -> Result<BTreeMap<&'a str, (u32, String)>> {
+    let (raw_labels, needs_edge_components) = raw_dir_labels(files);
+    if !needs_edge_components {
+        return Ok(finish_file_communities(files, raw_labels, false, &[]));
+    }
+    let owned_pairs: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT source_file, target_file FROM ir_edges")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let borrowed_pairs: Vec<(&str, &str)> = owned_pairs
+        .iter()
+        .map(|(s, t)| (s.as_str(), t.as_str()))
+        .collect();
+    Ok(finish_file_communities(
+        files,
+        raw_labels,
+        true,
+        &borrowed_pairs,
+    ))
 }
 
 type SymbolCandidate<'a> = (&'a str, u32, u32, String);
@@ -3964,6 +4351,123 @@ fn collect_graph_elements(
     let node_count = nodes.len() as u64;
     let link_count = links.len() as u64;
     (nodes, links, node_count, link_count)
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+fn is_false_flag(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Serialize)]
+struct IrNodeWire<'a> {
+    id: &'a str,
+    label: &'a str,
+    source_file: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_location: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    end_line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community_name: Option<&'a str>,
+    #[serde(rename = "_callable_class", skip_serializing_if = "is_false_flag")]
+    callable_class: bool,
+    #[serde(rename = "abstract", skip_serializing_if = "is_false_flag")]
+    is_abstract: bool,
+    #[serde(skip_serializing_if = "is_false_flag")]
+    is_test: bool,
+}
+
+#[derive(Serialize)]
+struct IrLinkWire<'a> {
+    source: &'a str,
+    target: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_file: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<&'a str>,
+}
+
+struct IrNodesSliceWire<'a>(&'a [IrNodeSpec]);
+
+impl Serialize for IrNodesSliceWire<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|spec| IrNodeWire {
+            id: &spec.id,
+            label: &spec.label,
+            source_file: &spec.source_file,
+            source_location: spec.source_location.as_deref(),
+            end_line: spec.end_line,
+            file_type: spec.file_type.as_deref(),
+            node_kind: spec.node_kind.as_deref(),
+            community: spec.community,
+            community_name: spec.community_name.as_deref(),
+            callable_class: spec.callable_class,
+            is_abstract: spec.is_abstract,
+            is_test: spec.is_test,
+        }))
+    }
+}
+
+struct IrLinksSliceWire<'a>(&'a [IrLinkSpec]);
+
+impl Serialize for IrLinksSliceWire<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|spec| IrLinkWire {
+            source: &spec.source,
+            target: &spec.target,
+            relation: spec.relation.as_deref(),
+            context: spec.context.as_deref(),
+            confidence: spec.confidence.as_deref(),
+            source_file: spec.source_file.as_deref(),
+            evidence: spec.evidence.as_deref(),
+        }))
+    }
+}
+
+#[derive(Serialize)]
+struct IrGraphPayloadWire<'a> {
+    directed: bool,
+    multigraph: bool,
+    backend: &'a str,
+    nodes: IrNodesSliceWire<'a>,
+    links: IrLinksSliceWire<'a>,
+}
+
+pub(crate) fn write_node_link_payload_to_writer<W: Write>(
+    writer: W,
+    node_specs: &[IrNodeSpec],
+    link_specs: &[IrLinkSpec],
+) -> Result<()> {
+    let payload = IrGraphPayloadWire {
+        directed: true,
+        multigraph: false,
+        backend: NATIVE_IR_TOOL,
+        nodes: IrNodesSliceWire(node_specs),
+        links: IrLinksSliceWire(link_specs),
+    };
+    serde_json::to_writer(writer, &payload)?;
+    Ok(())
 }
 
 fn node_link_payload_from_elements(node_specs: &[IrNodeSpec], link_specs: &[IrLinkSpec]) -> Value {
@@ -4670,6 +5174,159 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "sym:caller" && l.target == "sym:second"),
             "same-file edge should resolve to line-closest/enclosing target: {same_links:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_delta_preserves_communities_and_streaming_json_matches_dom() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/auth")).unwrap();
+        std::fs::create_dir_all(root.join("src/billing")).unwrap();
+        std::fs::write(
+            root.join("src/auth/login.rs"),
+            "pub fn login() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/billing/pay.rs"),
+            "pub fn pay() -> i32 { crate::auth::login() }\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "comm-test").unwrap();
+        store.sync_workspace(&root).unwrap();
+
+        std::fs::write(
+            root.join("src/auth/login.rs"),
+            "pub fn login() -> i32 { 2 }\npub fn logout() -> i32 { 3 }\n",
+        )
+        .unwrap();
+        let delta = store
+            .update_paths_with_delta(&root, &["src/auth/login.rs".to_owned()])
+            .unwrap();
+        let ir_delta = store
+            .export_ir_delta_for_files(&delta)
+            .unwrap()
+            .expect("delta elements");
+
+        let auth_nodes: Vec<&IrNodeSpec> = ir_delta
+            .node_specs
+            .iter()
+            .filter(|n| n.source_file == "src/auth/login.rs")
+            .collect();
+        assert!(!auth_nodes.is_empty());
+        for node in &auth_nodes {
+            assert_eq!(
+                node.community_name.as_deref(),
+                Some("auth"),
+                "expected preserved directory community on {node:?}"
+            );
+            assert!(node.community.is_some());
+        }
+
+        // Streaming JSON encoding matches DOM value output identically.
+        let (all_nodes, all_links, _, _) = store.export_ir_graph_elements().unwrap();
+        let streamed_bytes =
+            encode_node_link_payload_from_elements(&all_nodes, &all_links).unwrap();
+        let streamed_val: Value = serde_json::from_slice(&streamed_bytes).unwrap();
+        let dom_val = node_link_payload_from_elements(&all_nodes, &all_links);
+        assert_eq!(streamed_val, dom_val);
+
+        // Read-only cached store returns the same Arc until DB file is replaced.
+        let ro1 = GraphIrStore::open_readonly_cached(&state, "comm-test")
+            .unwrap()
+            .expect("cached ro1");
+        let ro2 = GraphIrStore::open_readonly_cached(&state, "comm-test")
+            .unwrap()
+            .expect("cached ro2");
+        assert!(Arc::ptr_eq(&ro1, &ro2));
+    }
+
+    #[test]
+    fn verify_path_or_symbol_and_delta_incoming_callers_work_over_readonly_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod auth;\npub mod api;\n").unwrap();
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "pub struct TokenService;\nimpl TokenService {\n    pub fn issue() -> i32 { 1 }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/api.rs"),
+            "use crate::auth::TokenService;\npub fn handler() -> i32 { TokenService::issue() }\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "verify-test").unwrap();
+        store.sync_workspace(&root).unwrap();
+
+        let ro = GraphIrStore::open_readonly_cached(&state, "verify-test")
+            .unwrap()
+            .expect("readonly cached IR");
+
+        let exact = ro
+            .verify_path_or_symbol(Some("src/auth.rs"), Some("TokenService::issue"))
+            .unwrap();
+        assert!(exact.path_exists);
+        assert!(exact.symbol_exists);
+        assert_eq!(exact.matched_files, vec!["src/auth.rs".to_owned()]);
+        assert!(!exact.matched_symbols.is_empty());
+
+        let wrong_owner = ro
+            .verify_path_or_symbol(Some("src/auth.rs"), Some("OtherService::issue"))
+            .unwrap();
+        assert!(wrong_owner.path_exists);
+        assert!(!wrong_owner.symbol_exists);
+
+        let sym_only = ro.verify_path_or_symbol(None, Some("handler")).unwrap();
+        assert!(!sym_only.path_exists);
+        assert!(sym_only.symbol_exists);
+        assert_eq!(sym_only.matched_files, vec!["src/api.rs".to_owned()]);
+
+        let missing = ro
+            .verify_path_or_symbol(Some("src/missing.rs"), Some("Ghost"))
+            .unwrap();
+        assert!(!missing.path_exists);
+        assert!(!missing.symbol_exists);
+
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "pub struct TokenService;\nimpl TokenService {\n    pub fn issue() -> i32 { 2 }\n}\n",
+        )
+        .unwrap();
+        let edit_delta = store
+            .update_paths_with_delta(&root, &["src/auth.rs".to_owned()])
+            .unwrap();
+        assert_eq!(edit_delta.changed_paths, vec!["src/auth.rs".to_owned()]);
+        assert!(
+            edit_delta
+                .incoming_caller_files
+                .contains(&"src/api.rs".to_owned()),
+            "expected src/api.rs in incoming_caller_files: {:?}",
+            edit_delta.incoming_caller_files
+        );
+
+        std::fs::remove_file(root.join("src/auth.rs")).unwrap();
+        let remove_delta = store
+            .update_paths_with_delta(&root, &["src/auth.rs".to_owned()])
+            .unwrap();
+        assert_eq!(remove_delta.removed_files, vec!["src/auth.rs".to_owned()]);
+        assert!(
+            remove_delta
+                .incoming_caller_files
+                .contains(&"src/api.rs".to_owned()),
+            "expected pre-removal caller src/api.rs in incoming_caller_files: {:?}",
+            remove_delta.incoming_caller_files
         );
     }
 }

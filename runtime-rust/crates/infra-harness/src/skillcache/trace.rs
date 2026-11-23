@@ -23,6 +23,95 @@ use std::{
 /// The shortest environment value worth replacing wherever it appears.
 const SECRET_CHARS: usize = 8;
 const SKILLS: usize = 8;
+pub const SKILL_FOLDERS: [&str; 3] = [".claude/skills", ".agents/skills", ".cursor/skills"];
+
+/// Whether `workspace` or the user's home directory contains at least one
+/// discoverable `SKILL.md` folder for Claude, Codex, or Cursor.
+pub fn workspace_has_skills(workspace: &Path) -> bool {
+    let home = run_activity::user_home().map(PathBuf::from);
+    for root in [Some(workspace), home.as_deref()].into_iter().flatten() {
+        for folder in SKILL_FOLDERS {
+            let Ok(entries) = std::fs::read_dir(root.join(folder)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path().join("SKILL.md");
+                if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether this cold turn should pay the pre-turn workspace snapshot + hash
+/// cost before the provider runs.
+///
+/// Unrouted chat turns in `auto` mode carry no requested skill and skip
+/// pre-turn hashing; explicit `observe` turns snapshot whenever a skill is
+/// routed or at least one skill folder is present in the workspace/home.
+pub fn should_snapshot_for_observation(
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> bool {
+    if !route.requests.is_empty() || route.mode == "native" {
+        return true;
+    }
+    crate::skillcache::settings::mode(session) == "observe" && workspace_has_skills(workspace)
+}
+
+/// As [`should_snapshot_for_observation`], also enabling snapshots when
+/// opt-in `ToolChain` capture is enabled on `store` or `session`.
+pub fn should_snapshot_for_observation_in_store(
+    store: &SessionStore,
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> bool {
+    should_snapshot_for_observation(session, route, workspace)
+        || (crate::skillcache::settings::records(session)
+            && crate::skillcache::settings::tool_chain_enabled(store, session))
+}
+
+/// Stable 64-hex tree digest shared across subagents and linked worktrees on the same commit.
+pub fn workspace_tree_sha(workspace: &Path) -> Result<String> {
+    if let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+        .output()
+        && output.status.success()
+    {
+        let tree_oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tree_oid.is_empty() {
+            return Ok(fingerprint::sha256(
+                format!("git-tree:{tree_oid}").as_bytes(),
+            ));
+        }
+    }
+    Ok(fingerprint::tree_sha256(workspace)?.sha256)
+}
+
+/// Conservative allowlist of strictly read-only/search tool names permitted in `ToolChain` traces.
+pub fn is_read_only_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "read"
+            | "grep"
+            | "glob"
+            | "ls"
+            | "read_file"
+            | "view_file"
+            | "view_file_outline"
+            | "view_code_item"
+            | "grep_search"
+            | "find_by_name"
+            | "list_dir"
+            | "search"
+    )
+}
 
 /// Store setting JSON controlling short-turn observation admission
 /// (`{"min_tool_calls": 2, "min_output_tokens": ...}`).
@@ -86,6 +175,7 @@ impl RunEvents for Tee {
 /// What a session's trace must not keep: the values of the launch's
 /// credential-like environment variables, command-line credentials, anything
 /// the shared secret policy names, and the host's own paths.
+#[derive(Clone)]
 pub struct SessionRedactor {
     secrets: Vec<String>,
     roots: Vec<String>,
@@ -267,7 +357,7 @@ pub fn resolve_skills(
         if name.is_empty() || name.contains([':', '/', '\\']) || name.starts_with('.') {
             return None;
         }
-        for folder in [".claude/skills", ".agents/skills"] {
+        for folder in SKILL_FOLDERS {
             if let Some(found) = [Some(workspace.as_path()), home]
                 .into_iter()
                 .flatten()
@@ -283,7 +373,7 @@ pub fn resolve_skills(
                 return Some(found);
             }
         }
-        for folder in [".claude/skills", ".agents/skills"] {
+        for folder in SKILL_FOLDERS {
             for root in [Some(workspace.as_path()), home].into_iter().flatten() {
                 let Ok(entries) = std::fs::read_dir(root.join(folder)) else {
                     continue;
@@ -364,6 +454,96 @@ fn observe_min_roi(store: &SessionStore) -> (usize, Option<u64>) {
     (min_tools, min_output)
 }
 
+/// Checks whether an observed trace meets recording eligibility without
+/// writing to disk or computing workspace diffs.
+pub fn check_admissible(
+    store: &SessionStore,
+    workspace: &Path,
+    route: &ResolvedCommand,
+    message: &str,
+    trace: &Trace,
+    usage: &Value,
+) -> std::result::Result<(Vec<Value>, usize), Value> {
+    let (skills, tools, _) =
+        check_admissible_with_toolchain(store, false, workspace, route, message, trace, usage)?;
+    Ok((skills, tools))
+}
+
+/// Checks trace admissibility, additionally admitting skillless read-only tool
+/// chains when `allow_tool_chain` is true.
+pub fn check_admissible_with_toolchain(
+    store: &SessionStore,
+    allow_tool_chain: bool,
+    workspace: &Path,
+    route: &ResolvedCommand,
+    message: &str,
+    trace: &Trace,
+    usage: &Value,
+) -> std::result::Result<(Vec<Value>, usize, Option<String>), Value> {
+    let tools = trace
+        .steps
+        .iter()
+        .filter(|step| step["kind"] == "tool")
+        .count();
+    let skills = resolve_skills(workspace, route, message, trace);
+    let skipped = |reason: &str, text: &str| json!({"kind": "skillcache", "phase": "not_observed", "reason": reason, "text": text});
+    if tools == 0 {
+        return Err(skipped(
+            "no_tool_calls",
+            "SkillCache kept no trace: this turn ran no tool.",
+        ));
+    }
+    let mut tool_chain_tree_sha = None;
+    if skills.is_empty() {
+        if !allow_tool_chain {
+            return Err(skipped(
+                "no_skill",
+                "SkillCache kept no trace: no skill of this project or of your home folder was used.",
+            ));
+        }
+        let has_mutating = trace
+            .steps
+            .iter()
+            .filter(|step| step["kind"] == "tool")
+            .any(|step| {
+                let name = step["tool"]
+                    .as_str()
+                    .or_else(|| step["name"].as_str())
+                    .unwrap_or("");
+                !is_read_only_tool_name(name)
+            });
+        if has_mutating {
+            return Err(skipped(
+                "mutating_tool_chain",
+                "SkillCache kept no trace: tool-chain capture admits read-only tool sequences only.",
+            ));
+        }
+        tool_chain_tree_sha = Some(workspace_tree_sha(workspace).map_err(|err| {
+            skipped(
+                "storage",
+                &format!("SkillCache could not fingerprint workspace tree: {err}"),
+            )
+        })?);
+    }
+    let (min_tools, min_output) = observe_min_roi(store);
+    if tools < min_tools {
+        return Err(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
+        ));
+    }
+    if let Some(min_output) = min_output
+        && let Some(output_tokens) = usage["output_tokens"].as_u64()
+        && output_tokens < min_output
+    {
+        return Err(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
+        ));
+    }
+    Ok((skills, tools, tool_chain_tree_sha))
+}
+
 /// Stores the trace of a completed turn. Returns the session event that says
 /// what was kept, or why nothing was.
 pub fn save(
@@ -372,44 +552,26 @@ pub fn save(
     trace: Trace,
     redactor: &dyn Redactor,
 ) -> Result<Value> {
-    let tools = trace
-        .steps
-        .iter()
-        .filter(|step| step["kind"] == "tool")
-        .count();
-    let skills = resolve_skills(turn.workspace, turn.route, turn.message, &trace);
-    let skipped = |reason: &str, text: &str| json!({"kind": "skillcache", "phase": "not_observed", "reason": reason, "text": text});
-    if tools == 0 {
-        return Ok(skipped(
-            "no_tool_calls",
-            "SkillCache kept no trace: this turn ran no tool.",
-        ));
-    }
-    if skills.is_empty() {
-        return Ok(skipped(
-            "no_skill",
-            "SkillCache kept no trace: no skill of this project or of your home folder was used.",
-        ));
-    }
-    let (min_tools, min_output) = observe_min_roi(store);
-    if tools < min_tools {
-        return Ok(skipped(
-            "low_roi",
-            "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
-        ));
-    }
-    if let Some(min_output) = min_output
-        && let Some(output_tokens) = turn.usage["output_tokens"].as_u64()
-        && output_tokens < min_output
-    {
-        return Ok(skipped(
-            "low_roi",
-            "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
-        ));
-    }
+    let allow_tool_chain = crate::skillcache::settings::tool_chain_enabled(store, turn.session);
+    let (skills, tools, tool_chain_tree_sha) = match check_admissible_with_toolchain(
+        store,
+        allow_tool_chain,
+        turn.workspace,
+        turn.route,
+        turn.message,
+        &trace,
+        turn.usage,
+    ) {
+        Ok(ok) => ok,
+        Err(skipped) => return Ok(skipped),
+    };
     let (request, _) = redactor.redact(turn.message);
     let mut redaction = trace.redaction();
     redaction["complete"] = trace.complete.into();
+    if let Some(tree_sha) = &tool_chain_tree_sha {
+        redaction["trace_kind"] = "tool_chain".into();
+        redaction["tool_chain_tree_sha"] = tree_sha.clone().into();
+    }
     let steps = Value::Array(trace.steps);
     let db = store.connection()?;
     db::save_trace(
@@ -430,6 +592,16 @@ pub fn save(
         .iter()
         .filter_map(|skill| skill["name"].as_str())
         .collect::<Vec<_>>();
+    let text = if tool_chain_tree_sha.is_some() {
+        format!(
+            "SkillCache kept this turn's read-only tool-chain trace ({tools} tool calls). It can be compiled into a tool-chain capsule."
+        )
+    } else {
+        format!(
+            "SkillCache kept this turn's trace ({tools} tool calls; skill: {}). It can be compiled into a capsule.",
+            names.join(", ")
+        )
+    };
     Ok(json!({
         "kind": "skillcache",
         "phase": "observed",
@@ -438,10 +610,7 @@ pub fn save(
         "tool_calls": tools,
         "skills": names,
         "redaction": redaction,
-        "text": format!(
-            "SkillCache kept this turn's trace ({tools} tool calls; skill: {}). It can be compiled into a capsule.",
-            names.join(", ")
-        ),
+        "text": text,
     }))
 }
 
@@ -612,5 +781,105 @@ mod tests {
         let db = store.connection().unwrap();
         let stored = db::trace(&db, "g-good").unwrap().unwrap();
         assert_eq!(stored["usage"], usage);
+    }
+
+    #[test]
+    fn resolve_skills_and_workspace_scan_include_cursor_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = infra_core::fs::canonicalize(root.path()).unwrap();
+        let cursor_dir = workspace.join(".cursor/skills/sc-cursor-only");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(cursor_dir.join("SKILL.md"), "# Cursor Skill\n").unwrap();
+        assert!(workspace_has_skills(&workspace));
+
+        let trace = Trace {
+            provider: "cursor".into(),
+            steps: vec![],
+            skills: vec![SkillRef {
+                name: Some("sc-cursor-only".into()),
+                path: None,
+            }],
+            counters: Default::default(),
+            complete: true,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "$sc-cursor-only run".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let resolved = resolve_skills(&workspace, &route, "$sc-cursor-only run", &trace);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["name"], "sc-cursor-only");
+        assert_eq!(
+            resolved[0]["path"],
+            ".cursor/skills/sc-cursor-only/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn check_admissible_with_toolchain_enforces_read_only_and_shares_tree_sha() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let workspace = infra_core::fs::canonicalize(&ws).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect composer dependencies".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let mut ro_trace = Trace {
+            provider: "claude".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "Read", "input": {"file_path": "composer.json"}}),
+                json!({"kind": "tool", "tool": "Grep", "input": {"pattern": "laravel"}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let default_denied = check_admissible_with_toolchain(
+            &store,
+            false,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert_eq!(default_denied["reason"], "no_skill");
+
+        let (skills, tools, tree_sha) = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap();
+        assert!(skills.is_empty());
+        assert_eq!(tools, 2);
+        assert!(tree_sha.is_some());
+
+        ro_trace
+            .steps
+            .push(json!({"kind": "tool", "tool": "Write", "input": {"file_path": "a.txt"}}));
+        let mutating = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert_eq!(mutating["reason"], "mutating_tool_chain");
     }
 }

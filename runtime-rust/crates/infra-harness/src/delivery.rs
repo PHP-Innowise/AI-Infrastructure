@@ -968,7 +968,19 @@ impl Delivery {
         if p["check"].is_null() {
             return Err(invalid("Select a check command and prepare a new preview."));
         }
-        let c=self.results.prepare_check(sid,&p["check"],&json!({"kind":"target","preview_id":data["preview_id"],"candidate":p["_candidate"],"target_branch":p["target_branch"],"target_head":p["target_head"],"snapshot_id":null,"snapshot_complete":false}))?;
+        let mut meta = json!({
+            "kind": "target",
+            "preview_id": data["preview_id"],
+            "candidate": p["_candidate"],
+            "target_branch": p["target_branch"],
+            "target_head": p["target_head"],
+            "snapshot_id": null,
+            "snapshot_complete": false
+        });
+        if p["check"]["no_cache"] == true || p["check"]["cache"] == false {
+            meta["no_cache"] = json!(true);
+        }
+        let c = self.results.prepare_check(sid, &p["check"], &meta)?;
         {
             let mut previews = self
                 .previews
@@ -1173,12 +1185,34 @@ impl TargetCheckWorkflow for Delivery {
                     .pending(&work, &self.results.git_info(&work, false).await?)
                     .await?["snapshot_id"]
                     .clone();
-                let check_root = work.join(relative);
+                let check_root = work.join(&relative);
                 PublicationFiles::new(&check_root)?.check()?;
                 let argv = serde_json::from_value::<Vec<String>>(check["argv"].clone())?;
                 let timeout = check["timeout"]
                     .as_u64()
                     .ok_or_else(|| invalid("Check timeout is missing"))?;
+                let cmd_str = check["command"].as_str().unwrap_or("").to_owned();
+                let candidate = text(check, "candidate")?.to_owned();
+                let target_cache_key = format!("target:{}:{}", candidate, relative.display());
+                let bypass = check["no_cache"].as_bool() == Some(true)
+                    || check["cache"].as_bool() == Some(false);
+                let empty_env = BTreeMap::new();
+                if let Some(hit) = self.results.cached_check(
+                    &argv,
+                    &empty_env,
+                    &target_cache_key,
+                    &check_root,
+                    &cmd_str,
+                    bypass,
+                )? {
+                    check["workspace_changed"] = false.into();
+                    check["cached"] = true.into();
+                    check["envelope"] = hit.tool_envelope();
+                    self.results.save_check(check)?;
+                    self.take(&sid, &json!({"preview_id":preview_id}), "transfer", false)?;
+                    self.validate_transfer(&sid, &p).await?;
+                    return Ok::<Capture, HarnessError>(hit);
+                }
                 let result = self
                     .results
                     .capture_sandboxed(
@@ -1194,17 +1228,33 @@ impl TargetCheckWorkflow for Delivery {
                     )
                     .await?;
                 if result.reason.is_some() {
+                    check["cached"] = false.into();
+                    check["envelope"] = result.tool_envelope();
+                    self.results.save_check(check)?;
                     return Ok(result);
                 }
-                check["workspace_changed"] = (self
+                let changed = self
                     .pending(&work, &self.results.git_info(&work, false).await?)
                     .await?["snapshot_id"]
-                    != before)
-                    .into();
+                    != before;
+                check["workspace_changed"] = changed.into();
                 let mut result = result;
-                if check["workspace_changed"] == true {
+                if changed {
                     result.reason = Some("workspace_changed".into());
+                } else {
+                    self.results.store_cached_check(
+                        &argv,
+                        &empty_env,
+                        &target_cache_key,
+                        &check_root,
+                        &cmd_str,
+                        bypass,
+                        &result,
+                    )?;
                 }
+                check["cached"] = false.into();
+                check["envelope"] = result.tool_envelope();
+                self.results.save_check(check)?;
                 self.take(&sid, &json!({"preview_id":preview_id}), "transfer", false)?;
                 self.validate_transfer(&sid, &p).await?;
                 Ok::<Capture, HarnessError>(result)

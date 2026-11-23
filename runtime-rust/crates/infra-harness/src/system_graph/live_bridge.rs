@@ -165,6 +165,17 @@ struct BridgeState {
     /// How many events of each run passed the bridge: what a run's
     /// evidence reaches is worked out anew once another one did.
     events: BTreeMap<String, u64>,
+    /// Monotonic counter bumped whenever any active dispatch for `run_id`
+    /// starts, mutates evidence (`opened`, `shell_reads`, entities, plan, commands),
+    /// or finishes.
+    run_epochs: BTreeMap<String, u64>,
+}
+
+impl BridgeState {
+    fn bump_run_epoch(&mut self, run_id: &str) {
+        let entry = self.run_epochs.entry(run_id.to_owned()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
 }
 
 pub struct HarnessCodeGraphBridge {
@@ -228,6 +239,7 @@ impl HarnessCodeGraphBridge {
         let attempt_opt = event["attempt"].as_u64();
 
         if let Ok(mut guard) = self.state.lock() {
+            let mut mutated = false;
             for ((rid, phase, attempt), active) in guard.dispatches.iter_mut() {
                 if rid != run_id {
                     continue;
@@ -252,6 +264,7 @@ impl HarnessCodeGraphBridge {
                             "path": file,
                             "detail": detail,
                         }));
+                        mutated = true;
                     }
                 }
                 if active.ctx.service == "__system__" {
@@ -269,12 +282,29 @@ impl HarnessCodeGraphBridge {
                                     "path": qual,
                                     "detail": detail,
                                 }));
+                                mutated = true;
                             }
                         }
                     }
                 }
             }
+            if mutated {
+                guard.bump_run_epoch(run_id);
+            }
         }
+    }
+
+    pub(super) fn run_dispatch_snapshot_key(&self, run_id: &str) -> (u64, usize) {
+        let Ok(guard) = self.state.lock() else {
+            return (0, 0);
+        };
+        let epoch = guard.run_epochs.get(run_id).copied().unwrap_or(0);
+        let active = guard
+            .dispatches
+            .keys()
+            .filter(|(rid, _, _)| rid == run_id)
+            .count();
+        (epoch, active)
     }
 
     pub(super) fn snapshot_active_dispatches(&self, run_id: &str) -> Vec<DispatchEvidence> {
@@ -604,6 +634,7 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
                     graph_asked: false,
                 },
             );
+            guard.bump_run_epoch(&ctx.run_id);
         }
         Ok(())
     }
@@ -886,6 +917,7 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
                     }
                 }
             }
+            guard.bump_run_epoch(&ctx.run_id);
         }
 
         for (service, focus) in focus_emissions {
@@ -907,8 +939,13 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
         _receipt: &Value,
     ) -> infra_core::Result<Option<DispatchEvidence>> {
         let removed = self.state.lock().ok().and_then(|mut g| {
-            g.dispatches
-                .remove(&(ctx.run_id.clone(), ctx.phase.clone(), ctx.attempt))
+            let item = g
+                .dispatches
+                .remove(&(ctx.run_id.clone(), ctx.phase.clone(), ctx.attempt));
+            if item.is_some() {
+                g.bump_run_epoch(&ctx.run_id);
+            }
+            item
         });
 
         let git_changed = if ctx.mode == "edit" {

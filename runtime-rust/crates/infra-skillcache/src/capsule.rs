@@ -67,6 +67,36 @@ impl Form {
     }
 }
 
+/// Origin class of a SkillCache capsule.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CapsuleKind {
+    #[default]
+    Skill,
+    /// Verified read-only/verification sequence synthesized from tool chains without an explicit skill.
+    ToolChain,
+    /// Portable edition template candidate awaiting target-repo Gate 2 + Gate 3 verification.
+    Template,
+}
+
+impl CapsuleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::ToolChain => "tool_chain",
+            Self::Template => "template",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "skill" => Some(Self::Skill),
+            "tool_chain" => Some(Self::ToolChain),
+            "template" => Some(Self::Template),
+            _ => None,
+        }
+    }
+}
+
 /// What a capsule is selected by and shown as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mu {
@@ -102,6 +132,8 @@ pub struct Capabilities {
     pub network: Network,
     /// Bare names of the interpreters the programs start, such as `python3`.
     pub runtimes: Vec<String>,
+    /// Optional safe folder/file names re-enabled for change tracking when ignored by default.
+    pub allow_ignored: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,8 +234,11 @@ impl Step {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillCapsule {
     pub form: Form,
+    pub kind: CapsuleKind,
     pub mu: Mu,
     pub skills: Vec<SourceSkill>,
+    pub source_edition: Option<String>,
+    pub tool_chain_sha256: Option<String>,
     pub capabilities: Capabilities,
     pub bindings: Vec<Binding>,
     pub programs: Vec<Program>,
@@ -658,23 +693,65 @@ impl SkillCapsule {
         let mut capsule = Map::new();
         capsule.insert("schema_version".into(), SCHEMA_VERSION.into());
         capsule.insert("form".into(), self.form.as_str().into());
+        if self.kind != CapsuleKind::Skill {
+            capsule.insert("kind".into(), self.kind.as_str().into());
+        }
         capsule.insert(
             "mu".into(),
             json!({"name": self.mu.name, "description": self.mu.description}),
         );
-        capsule.insert(
-            "source".into(),
-            json!({"skills": self.skills.iter().map(|skill| json!({
-                "name": skill.name, "path": skill.path, "tree_sha256": skill.tree_sha256,
-            })).collect::<Vec<_>>()}),
+        let mut source = Map::new();
+        source.insert(
+            "skills".into(),
+            self.skills
+                .iter()
+                .map(|skill| {
+                    json!({
+                        "name": skill.name,
+                        "path": skill.path,
+                        "tree_sha256": skill.tree_sha256,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into(),
         );
+        if let Some(edition) = &self.source_edition {
+            source.insert("edition".into(), edition.clone().into());
+        }
+        if let Some(tree_sha256) = &self.tool_chain_sha256 {
+            source.insert("tool_chain".into(), json!({"tree_sha256": tree_sha256}));
+        }
+        capsule.insert("source".into(), Value::Object(source));
         if self.form == Form::Textual {
             return capsule.into();
         }
-        capsule.insert(
-            "capabilities".into(),
-            json!({"network": self.capabilities.network.as_str(), "runtimes": self.capabilities.runtimes}),
+        let mut capabilities = Map::new();
+        capabilities.insert("network".into(), self.capabilities.network.as_str().into());
+        capabilities.insert(
+            "runtimes".into(),
+            Value::Array(
+                self.capabilities
+                    .runtimes
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
         );
+        if !self.capabilities.allow_ignored.is_empty() {
+            capabilities.insert(
+                "allow_ignored".into(),
+                Value::Array(
+                    self.capabilities
+                        .allow_ignored
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        capsule.insert("capabilities".into(), Value::Object(capabilities));
         capsule.insert(
             "bindings".into(),
             self.bindings
@@ -751,6 +828,7 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
         Form::Hybrid => &[
             "schema_version",
             "form",
+            "kind",
             "mu",
             "source",
             "capabilities",
@@ -759,9 +837,23 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
             "steps",
             "verification",
         ],
-        Form::Textual => &["schema_version", "form", "mu", "source"],
+        Form::Textual => &["schema_version", "form", "kind", "mu", "source"],
     };
     let map = reader.object(value, "", known)?;
+    let kind = match map.get("kind").filter(|value| !value.is_null()) {
+        None => Some(CapsuleKind::Skill),
+        Some(value) => match value.as_str().and_then(CapsuleKind::parse) {
+            Some(kind) => Some(kind),
+            None => {
+                reader.refuse(
+                    "invalid_value",
+                    "kind",
+                    "`kind` is `skill`, `tool_chain` or `template`.",
+                );
+                None
+            }
+        },
+    };
     match map.get("schema_version").and_then(Value::as_u64) {
         Some(SCHEMA_VERSION) => {}
         Some(other) => reader.refuse(
@@ -793,11 +885,29 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
             description: description?,
         })
     });
+    let mut source_edition = None;
+    let mut tool_chain_sha256 = None;
     let skills = reader.required(map, "source", "").and_then(|value| {
-        let source = reader.object(value, "source", &["skills"])?;
+        let source = reader.object(value, "source", &["skills", "edition", "tool_chain"])?;
+        source_edition = reader.optional_text(source, "edition", "source", 128);
+        if let Some(chain) = source.get("tool_chain").filter(|v| !v.is_null())
+            && let Some(chain_obj) = reader.object(chain, "source.tool_chain", &["tree_sha256"])
+            && let Some(sha) =
+                reader.required_text(chain_obj, "tree_sha256", "source.tool_chain", 64)
+        {
+            if is_sha256(&sha) {
+                tool_chain_sha256 = Some(sha);
+            } else {
+                reader.refuse(
+                    "invalid_value",
+                    "source.tool_chain.tree_sha256",
+                    "`tree_sha256` is 64 lower-case hexadecimal digits.",
+                );
+            }
+        }
         let items = reader.required(source, "skills", "source")?;
         let items = reader.array(items, "source.skills", SOURCE_SKILLS)?;
-        if items.is_empty() {
+        if items.is_empty() && kind != Some(CapsuleKind::ToolChain) {
             reader.refuse(
                 "missing_field",
                 "source.skills",
@@ -852,11 +962,15 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
     if form == Form::Textual {
         return Some(SkillCapsule {
             form,
+            kind: kind?,
             mu: mu?,
             skills: skills?,
+            source_edition,
+            tool_chain_sha256,
             capabilities: Capabilities {
                 network: Network::None,
                 runtimes: Vec::new(),
+                allow_ignored: Vec::new(),
             },
             bindings: Vec::new(),
             programs: Vec::new(),
@@ -865,7 +979,11 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
         });
     }
     let capabilities = reader.required(map, "capabilities", "").and_then(|value| {
-        let capabilities = reader.object(value, "capabilities", &["network", "runtimes"])?;
+        let capabilities = reader.object(
+            value,
+            "capabilities",
+            &["network", "runtimes", "allow_ignored"],
+        )?;
         let network = match capabilities.get("network").and_then(Value::as_str) {
             Some("none") => Some(Network::None),
             Some("required") => Some(Network::Required),
@@ -898,9 +1016,32 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
                 }
             }
         }
+        let mut allow_ignored = Vec::new();
+        if let Some(items) = capabilities
+            .get("allow_ignored")
+            .filter(|v| !v.is_null())
+            .and_then(|items| reader.array(items, "capabilities.allow_ignored", RUNTIMES))
+        {
+            for (index, item) in items.iter().enumerate() {
+                match item.as_str() {
+                    Some(name)
+                        if crate::executor::is_safe_allowlist_name(name)
+                            && !allow_ignored.iter().any(|known| known == name) =>
+                    {
+                        allow_ignored.push(name.to_string());
+                    }
+                    _ => reader.refuse(
+                        "invalid_value",
+                        &format!("capabilities.allow_ignored[{index}]"),
+                        "An allowed entry must be a distinct non-sensitive folder or file name.",
+                    ),
+                }
+            }
+        }
         Some(Capabilities {
             network: network?,
             runtimes,
+            allow_ignored,
         })
     });
     let mut bindings = Vec::new();
@@ -1053,8 +1194,11 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
     }
     Some(SkillCapsule {
         form,
+        kind: kind?,
         mu: mu?,
         skills: skills?,
+        source_edition,
+        tool_chain_sha256,
         capabilities: capabilities?,
         bindings,
         programs,

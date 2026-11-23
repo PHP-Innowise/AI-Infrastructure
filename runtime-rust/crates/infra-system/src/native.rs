@@ -969,8 +969,22 @@ pub fn validate_state_sync(
             "error",
             "plan_sha256",
         ],
-        &["finished_at", "access", "tell_agents_graph", "permissions"],
+        &[
+            "finished_at",
+            "access",
+            "tell_agents_graph",
+            "permissions",
+            "health_warnings",
+        ],
     )?;
+    if state.get("health_warnings").is_some_and(|value| {
+        !value.is_null()
+            && !value
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item.is_string()))
+    }) {
+        return Err(fail("Invalid health_warnings state field"));
+    }
     if state
         .get("tell_agents_graph")
         .is_some_and(|value| !value.is_null() && !value.is_boolean())

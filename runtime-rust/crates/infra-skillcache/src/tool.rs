@@ -244,7 +244,6 @@ pub fn run(
         Ok(argv) => argv,
         Err(failed) => return Ok(Outcome::Failed(failed)),
     };
-    let before = package::digest(&package.root)?;
     let mut environment =
         env_filter::program_environment(std::env::vars_os(), &input, workspace, &package.root);
     // An interpreter must not write its cache into the read-only package.
@@ -299,7 +298,7 @@ pub fn run(
             seconds,
         }))
     };
-    if package::digest(&package.root)? != before {
+    if package::digest(&package.root)? != package.package_sha256 {
         return failed(
             "package_modified",
             "The capsule's package changed while the program ran; it is read-only.".into(),

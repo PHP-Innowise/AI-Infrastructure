@@ -843,6 +843,39 @@ async fn idle_reconnect_poll() {
     }
 }
 
+/// Applies an authoritative global `waiting_counts` snapshot to cached `sessions`,
+/// `selected`, and `waiting_counts`, resetting omitted zero-count sessions to `0`.
+pub(crate) fn apply_waiting_counts_snapshot(
+    sessions: &mut [V],
+    selected: &mut V,
+    waiting_counts: &mut std::collections::BTreeMap<String, usize>,
+    payload: &V,
+) -> bool {
+    let Some(map) = payload["counts"].as_object() else {
+        return false;
+    };
+    let mut next_counts = std::collections::BTreeMap::new();
+    for (k, v) in map {
+        let count = v.as_u64().unwrap_or(0) as usize;
+        if !k.is_empty() && count > 0 {
+            next_counts.insert(k.clone(), count);
+        }
+    }
+    for s_item in sessions.iter_mut() {
+        let id = m::text(s_item, "id");
+        if !id.is_empty() && s_item.is_object() {
+            s_item["waiting_permissions"] = json!(next_counts.get(&id).copied().unwrap_or(0));
+        }
+    }
+    let selected_id = m::text(selected, "id");
+    if !selected_id.is_empty() && selected.is_object() {
+        selected["waiting_permissions"] =
+            json!(next_counts.get(&selected_id).copied().unwrap_or(0));
+    }
+    *waiting_counts = next_counts;
+    true
+}
+
 /// Wires `/api/events/stream` SSE event handlers for real-time session events, statuses, approvals, and fallback recovery.
 pub(crate) fn initialize_sse_listeners() {
     if m::yes(&m::data("session-sse-wired")) {
@@ -962,20 +995,15 @@ pub(crate) fn initialize_sse_listeners() {
     });
 
     api::on_sse("waiting_counts", |payload| {
-        if let Some(map) = payload["counts"].as_object() {
-            let mut next_counts = std::collections::BTreeMap::new();
-            for (k, v) in map {
-                next_counts.insert(k.clone(), v.as_u64().unwrap_or(0) as usize);
-            }
-            m::write(|s| {
-                for s_item in &mut s.sessions {
-                    let id = m::text(s_item, "id");
-                    if let Some(&count) = next_counts.get(&id) {
-                        s_item["waiting_permissions"] = json!(count);
-                    }
-                }
-                s.approvals.waiting_counts = next_counts;
-            });
+        let updated = m::write(|s| {
+            apply_waiting_counts_snapshot(
+                &mut s.sessions,
+                &mut s.selected,
+                &mut s.approvals.waiting_counts,
+                payload,
+            )
+        });
+        if updated {
             history();
             run::sync_approvals_badge();
             if m::read(|s| s.approvals.drawer_open) {
@@ -1050,4 +1078,70 @@ pub(crate) fn initialize_sse_listeners() {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waiting_counts_sse_resets_omitted_resolved_sessions_to_zero() {
+        let mut sessions = vec![
+            json!({"id": "s-1", "title": "Auth fix", "project_id": "proj-a", "waiting_permissions": 1}),
+            json!({"id": "s-2", "title": "Cache fix", "project_id": "proj-b", "waiting_permissions": 2}),
+        ];
+        let mut selected = json!({"id": "s-1", "waiting_permissions": 1});
+        let mut waiting_counts = std::collections::BTreeMap::from([
+            ("s-1".to_owned(), 1usize),
+            ("s-2".to_owned(), 2usize),
+        ]);
+
+        // Resolve s-1 so PermissionDesk::waiting_counts omits it while s-2 remains pending.
+        assert!(apply_waiting_counts_snapshot(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            &json!({"counts": {"s-2": 2}, "total": 2, "session_id": "s-1"}),
+        ));
+        assert_eq!(sessions[0]["waiting_permissions"], json!(0));
+        assert_eq!(selected["waiting_permissions"], json!(0));
+        assert_eq!(sessions[1]["waiting_permissions"], json!(2));
+        assert!(!waiting_counts.contains_key("s-1"));
+        assert_eq!(waiting_counts.get("s-2"), Some(&2));
+
+        let waiting_only =
+            navigation::filter_history_sessions(&sessions, "", true, &waiting_counts);
+        assert_eq!(waiting_only.len(), 1);
+        assert_eq!(waiting_only[0]["id"], "s-2");
+        assert_eq!(
+            run::compute_total_pending_approvals_count(&sessions, &waiting_counts, "s-1", 0, 0),
+            2
+        );
+
+        // Resolve s-2 as well (empty counts object) and verify all cached counts return to 0.
+        assert!(apply_waiting_counts_snapshot(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            &json!({"counts": {}, "total": 0, "session_id": "s-2"}),
+        ));
+        assert_eq!(sessions[0]["waiting_permissions"], json!(0));
+        assert_eq!(sessions[1]["waiting_permissions"], json!(0));
+        assert!(waiting_counts.is_empty());
+        assert!(
+            navigation::filter_history_sessions(&sessions, "", true, &waiting_counts).is_empty()
+        );
+        assert_eq!(
+            run::compute_total_pending_approvals_count(&sessions, &waiting_counts, "s-1", 0, 0),
+            0
+        );
+
+        // Malformed payload without a counts object is ignored cleanly.
+        assert!(!apply_waiting_counts_snapshot(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            &json!({"total": 9}),
+        ));
+    }
 }

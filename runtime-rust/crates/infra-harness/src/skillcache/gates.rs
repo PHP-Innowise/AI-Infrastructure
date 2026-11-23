@@ -220,10 +220,37 @@ fn environment(
     environment
 }
 
+/// Resolves declared runtime executables into read-only sandbox directories
+/// without exposing `$HOME`.
+fn gate_runtime_dirs(runtimes: &[String]) -> Vec<PathBuf> {
+    let path_env = std::env::var_os("PATH");
+    let path_str = path_env.as_ref().and_then(|value| value.to_str());
+    let mut dirs = Vec::new();
+    for runtime in runtimes {
+        for dir in sandbox::runtime_dirs_for_argv(std::slice::from_ref(runtime), path_str) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        if let Some(exe) = infra_host::provider::find_executable(runtime)
+            && let Ok(canon) = std::fs::canonicalize(&exe)
+        {
+            let canon_str = canon.to_string_lossy().into_owned();
+            for dir in sandbox::runtime_dirs_for_argv(&[canon_str], path_str) {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+    dirs
+}
+
 fn spec(
     workspace: &Path,
     readable: Vec<PathBuf>,
     writable: Vec<PathBuf>,
+    runtime: Vec<PathBuf>,
     codex: Option<&Path>,
     network: bool,
 ) -> Spec {
@@ -233,7 +260,7 @@ fn spec(
         protected: vec![],
         readable,
         accounts: writable,
-        runtime: vec![],
+        runtime,
         codex: codex.map(Path::to_path_buf),
         evidence: None,
         network,
@@ -278,7 +305,14 @@ pub fn gate2(
             let scratch = workspace.join(".harness-tmp");
             infra_core::fs::ensure_directory(&scratch, true)?;
             run_sandboxed(
-                &spec(&workspace, readable, vec![], engine.codex.as_deref(), false),
+                &spec(
+                    &workspace,
+                    readable,
+                    vec![],
+                    gate_runtime_dirs(&candidate.capsule.capabilities.runtimes),
+                    engine.codex.as_deref(),
+                    false,
+                ),
                 &[
                     executable,
                     "skillcache".into(),
@@ -375,12 +409,17 @@ pub(super) fn gate3(
             .map(|program| 2 * program.timeout_seconds + 5)
             .sum::<u64>()
             + 30;
-        let before = replay_result::capture(&workspace, None);
+        let before = replay_result::capture_with(
+            &workspace,
+            None,
+            &candidate.capsule.capabilities.allow_ignored,
+        );
         let ran = run_sandboxed(
             &spec(
                 &top,
                 readable,
                 vec![round.state.clone()],
+                gate_runtime_dirs(&candidate.capsule.capabilities.runtimes),
                 engine.codex.as_deref(),
                 candidate.capsule.capabilities.network == Network::Required,
             ),
@@ -456,7 +495,11 @@ pub(super) fn gate3(
             }
             let comparison = if violations.is_empty() {
                 match before.and_then(|before| {
-                    let after = replay_result::capture(&workspace, None)?;
+                    let after = replay_result::capture_with(
+                        &workspace,
+                        None,
+                        &candidate.capsule.capabilities.allow_ignored,
+                    )?;
                     Ok(replay_result::diff(&before, &after))
                 }) {
                     Ok(actual) => compare_results(
@@ -525,7 +568,132 @@ fn non_empty_output(value: &Value) -> bool {
     }
 }
 
+fn json_matches_observed(expected: &Value, actual: &Value) -> bool {
+    match (expected, actual) {
+        (Value::Object(exp), Value::Object(act)) => {
+            !exp.is_empty()
+                && exp.iter().all(|(key, exp_val)| {
+                    act.get(key)
+                        .is_some_and(|act_val| json_matches_observed(exp_val, act_val))
+                })
+        }
+        (Value::Array(exp), Value::Array(act)) => {
+            if exp.is_empty() {
+                act.is_empty()
+            } else {
+                !act.is_empty()
+                    && (replay_result::values_structurally_equal(expected, actual)
+                        || exp
+                            .iter()
+                            .zip(act.iter())
+                            .all(|(e, a)| json_matches_observed(e, a)))
+            }
+        }
+        _ => replay_result::values_structurally_equal(expected, actual),
+    }
+}
+
+fn step_outputs_match_observed_json(
+    outputs: &serde_json::Map<String, Value>,
+    observed_json: &Value,
+) -> bool {
+    if json_matches_observed(observed_json, &Value::Object(outputs.clone())) {
+        return true;
+    }
+    outputs.values().any(|val| {
+        json_matches_observed(observed_json, val)
+            || val
+                .as_str()
+                .and_then(|s| {
+                    infra_core::strict_json::parse(s.trim().as_bytes(), 16 * 1024, 32, 10_000).ok()
+                })
+                .is_some_and(|parsed| json_matches_observed(observed_json, &parsed))
+    })
+}
+
+fn collect_leaf_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Null => {}
+        Value::Bool(b) => out.push(b.to_string()),
+        Value::Number(n) => out.push(n.to_string()),
+        Value::String(s) if !s.trim().is_empty() => out.push(s.clone()),
+        Value::String(_) => {}
+        Value::Array(items) => {
+            for item in items {
+                collect_leaf_strings(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for val in map.values() {
+                collect_leaf_strings(val, out);
+            }
+        }
+    }
+}
+
+fn step_maps_match_observed_text(
+    step_maps: &[&serde_json::Map<String, Value>],
+    observed_text: &str,
+) -> bool {
+    let mut leaves = Vec::new();
+    for map in step_maps {
+        for val in map.values() {
+            if non_empty_output(val) {
+                collect_leaf_strings(val, &mut leaves);
+            }
+        }
+    }
+    if leaves.is_empty() {
+        return false;
+    }
+    let expected_val = Value::String(observed_text.to_owned());
+    if leaves.iter().any(|leaf| {
+        replay_result::values_structurally_equal(&expected_val, &Value::String(leaf.clone()))
+    }) {
+        return true;
+    }
+    let combined = leaves.join("\n").to_ascii_lowercase();
+    let mut salient: Vec<String> = Vec::new();
+    for raw_tok in observed_text.split(|c: char| c.is_whitespace() || ",;()[]{}<>\"'`".contains(c))
+    {
+        let tok = raw_tok.trim_matches(|c: char| !c.is_alphanumeric() && !"/._-".contains(c));
+        let is_number = tok.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && tok.chars().filter(char::is_ascii_digit).count() >= 1
+            && (tok.len() >= 2 || tok.chars().all(|c| c.is_ascii_digit()));
+        let is_path = tok.len() >= 3 && (tok.contains('/') || tok.contains('.'));
+        if (is_number || is_path) && !salient.iter().any(|seen| seen == tok) {
+            salient.push(tok.to_ascii_lowercase());
+            if salient.len() >= 8 {
+                break;
+            }
+        }
+    }
+    if !salient.is_empty() {
+        let hits = salient
+            .iter()
+            .filter(|tok| combined.contains(tok.as_str()))
+            .count();
+        return hits * 2 >= salient.len();
+    }
+    let words: Vec<String> = observed_text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .take(8)
+        .collect();
+    if words.is_empty() {
+        let trimmed = observed_text.trim().to_ascii_lowercase();
+        return !trimmed.is_empty() && combined.contains(&trimmed);
+    }
+    let hits = words
+        .iter()
+        .filter(|w| combined.contains(w.as_str()))
+        .count();
+    hits * 2 >= words.len()
+}
+
 fn verify_zero_file_outputs(
+    expected: &ObservedResult,
     replay: &Value,
     capsule: Option<&SkillCapsule>,
     examples: Option<&Examples>,
@@ -536,12 +704,28 @@ fn verify_zero_file_outputs(
         && !examples.steps.is_empty()
     {
         for (step_idx, expected_map) in &examples.steps {
+            if expected_map.is_empty() {
+                violations.push(json!({
+                    "code": "replay_result_mismatch",
+                    "at": format!("steps[{step_idx}]"),
+                    "message": format!("Observed step `{step_idx}` example outputs are empty."),
+                }));
+                return false;
+            }
             let program_key = capsule
                 .and_then(|cap| cap.plan_step(*step_idx))
                 .and_then(Step::program);
             let actual_step = program_key
                 .and_then(|id| results.get(id))
                 .unwrap_or(&results[step_idx.to_string()]);
+            if !actual_step.is_object() {
+                violations.push(json!({
+                    "code": "replay_result_mismatch",
+                    "at": format!("steps[{step_idx}]"),
+                    "message": format!("Workspace made no file changes, and replay step `{step_idx}` returned no structured outputs."),
+                }));
+                return false;
+            }
             for (key, expected_val) in expected_map {
                 let actual_val = &actual_step[key];
                 if actual_val.is_null()
@@ -560,21 +744,44 @@ fn verify_zero_file_outputs(
         }
         return true;
     }
-    let has_non_empty = results.as_object().is_some_and(|steps| {
-        steps.values().any(|step| {
-            step.as_object()
-                .is_some_and(|outputs| outputs.values().any(non_empty_output))
-        })
-    });
-    if !has_non_empty {
+
+    let step_maps: Vec<&serde_json::Map<String, Value>> = results
+        .as_object()
+        .into_iter()
+        .flat_map(|steps| steps.values())
+        .filter_map(Value::as_object)
+        .collect();
+    if let Some(obs_json) = &expected.observed_json {
+        if step_maps
+            .iter()
+            .any(|outputs| step_outputs_match_observed_json(outputs, obs_json))
+        {
+            return true;
+        }
         violations.push(json!({
             "code": "replay_result_mismatch",
             "at": "",
-            "message": "Neither the observed turn nor the replay changed workspace files or produced verifiable non-empty step outputs.",
+            "message": "Workspace made no file changes, and replay step outputs do not match the observed JSON schema/values.",
         }));
         return false;
     }
-    true
+    if let Some(obs_text) = &expected.observed_text {
+        if step_maps_match_observed_text(&step_maps, obs_text) {
+            return true;
+        }
+        violations.push(json!({
+            "code": "replay_result_mismatch",
+            "at": "",
+            "message": "Workspace made no file changes, and replay step outputs do not match the observed output.",
+        }));
+        return false;
+    }
+    violations.push(json!({
+        "code": "replay_result_mismatch",
+        "at": "",
+        "message": "Workspace made no file changes, and neither examples.steps nor an observed output was captured to verify replay equivalence.",
+    }));
+    false
 }
 
 fn compare_results(
@@ -648,7 +855,7 @@ fn compare_results_inner(
         }));
         "mismatch"
     } else if expected.changes.is_empty() {
-        if verify_zero_file_outputs(replay, capsule, examples, violations) {
+        if verify_zero_file_outputs(expected, replay, capsule, examples, violations) {
             "no_file_changes"
         } else {
             "mismatch"
@@ -740,6 +947,7 @@ mod tests {
             paths: [(h_cfg.clone(), "out/config.json".into())]
                 .into_iter()
                 .collect(),
+            ..ObservedResult::default()
         };
         let actual_same_structure = ObservedResult {
             changes: [(
@@ -757,6 +965,7 @@ mod tests {
             paths: [(h_cfg.clone(), "out/config.json".into())]
                 .into_iter()
                 .collect(),
+            ..ObservedResult::default()
         };
         let mut violations = Vec::new();
         let cmp = compare_results_inner(
@@ -786,6 +995,7 @@ mod tests {
             paths: [(h_cfg.clone(), "out/config.json".into())]
                 .into_iter()
                 .collect(),
+            ..ObservedResult::default()
         };
         let mut violations = Vec::new();
         let cmp = compare_results_inner(
@@ -846,5 +1056,48 @@ mod tests {
         );
         assert_eq!(noop["status"], "mismatch");
         assert_eq!(violations[0]["code"], "replay_result_mismatch");
+
+        // Arbitrary non-empty results are rejected when neither examples.steps nor
+        // observed output exists, or when they disagree with observed output.
+        let mut violations = Vec::new();
+        let bogus_without_expected = compare_results_inner(
+            &empty,
+            &empty,
+            &json!({"results": {"0": {"bogus": "ok"}}}),
+            None,
+            None,
+            &mut violations,
+        );
+        assert_eq!(bogus_without_expected["status"], "mismatch");
+        assert_eq!(violations[0]["code"], "replay_result_mismatch");
+
+        let obs_json_expected = ObservedResult {
+            observed_json: Some(json!({"count": 3, "file": "out/summary.csv"})),
+            ..ObservedResult::default()
+        };
+        let mut violations = Vec::new();
+        assert_eq!(
+            compare_results_inner(
+                &obs_json_expected,
+                &empty,
+                &json!({"results": {"0": {"count": 99, "file": "out/summary.csv"}}}),
+                None,
+                None,
+                &mut violations,
+            )["status"],
+            "mismatch"
+        );
+        let mut violations = Vec::new();
+        assert_eq!(
+            compare_results_inner(
+                &obs_json_expected,
+                &empty,
+                &json!({"results": {"0": {"count": 3, "file": "out/summary.csv"}}}),
+                None,
+                None,
+                &mut violations,
+            )["status"],
+            "no_file_changes"
+        );
     }
 }

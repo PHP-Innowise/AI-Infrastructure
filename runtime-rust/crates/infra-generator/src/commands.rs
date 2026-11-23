@@ -1145,3 +1145,91 @@ pub fn console_read_only(action: &str, args: &[String]) -> bool {
         || action.starts_with("lint:")
         || action.ends_with(":status")
 }
+
+/// Runs deterministic `CommandAnalyzer` inspection over target `composer.json` / `package.json`
+/// scripts and identifies safe read-only `Profile::Gate` version/stack probe argvs.
+pub fn pre_scan_command_facts(target: &Path) -> Result<serde_json::Value> {
+    let target = crate::ownership::resolve_target(target)?;
+    let analyzer = CommandAnalyzer::new(&target)?;
+    let analysis = analyzer.analyze_target(&[], false, false)?;
+    let mut scripts = Vec::new();
+    let mut safe_count = 0usize;
+    let mut unsafe_count = 0usize;
+    for (id, entry) in &analysis.scripts {
+        if entry.verification_safe {
+            safe_count += 1;
+        } else {
+            unsafe_count += 1;
+        }
+        scripts.push(object!({
+            "id": id,
+            "command": &entry.command,
+            "verification_safe": entry.verification_safe,
+            "categories": &entry.categories,
+        }));
+    }
+    let has_composer = target.join("composer.json").is_file();
+    let has_package = target.join("package.json").is_file();
+    let has_cargo = target.join("Cargo.toml").is_file();
+    let has_php = has_composer
+        || ["", "src", "app"].iter().any(|dir| {
+            std::fs::read_dir(target.join(dir))
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .take(200)
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "php"))
+        });
+    let mut gate_probes = Vec::new();
+    if has_php {
+        gate_probes.push(object!({"id": "php-version", "argv": ["php", "-v"]}));
+    }
+    if has_composer {
+        gate_probes.push(object!({"id": "composer-version", "argv": ["composer", "--version", "--no-interaction"]}));
+    }
+    if has_package {
+        gate_probes.push(object!({"id": "node-version", "argv": ["node", "-v"]}));
+    }
+    if has_cargo {
+        gate_probes.push(object!({"id": "cargo-version", "argv": ["cargo", "--version"]}));
+    }
+    Ok(object!({
+        "target": analysis.target,
+        "safe_script_count": safe_count,
+        "unsafe_script_count": unsafe_count,
+        "scripts": scripts,
+        "gate_probes": gate_probes,
+    }))
+}
+
+#[cfg(test)]
+mod pre_scan_tests {
+    use super::*;
+
+    #[test]
+    fn pre_scan_command_facts_classifies_safe_and_mutating_scripts() {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-pre-scan-cmd-{}",
+            infra_core::domain::uuid4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("composer.json"),
+            r#"{"name":"acme/app","scripts":{"test":"vendor/bin/phpunit","deploy":"php artisan migrate --force"}}"#,
+        )
+        .unwrap();
+        let facts = pre_scan_command_facts(&dir).unwrap();
+        assert_eq!(facts["safe_script_count"], 1);
+        assert_eq!(facts["unsafe_script_count"], 1);
+        let probes: Vec<&str> = facts["gate_probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        assert!(probes.contains(&"php-version"));
+        assert!(probes.contains(&"composer-version"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
