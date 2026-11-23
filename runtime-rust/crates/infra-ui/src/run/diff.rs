@@ -469,27 +469,75 @@ pub(crate) fn set_diff_file_open(scope_id: &str, path: &str, open: bool) {
     });
 }
 
+pub(crate) fn clear_pending_diff_work(scope_filter: Option<&str>) {
+    let batch_keys: Vec<String> = PENDING_DIFF_BATCHES.with(|batches| {
+        let mut batches = batches.borrow_mut();
+        let keys: Vec<String> = batches
+            .keys()
+            .filter(|scope| scope_filter.is_none_or(|target| *scope == target))
+            .cloned()
+            .collect();
+        for scope in &keys {
+            batches.remove(scope);
+        }
+        keys
+    });
+    for scope in &batch_keys {
+        dom::cancel_frame(&format!("diff-files:{scope}"));
+        let _ = next_diff_generation(&format!("files:{scope}"));
+    }
+
+    let expand_keys: Vec<String> = PENDING_DIFF_EXPANDS.with(|expands| {
+        let mut expands = expands.borrow_mut();
+        let keys: Vec<String> = expands
+            .iter()
+            .filter(|(_, pending)| scope_filter.is_none_or(|target| pending.scope_id == target))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &keys {
+            expands.remove(key);
+        }
+        keys
+    });
+    for key in &expand_keys {
+        dom::cancel_frame(&format!("diff-expand:{key}"));
+        let _ = next_diff_generation(&format!("expand:{key}"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn seed_pending_expand_for_test(scope_id: &str, path: &str) -> (String, u64) {
+    let key = diff_collapse_key(scope_id, path);
+    let generation = next_diff_generation(&format!("expand:{key}"));
+    PENDING_DIFF_EXPANDS.with(|expands| {
+        expands.borrow_mut().insert(
+            key.clone(),
+            PendingExpandLines {
+                scope_id: scope_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+                lines: Vec::new(),
+                offset: 0,
+            },
+        );
+    });
+    (key, generation)
+}
+
+#[cfg(test)]
+pub(crate) fn pending_expand_still_valid_for_test(key: &str, generation: u64) -> bool {
+    PENDING_DIFF_EXPANDS.with(|expands| {
+        expands
+            .borrow()
+            .get(key)
+            .is_some_and(|pending| pending.generation == generation)
+    }) && diff_generation_matches(&format!("expand:{key}"), generation)
+}
+
 pub(crate) fn reset_diff_view_state() {
     EXPANDED_DIFF_FILES.with(|set| set.borrow_mut().clear());
     DIFF_FULL_FILES.with(|map| map.borrow_mut().clear());
-    let batch_keys: Vec<String> = PENDING_DIFF_BATCHES.with(|batches| {
-        let mut batches = batches.borrow_mut();
-        let keys = batches.keys().cloned().collect();
-        batches.clear();
-        keys
-    });
-    for scope in batch_keys {
-        dom::cancel_frame(&format!("diff-files:{scope}"));
-    }
-    let expand_keys: Vec<String> = PENDING_DIFF_EXPANDS.with(|expands| {
-        let mut expands = expands.borrow_mut();
-        let keys = expands.keys().cloned().collect();
-        expands.clear();
-        keys
-    });
-    for key in expand_keys {
-        dom::cancel_frame(&format!("diff-expand:{key}"));
-    }
+    clear_pending_diff_work(None);
     DIFF_RENDER_GENERATIONS.with(|gens| gens.borrow_mut().clear());
     m::write(|s| {
         s.diff_view.collapsed_files.clear();
@@ -1023,6 +1071,14 @@ pub(crate) fn render_empty_diff_into(container_id: &str, message: &str) {
     let Some(el) = dom::get(container_id) else {
         return;
     };
+    if let Ok(Some(viewer)) = el.query_selector(".diff-viewer[data-diff-scope]") {
+        if let Some(scope) = viewer
+            .get_attribute("data-diff-scope")
+            .filter(|s| !s.is_empty())
+        {
+            clear_pending_diff_work(Some(&scope));
+        }
+    }
     if el.get_attribute("data-diff-empty").as_deref() == Some("true")
         && el.text_content().as_deref() == Some(message)
     {
@@ -1143,10 +1199,7 @@ pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id:
         return;
     };
     if diff.trim().is_empty() {
-        dom::cancel_frame(&format!("diff-files:{scope_id}"));
-        PENDING_DIFF_BATCHES.with(|batches| {
-            batches.borrow_mut().remove(scope_id);
-        });
+        clear_pending_diff_work(Some(scope_id));
         el.set_text_content(None);
         let _ = el.remove_attribute("data-diff-hash");
         let _ = el.remove_attribute("data-diff-empty");
@@ -1159,10 +1212,7 @@ pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id:
     if has_viewer && el.get_attribute("data-diff-hash").as_deref() == Some(hash.as_str()) {
         return;
     }
-    dom::cancel_frame(&format!("diff-files:{scope_id}"));
-    PENDING_DIFF_BATCHES.with(|batches| {
-        batches.borrow_mut().remove(scope_id);
-    });
+    clear_pending_diff_work(Some(scope_id));
     let sections = parse_diff_files(diff);
     if sections.len() <= DIFF_FILE_BATCH_SIZE {
         let _ = next_diff_generation(&format!("files:{scope_id}"));

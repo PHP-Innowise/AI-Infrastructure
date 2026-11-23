@@ -758,9 +758,17 @@ pub(crate) fn compute_client_hidden_prefix(
     limit_start
 }
 
+fn is_pending_permission_block(el: &web_sys::Element) -> bool {
+    el.class_list().contains("conversation-permission")
+        && el.get_attribute("data-state").as_deref() == Some("pending")
+}
+
 fn earliest_rendered_dom_event_id() -> Option<u64> {
     let container = dom::get("events")?;
     for el in dom::children(&container) {
+        if is_pending_permission_block(&el) {
+            continue;
+        }
         if let Some(id) = el
             .get_attribute("data-first-event-id")
             .or_else(|| el.get_attribute("data-event-id"))
@@ -1001,6 +1009,24 @@ pub(crate) fn plan_top_dom_eviction(can_evict: &[bool], cap: usize) -> Vec<usize
         .collect()
 }
 
+pub(crate) fn clamped_visible_limit_after_eviction(
+    events: &[V],
+    current_limit: usize,
+    evicted_ranges: &[(u64, u64)],
+) -> usize {
+    let Some(max_evicted_id) = evicted_ranges.iter().map(|(_, hi)| *hi).max() else {
+        return current_limit;
+    };
+    let Some(evicted_idx) = events
+        .iter()
+        .rposition(|ev| stream_event_id(ev).is_some_and(|id| id <= max_evicted_id))
+    else {
+        return current_limit;
+    };
+    let remaining = events.len().saturating_sub(evicted_idx + 1).max(1);
+    current_limit.min(remaining)
+}
+
 fn evict_excess_top_dom_nodes(
     container: &web_sys::Element,
     cap: usize,
@@ -1084,6 +1110,15 @@ fn evict_excess_top_dom_nodes(
             ids.iter().copied().max()
         });
         LAST_MAX_RENDERED_ID.with(|cell| cell.set(new_max));
+        // Keep `s.stream.visible_limit` at or below the non-evicted suffix so the next
+        // `replay_visible_stream()` never re-inserts and immediately re-evicts pruned prefix events.
+        m::write(|s| {
+            s.stream.visible_limit = clamped_visible_limit_after_eviction(
+                &s.events,
+                s.stream.visible_limit,
+                &evicted_ranges,
+            );
+        });
     }
     if let (Some((prev_h, prev_top)), Some(c)) = (prev_metrics, conv) {
         let new_h = c.scroll_height();
@@ -2381,13 +2416,47 @@ mod tests {
         let edited = fold_run_events_with_cache(&mut cache, &events);
         assert_eq!(edited, fold_run_events(&events));
 
-        // Top DOM eviction preserves non-evictable pending permission cards and updates client_hidden.
+        // Top DOM eviction preserves non-evictable pending permission cards and updates client_hidden
+        // plus clamps visible_limit so subsequent replays never thrash on evicted prefix events.
         let evict_indices = plan_top_dom_eviction(&[false, true, true, true, true], 3);
         assert_eq!(evict_indices, vec![1, 2]);
         assert_eq!(
             compute_client_hidden_prefix(&events, 120, Some(50)),
             49,
             "client_hidden follows earliest rendered event id after top DOM eviction"
+        );
+        let clamped = clamped_visible_limit_after_eviction(&events, 141, &[(1, 100)]);
+        assert_eq!(clamped, 41);
+        let post_evict_start = events.len().saturating_sub(clamped);
+        assert_eq!(post_evict_start, 100);
+        let suffix_blocks: Vec<RenderedBlockMeta> = events[post_evict_start..]
+            .iter()
+            .map(|ev| {
+                let id = stream_event_id(ev).unwrap();
+                RenderedBlockMeta {
+                    first_id: id,
+                    last_id: id,
+                    call_id: conversation_event_call_id(ev, None),
+                }
+            })
+            .collect();
+        let suffix_ids: BTreeSet<u64> = events[post_evict_start..]
+            .iter()
+            .filter_map(stream_event_id)
+            .collect();
+        assert_eq!(
+            plan_stream_replay_with_calls(
+                &suffix_blocks,
+                &suffix_ids,
+                Some(141),
+                &events[post_evict_start..],
+                &[],
+            ),
+            ReplayPlan::Incremental {
+                ops: Vec::new(),
+                bottom_appended: 0,
+                inserted_above: false,
+            }
         );
 
         // Evicted tool output keys are returned cleanly and expose an explicit notice.

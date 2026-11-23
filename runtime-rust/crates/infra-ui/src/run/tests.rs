@@ -2006,5 +2006,31 @@ new file mode 100644
         assert_eq!(prioritized.len(), 12);
         assert_eq!(prioritized[0].0, "s-14");
         assert_eq!(prioritized[1].0, "s-12");
+
+        // Clearing pending diff work for one scope cancels in-flight expand chunks and advances
+        // generations for that scope only without disturbing unrelated diff scopes.
+        let (k_results, gen_results) =
+            super::super::diff::seed_pending_expand_for_test("results-diff", "src/big.rs");
+        let (k_side, gen_side) =
+            super::super::diff::seed_pending_expand_for_test("workspace-results", "src/big.rs");
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_results,
+            gen_results
+        ));
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
+        super::super::diff::clear_pending_diff_work(Some("results-diff"));
+        assert!(!super::super::diff::pending_expand_still_valid_for_test(
+            &k_results,
+            gen_results
+        ));
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
+        super::super::diff::clear_pending_diff_work(None);
+        assert!(!super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
     }
 }
