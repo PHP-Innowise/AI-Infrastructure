@@ -274,7 +274,7 @@ pub(in crate::graph_map) async fn load_embedded_surface(surface: MapSurface, qui
     let scope_key = scope.scope_key();
     let target = effective_target(&state);
     let prev_scope = m::text(&m::data(surface.view_key), "scope");
-    let path = build_scoped_map_path(&scope, &state, true);
+    let path = super::state_urls::build_surface_map_path(surface, &scope, &state);
     if !quiet {
         dom::attr(surface.canvas, "aria-busy", "true");
     }
@@ -1054,6 +1054,7 @@ pub(in crate::graph_map) fn move_roving_node_focus(
             let cam = load_surface_camera(surface);
             let (vw, vh, measured) = viewport_size(surface.canvas);
             let viewport = if measured { (vw, vh) } else { (800.0, 500.0) };
+            let view_doc = m::data(surface.view_key);
             let next_cam = graph_viewport::dense_dom::apply_roving_node_focus(
                 &canvas,
                 &plane,
@@ -1067,13 +1068,7 @@ pub(in crate::graph_map) fn move_roving_node_focus(
                     el.get_attribute("data-n")
                         .and_then(|s| s.parse::<usize>().ok())
                 },
-                |idx| {
-                    cached
-                        .dense_node_htmls
-                        .get(idx)
-                        .filter(|s| !s.is_empty())
-                        .cloned()
-                },
+                |idx| cached.materialize_node_html(Some(&view_doc), idx),
                 |idx, el| {
                     if let Some(np) = cached.latest_patch.as_ref().and_then(|p| p.nodes.get(idx)) {
                         apply_node_patch_to_el(

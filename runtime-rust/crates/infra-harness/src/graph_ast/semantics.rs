@@ -299,16 +299,18 @@ pub(super) fn emit_semantic_from_call(
                     || callee_lower == "route"
                     || callee_lower.starts_with("handle")
                     || callee_lower.starts_with("map"))
-                && let Some(target) = normalize_route_contract(Some(verb), clean_path, false)
             {
-                ctx.push_semantic(
-                    "exposes_route",
-                    target,
-                    source_symbol.clone(),
-                    line,
-                    evidence,
-                );
-                route_emitted = true;
+                let composed_path = ctx.compose_call_route_path(clean_path);
+                if let Some(target) = normalize_route_contract(Some(verb), &composed_path, false) {
+                    ctx.push_semantic(
+                        "exposes_route",
+                        target,
+                        source_symbol.clone(),
+                        line,
+                        evidence,
+                    );
+                    route_emitted = true;
+                }
             }
         }
     }
@@ -330,11 +332,20 @@ pub(super) fn emit_semantic_from_call(
         );
     }
 
-    // 2. DI bindings (`bind`, `singleton`, `scoped`, `AddSingleton`, `AddScoped`, `AddTransient`, `provide`)
-    if matches!(
+    // 2. DI bindings & container resolutions (`bind`, `singleton`, `scoped`, `app()->make(...)`, `Container::get(...)`, `resolve(...)`)
+    let is_di_binding = matches!(
         callee_lower.as_str(),
         "bind" | "singleton" | "scoped" | "addsingleton" | "addscoped" | "addtransient" | "provide"
-    ) {
+    );
+    let is_container_resolve = !args_inner.is_empty()
+        && ((matches!(
+            callee_lower.as_str(),
+            "make" | "makewith" | "get" | "resolve"
+        ) && is_di_container_receiver(&recv_lower))
+            || (recv_lower.is_empty()
+                && ((callee_lower == "app")
+                    || (callee_lower == "resolve" && ctx.grammar == AstGrammar::Php))));
+    if is_di_binding || is_container_resolve {
         let targets = extract_di_targets(args_inner, args_text, string_args, full_chain_text);
         for svc in targets {
             ctx.push_semantic(
@@ -344,6 +355,20 @@ pub(super) fn emit_semantic_from_call(
                 line,
                 evidence,
             );
+            if is_container_resolve && svc.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                ctx.push_ref(AstRef {
+                    target_name: svc,
+                    member: None,
+                    context: "di_resolve".to_owned(),
+                    access: "type".to_owned(),
+                    member_kind: None,
+                    owner_type: None,
+                    enclosing_symbol: source_symbol.clone(),
+                    is_static: false,
+                    line,
+                    evidence: clip_str(evidence, 160),
+                });
+            }
         }
     }
 
@@ -492,7 +517,8 @@ pub(super) fn emit_semantic_from_attribute(
     };
     if let Some(verb) = route_verb {
         if let Some(path) = string_args.first() {
-            if let Some(target) = normalize_route_contract(Some(verb), path, false) {
+            let composed = ctx.compose_attr_route_path(path);
+            if let Some(target) = normalize_route_contract(Some(verb), &composed, false) {
                 ctx.push_semantic(
                     "exposes_route",
                     target,
@@ -501,16 +527,17 @@ pub(super) fn emit_semantic_from_attribute(
                     attr_text,
                 );
             }
-        } else if verb != "ANY"
-            && let Some(target) = normalize_route_contract(Some(verb), "/", false)
-        {
-            ctx.push_semantic(
-                "exposes_route",
-                target,
-                annotated_symbol.map(str::to_owned),
-                line,
-                attr_text,
-            );
+        } else if verb != "ANY" {
+            let composed = ctx.compose_attr_route_path("/");
+            if let Some(target) = normalize_route_contract(Some(verb), &composed, false) {
+                ctx.push_semantic(
+                    "exposes_route",
+                    target,
+                    annotated_symbol.map(str::to_owned),
+                    line,
+                    attr_text,
+                );
+            }
         }
     }
 
@@ -691,6 +718,30 @@ fn extract_new_type_in_closure(raw: &str) -> Option<String> {
         .next()
         .unwrap_or("");
     clean_di_type_token(tok)
+}
+
+fn is_di_container_receiver(recv_lower: &str) -> bool {
+    let r = recv_lower.trim();
+    matches!(
+        r,
+        "app"
+            | "app()"
+            | "$app"
+            | "$this->app"
+            | "$this->container"
+            | "container"
+            | "$container"
+            | "injector"
+            | "$injector"
+            | "moduleref"
+            | "servicelocator"
+            | "di"
+    ) || r.ends_with("\\app")
+        || r.ends_with("\\container")
+        || r.ends_with("->app")
+        || r.ends_with("->container")
+        || r.ends_with(".container")
+        || r.ends_with(".injector")
 }
 
 pub(super) fn extract_di_targets(

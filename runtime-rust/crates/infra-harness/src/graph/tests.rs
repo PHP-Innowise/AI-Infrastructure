@@ -4236,3 +4236,89 @@ fn a_folder_that_cannot_go_yet_is_tried_again_only_while_it_may_settle() {
     })
     .unwrap();
 }
+
+#[test]
+fn git_print_cache_respects_racy_window_and_invalidates_on_head_index_or_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run_git = |args: &[&str]| {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let out = projects::git(root, &owned, 20).expect("git invocation");
+        assert_eq!(out.code, 0, "git {args:?} failed: {:?}", out);
+    };
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    let tracked = root.join("app.txt");
+    std::fs::write(&tracked, "v1\n").unwrap();
+    run_git(&["add", "app.txt"]);
+    run_git(&["commit", "-m", "init"]);
+
+    let max_mtime_ns = || -> i128 {
+        let mut latest = 0_i128;
+        for p in [
+            root.to_path_buf(),
+            root.join("app.txt"),
+            root.join(".git/HEAD"),
+            root.join(".git/index"),
+            root.join(".git/refs/heads/main"),
+        ] {
+            if let Ok(m) = std::fs::metadata(&p)
+                && let Ok(t) = m.modified()
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                latest = latest.max(d.as_nanos() as i128);
+            }
+        }
+        latest
+    };
+
+    // Inside racy window (< PRINT_RACY_NS): must still spawn git rather than trusting cache.
+    let base_t = max_mtime_ns();
+    let first = helpers::print_with_now(root, base_t + 1_000).expect("initial print");
+    let spawns_before = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    let second_racy = helpers::print_with_now(root, base_t + 2_000).expect("racy print");
+    let spawns_after_racy = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    assert_eq!(first, second_racy);
+    assert!(
+        spawns_after_racy > spawns_before,
+        "prints within racy window must not serve from cache without verification"
+    );
+
+    // Populate settled snapshot well after racy window -> next read must hit cache with 0 git spawns.
+    let settled_t = max_mtime_ns() + helpers::PRINT_RACY_NS + 5_000_000_000;
+    let warmed = helpers::print_with_now(root, settled_t).expect("warm settled cache");
+    let spawns_warmed = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    let cached = helpers::print_with_now(root, settled_t + 1_000_000).expect("cached hit");
+    let spawns_cached = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    assert_eq!(warmed, cached);
+    assert_eq!(
+        spawns_cached, spawns_warmed,
+        "settled cache hit must spawn zero git processes"
+    );
+
+    // Worktree modification invalidates cache even without git add/commit.
+    std::fs::write(&tracked, "v2-worktree\n").unwrap();
+    let dirty_t = max_mtime_ns() + helpers::PRINT_RACY_NS + 10_000_000_000;
+    let dirty = helpers::print_with_now(root, dirty_t).expect("dirty print");
+    assert_ne!(dirty.hash, cached.hash);
+
+    // Index change (.git/index) invalidates cache.
+    run_git(&["add", "app.txt"]);
+    let staged_t = max_mtime_ns() + helpers::PRINT_RACY_NS + 15_000_000_000;
+    let staged = helpers::print_with_now(root, staged_t).expect("staged print");
+    let spawns_staged_warm = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    let staged_hit = helpers::print_with_now(root, staged_t + 1_000_000).expect("staged cache hit");
+    assert_eq!(staged, staged_hit);
+    assert_eq!(
+        helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get()),
+        spawns_staged_warm
+    );
+
+    // HEAD / branch ref change (git commit) invalidates cache.
+    run_git(&["commit", "-m", "second"]);
+    let committed_t = max_mtime_ns() + helpers::PRINT_RACY_NS + 20_000_000_000;
+    let committed = helpers::print_with_now(root, committed_t).expect("committed print");
+    assert_ne!(committed.commit, cached.commit);
+    assert_ne!(committed.hash, cached.hash);
+}

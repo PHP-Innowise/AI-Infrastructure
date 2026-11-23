@@ -1747,9 +1747,8 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                                     let entry = g.get(surface.canvas_id)?;
                                     entry
                                         .is_dense
-                                        .then(|| entry.node_htmls.get(idx).cloned())
+                                        .then(|| entry.materialize_node_html(idx))
                                         .flatten()
-                                        .filter(|s| !s.is_empty())
                                 })
                             },
                             |idx, el| {

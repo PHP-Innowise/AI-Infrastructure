@@ -8237,3 +8237,159 @@ fn architecture_rules_support_forbids_package_boundaries_cycle_budgets_and_seman
         file_view["pattern"]
     );
 }
+
+#[test]
+fn semantic_virtual_hubs_partition_by_namespace_not_anchor_file_at_all_lods() {
+    use crate::graph_ir::{IrLinkSpec, IrNodeSpec};
+    let dir = tempfile::tempdir().unwrap();
+    let mk_file = |path: &str| IrNodeSpec {
+        id: format!("file:{path}"),
+        label: path.rsplit('/').next().unwrap_or(path).to_owned(),
+        source_file: path.to_owned(),
+        source_location: None,
+        end_line: 0,
+        file_type: Some("code".into()),
+        node_kind: Some("page".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_fn = |id: &str, path: &str, name: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: format!("{name}()"),
+        source_file: path.to_owned(),
+        source_location: Some("L1".into()),
+        end_line: 1,
+        file_type: None,
+        node_kind: Some("function".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_sem = |id: &str, label: &str, ns_bucket: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        source_file: ns_bucket.to_owned(),
+        source_location: Some("L2".into()),
+        end_line: 0,
+        file_type: None,
+        node_kind: Some("semantic".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let nodes = vec![
+        mk_file("app/Controllers/OrderController.php"),
+        mk_fn("fn:ctrl", "app/Controllers/OrderController.php", "store"),
+        mk_file("app/Services/LedgerService.php"),
+        mk_fn("fn:svc", "app/Services/LedgerService.php", "post"),
+        mk_sem(
+            "sem:table:orders",
+            "table:orders",
+            crate::graph_ir::semantic_namespace_bucket("sem:table:orders"),
+        ),
+        mk_sem(
+            "sem:route:GET /orders",
+            "route:GET /orders",
+            crate::graph_ir::semantic_namespace_bucket("sem:route:GET /orders"),
+        ),
+    ];
+    let links = vec![
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:table:orders".into(),
+            relation: Some("writes_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Controllers/OrderController.php".into()),
+            context: Some("writes_table".into()),
+            evidence: None,
+        },
+        IrLinkSpec {
+            source: "fn:svc".into(),
+            target: "sem:table:orders".into(),
+            relation: Some("reads_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Services/LedgerService.php".into()),
+            context: Some("reads_table".into()),
+            evidence: None,
+        },
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:route:GET /orders".into(),
+            relation: Some("exposes_route".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Controllers/OrderController.php".into()),
+            context: Some("exposes_route".into()),
+            evidence: None,
+        },
+    ];
+    let idx = Index::from_ir_parts(dir.path(), None, None, nodes, links).unwrap();
+    let filter = LodFilter {
+        scope: "",
+        focus: None,
+        filter: "",
+        certain: false,
+        offset: 0,
+        limit: None,
+    };
+
+    for lod in [Lod::File, Lod::Folder, Lod::Crate] {
+        let view = idx.view_at_lod_unfiltered("demo", lod, &filter);
+        let sem_buckets: Vec<&Value> = view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| {
+                n["path"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("__semantic__/")
+            })
+            .collect();
+        assert!(
+            sem_buckets
+                .iter()
+                .any(|n| n["path"] == "__semantic__/tables"),
+            "expected __semantic__/tables bucket at {lod:?}: {:?}",
+            view["nodes"]
+        );
+        assert!(
+            sem_buckets
+                .iter()
+                .any(|n| n["path"] == "__semantic__/routes"),
+            "expected __semantic__/routes bucket at {lod:?}: {:?}",
+            view["nodes"]
+        );
+        for b in sem_buckets {
+            assert_eq!(b["node_kind"], "semantic");
+            assert_eq!(b["semantic"], true);
+        }
+    }
+
+    // Legacy file view where a sem:* node has anchor_file set must STILL fold under __semantic__/*,
+    // never into app/Services or root `.`.
+    let mut legacy_view = json!({
+        "nodes": [
+            {"path": "app/Services/LedgerService.php", "name": "LedgerService.php", "out": 1, "in": 0},
+            {"path": "sem:table:orders", "name": "table:orders", "anchor_file": "app/Services/LedgerService.php", "node_kind": "semantic", "semantic": true, "out": 0, "in": 1}
+        ],
+        "edges": [
+            {"from": "app/Services/LedgerService.php", "to": "sem:table:orders", "links": 1}
+        ]
+    });
+    assert!(lod::rollup_view_to_lod(&idx, &mut legacy_view, Lod::Crate));
+    let sem_node = legacy_view["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"] == "__semantic__/tables")
+        .expect("legacy anchored sem node rolls up to __semantic__/tables");
+    assert_eq!(sem_node["node_kind"], "semantic");
+    assert_eq!(sem_node["semantic"], true);
+}

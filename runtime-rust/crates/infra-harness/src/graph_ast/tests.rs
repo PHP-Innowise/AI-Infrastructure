@@ -891,3 +891,180 @@ fn parses_blade_templates_directives_components_livewire_and_routes() {
         ir.calls_and_refs
     );
 }
+
+#[test]
+fn route_prefix_composition_symfony_laravel_and_express() {
+    // Symfony class-level #[Route('/api/v2')] composes with method #[Route('/orders/{id}')],
+    // without polluting inner Route::get static calls or outgoing calls_route edges.
+    let symfony_src = r#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Attribute\Route;
+
+#[Route('/api/v2')]
+class OrderController {
+    #[Route('/orders/{id}', methods: ['GET'])]
+    public function show(): void {}
+
+    #[Route('health')]
+    public function health(): void {}
+}
+"#;
+    let sym_ir = parse_file_ir("src/Controller/OrderController.php", symfony_src)
+        .expect("parse symfony controller");
+    let sym_routes: Vec<&str> = sym_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        sym_routes
+            .iter()
+            .any(|t| t.ends_with(" /api/v2/orders/{param}")),
+        "expected composed Symfony class+method route: {sym_routes:?}"
+    );
+    assert!(
+        sym_routes.iter().any(|t| t.ends_with(" /api/v2/health")),
+        "expected relative method route composed with class prefix: {sym_routes:?}"
+    );
+
+    // Laravel nested Route::prefix(...)->group(...) + Route::group(['prefix' => ...]).
+    let laravel_src = r#"<?php
+Route::prefix('/api')->group(function () {
+    Route::prefix('v1')->group(function () {
+        Route::get('/invoices', [InvoiceController::class, 'index']);
+    });
+    Route::group(['prefix' => 'admin'], function () {
+        Route::post('/audit', [AuditController::class, 'store']);
+    });
+});
+"#;
+    let lar_ir = parse_file_ir("routes/api.php", laravel_src).expect("parse laravel routes");
+    let lar_routes: Vec<&str> = lar_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        lar_routes.contains(&"route:GET /api/v1/invoices"),
+        "expected nested Route::prefix composition: {lar_routes:?}"
+    );
+    assert!(
+        lar_routes.contains(&"route:POST /api/admin/audit"),
+        "expected Route::group prefix composition: {lar_routes:?}"
+    );
+
+    // Express router.use('/prefix', ...) inline + mounted router + chained .route(...).get(...).
+    let express_src = r#"
+import express from 'express';
+const app = express();
+const users = express.Router();
+users.get('/:id', showUser);
+users.route('/profile').get(getProfile).post(updateProfile);
+app.use('/api/users', users);
+app.use('/api/v1', (req, res, next) => {
+  const sub = express.Router();
+  sub.get('/ping', pingHandler);
+});
+"#;
+    let exp_ir = parse_file_ir("src/server.ts", express_src).expect("parse express routes");
+    let exp_routes: Vec<&str> = exp_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        exp_routes.contains(&"route:GET /api/users/{param}"),
+        "expected mounted router GET route: {exp_routes:?}"
+    );
+    assert!(
+        exp_routes.contains(&"route:GET /api/users/profile")
+            && exp_routes.contains(&"route:POST /api/users/profile"),
+        "expected chained .route().get().post() composition: {exp_routes:?}"
+    );
+    assert!(
+        exp_routes.contains(&"route:GET /api/v1/ping"),
+        "expected inline app.use('/api/v1', ...) callback composition: {exp_routes:?}"
+    );
+}
+
+#[test]
+fn extracts_blade_inline_php_expressions_and_di_container_resolutions() {
+    let blade = r#"
+<div>{{ blade_inline_helper($order->total) }}</div>
+<div>{!! app()->make(\App\Services\HtmlSanitizer::class)->clean($body) !!}</div>
+<script>const raw = @{{ IgnoredClientExpr::run() }};</script>
+{{-- {{ IgnoredComment::skip() }} --}}
+"#;
+    let blade_ir = parse_file_ir("resources/views/orders/receipt.blade.php", blade)
+        .expect("parse blade inline expressions");
+    assert!(
+        blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name == "blade_inline_helper"),
+        "expected inline {{ ... }} PHP call ref: {:?}",
+        blade_ir.calls_and_refs
+    );
+    assert!(
+        blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("HtmlSanitizer")),
+        "expected inline {{!! app()->make(...) !!}} DI resolution: {:?}",
+        blade_ir.calls_and_refs
+    );
+    assert!(
+        !blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("IgnoredClientExpr")
+                || r.target_name.contains("IgnoredComment")),
+        "escaped @{{ }} and Blade comment {{----}} must stay ignored: {:?}",
+        blade_ir.calls_and_refs
+    );
+
+    let php_di = r#"<?php
+namespace App\Services;
+
+use App\Contracts\PaymentGateway;
+use App\Support\Ledger;
+use App\Support\Mailer;
+use App\Support\Metrics;
+use Psr\Container\ContainerInterface;
+
+class CheckoutHandler {
+    public function handle(ContainerInterface $container): void {
+        $gw = app()->make(PaymentGateway::class);
+        $ledger = Container::get(Ledger::class);
+        $mailer = resolve(Mailer::class);
+        $metrics = app(Metrics::class);
+    }
+}
+"#;
+    let di_ir = parse_file_ir("app/Services/CheckoutHandler.php", php_di).expect("parse php DI");
+    let refs: Vec<&str> = di_ir
+        .calls_and_refs
+        .iter()
+        .map(|r| r.target_name.as_str())
+        .collect();
+    for expected in ["PaymentGateway", "Ledger", "Mailer", "Metrics"] {
+        assert!(
+            refs.iter().any(|r| r.contains(expected)),
+            "expected DI reference to {expected} in {refs:?}"
+        );
+    }
+    let di_binds: Vec<(Option<&str>, &str)> = di_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "di_binds")
+        .map(|e| (e.source_symbol.as_deref(), e.target.as_str()))
+        .collect();
+    assert!(
+        di_binds.iter().any(|(_, t)| t.contains("PaymentGateway")),
+        "expected di_binds semantic edge for app()->make: {di_binds:?}"
+    );
+}
