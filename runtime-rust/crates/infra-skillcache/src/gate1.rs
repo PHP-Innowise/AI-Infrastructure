@@ -666,6 +666,7 @@ const GENERIC_SHORT_LITERALS: &[&str] = &[
     "utf-8", "ascii", "true", "false", "null", "none", "ok", "done", "pass", "fail", "read",
     "write", "check", "list", "all", "main", "test", "file", "files", "path", "name", "data",
     "item", "items", "count", "total", "input", "output", "error", "status", "complete", "result",
+    "src", "app", "php", "sql", "api", "dir", "run", "log", "bin", "web",
 ];
 
 fn is_generic_short_literal(text: &str) -> bool {

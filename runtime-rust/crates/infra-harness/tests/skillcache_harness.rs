@@ -3579,3 +3579,556 @@ async fn p1_codex_compiler_codex_manual_and_deferred_toolchain() {
     );
     stand.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p2_gc_unpins_snapshots_cross_worktree_sharing_and_normalized_template_matching() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let project = stand.project();
+
+    // Mark project 1 as Laravel via `.infra-manifest.json` and add an `other` skill for active pinning check.
+    fs::write(
+        project.join(".infra-manifest.json"),
+        r#"{"edition":"Laravel"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(project.join(".claude/skills/other")).unwrap();
+    fs::write(
+        project.join(".claude/skills/other/SKILL.md"),
+        "---\nname: other\ndescription: Another check\n---\n# Other\n\nCheck summary.\n",
+    )
+    .unwrap();
+    git(
+        &project,
+        &["add", ".infra-manifest.json", ".claude/skills/other"],
+    );
+    git(&project, &["commit", "-q", "-m", "manifest-and-other"]);
+
+    let ro_pdf_turn = |ws: &Path| {
+        vec![
+            json!({"type": "system", "subtype": "init", "session_id": "ro-pdf-1"}),
+            json!({"type": "assistant", "session_id": "ro-pdf-1", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": ws.join(".claude/skills/pdf/SKILL.md")}},
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": ws.join("invoices/a.txt")}}
+            ]}}),
+            json!({"type": "user", "session_id": "ro-pdf-1", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "     1→# PDF\n     2→\n     3→Use scripts/extract.py.", "is_error": false},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "Invoice 1\nTotal: 10.00\n", "is_error": false}
+            ]}}),
+            json!({"type": "assistant", "session_id": "ro-pdf-1", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Counted 1 file."}
+            ]}}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Counted 1 file.", "session_id": "ro-pdf-1", "total_cost_usd": 0.01}),
+        ]
+    };
+    let portable_pdf_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "pdf-count", "description": "Count files in an input directory"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [{"name": "input_dir", "type": "path", "origin": "request", "description": "Target folder"}],
+            "programs": [{
+                "id": "count",
+                "description": "Count files",
+                "entry": ["python3", "programs/count/main.py"],
+                "inputs": ["input_dir"],
+                "outputs": [],
+                "check": ["python3", "programs/count/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "count"}],
+            "verification": [{"kind": "inspection", "text": "Confirm file count matches."}]
+        },
+        "files": [{
+            "path": "programs/count/main.py",
+            "content": "import json, os, sys\nif sys.argv[1:] == ['--check']:\n    print(json.dumps({'status': 'complete', 'result': {'ok': True}}))\n    sys.exit(0)\ninp = json.loads(os.environ['SKILLCACHE_INPUT'])\ntotal = sum(len(fs) for _, _, fs in os.walk(inp['input_dir']))\nprint(json.dumps({'status': 'complete', 'result': {'files': total}}))\n"
+        }],
+        "examples": {
+            "bindings": {"input_dir": "invoices/"},
+            "steps": {}
+        }
+    });
+
+    stand.script("claude", &ro_pdf_turn(&project));
+    let obs_pdf_sid = stand
+        .claude_turn("Count files in invoices/", json!({"mode": "observe"}), None)
+        .await;
+    let obs_pdf_gen = stand.skillcache_events(&obs_pdf_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    stand.compiler(1, &portable_pdf_answer);
+    let (_, cap_tpl_src) = stand.start_compile(&obs_pdf_sid, &obs_pdf_gen).await;
+    let tpl_src = stand.settled(&cap_tpl_src, "compiling").await;
+    assert_eq!(tpl_src["status"], "active", "{tpl_src}");
+    assert_eq!(tpl_src["form"], "hybrid", "{tpl_src}");
+    assert_eq!(
+        gate_summary(&tpl_src),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+
+    let (tpl_count, tpl_semantic): (i64, String) = {
+        let db = stand.store.connection().unwrap();
+        db.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(skill_semantic_sha), '') FROM skillcache_templates WHERE edition = 'Laravel' AND skill_name = 'pdf'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(tpl_count, 1);
+    assert!(
+        !tpl_semantic.is_empty(),
+        "template must record skill_semantic_sha"
+    );
+
+    let snap_rel = |trace_gen: &str| -> PathBuf {
+        stand
+            .root
+            .join("state/skillcache/snapshots")
+            .join(trace_gen)
+    };
+    let snap1_path = snap_rel(&obs_pdf_gen);
+    assert!(
+        snap1_path.is_dir(),
+        "expected snapshot at {}",
+        snap1_path.display()
+    );
+
+    // Compile a second active capsule on `other` so its aged snapshot remains pinned across recover.
+    let other_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "ro-other-1"}),
+        json!({"type": "assistant", "session_id": "ro-other-1", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join(".claude/skills/other/SKILL.md")}},
+            {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}}
+        ]}}),
+        json!({"type": "user", "session_id": "ro-other-1", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "     1→# Other", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Invoice 1", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "ro-other-1", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Counted 1 file."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Counted 1 file.", "session_id": "ro-other-1", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &other_turn);
+    let obs_keep_sid = stand
+        .claude_turn(
+            "Count other files in invoices/",
+            json!({"mode": "observe"}),
+            None,
+        )
+        .await;
+    let obs_keep_gen = stand.skillcache_events(&obs_keep_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut keep_answer = portable_pdf_answer.clone();
+    keep_answer["capsule"]["mu"]["name"] = "other-keep-check".into();
+    keep_answer["capsule"]["source"]["skills"][0] =
+        json!({"name": "other", "path": ".claude/skills/other/SKILL.md"});
+    stand.compiler(1, &keep_answer);
+    let (_, cap_keep) = stand.start_compile(&obs_keep_sid, &obs_keep_gen).await;
+    let settled_keep = stand.settled(&cap_keep, "compiling").await;
+    assert_eq!(settled_keep["status"], "active", "{settled_keep}");
+    let snap_keep_path = snap_rel(&obs_keep_gen);
+    assert!(
+        snap_keep_path.is_dir(),
+        "expected active keep snapshot at {}",
+        snap_keep_path.display()
+    );
+
+    // Create sibling git worktree at identical commit before adding a ToolChain capsule.
+    let wt2 = stand.root.join("wt2");
+    git(
+        &project,
+        &["worktree", "add", "-q", "-b", "wt2", wt2.to_str().unwrap()],
+    );
+    let wt2_id = stand.store.register(&wt2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(wt2_id, stand.project_id);
+
+    // Compile an active read-only ToolChain capsule on project 1.
+    let tc_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "ro-tc-wt"}),
+        json!({"type": "assistant", "session_id": "ro-tc-wt", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "Total", "path": project.join("invoices")}}
+        ]}}),
+        json!({"type": "user", "session_id": "ro-tc-wt", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "Invoice 1", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Total: 10.00", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "ro-tc-wt", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Inspected (2 lines)."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Inspected (2 lines).", "session_id": "ro-tc-wt", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &tc_turn);
+    let tc_sid = stand
+        .turn(
+            "Inspect invoices total across files",
+            json!({"mode": "observe", "tool_chain": true}),
+        )
+        .await;
+    let tc_gen = stand.skillcache_events(&tc_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tc_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "inspect-wt-invoices", "description": "Inspect invoices files cleanly"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "description": "Inspect invoices",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/main.py",
+            "content": "import json, sys\nif '--check' in sys.argv:\n    print(json.dumps({'status': 'complete', 'result': {}}))\n    sys.exit(0)\nwith open('invoices/a.txt') as f:\n    lines = [ln.strip() for ln in f if ln.strip()]\nprint(json.dumps({'status': 'complete', 'result': {'summary': f'Inspected ({len(lines)} lines).'}}))\n"
+        }],
+        "examples": {"bindings": {}, "steps": {}}
+    });
+    stand.compiler(1, &tc_answer);
+    let (_, cap_tc) = stand.start_compile(&tc_sid, &tc_gen).await;
+    let settled_tc = stand.settled(&cap_tc, "compiling").await;
+    assert_eq!(settled_tc["status"], "active", "{settled_tc}");
+    assert_eq!(settled_tc["kind"], "tool_chain", "{settled_tc}");
+
+    // 1. Age trace timestamps past TRACE_DAYS and retire `cap_tpl_src`: its snapshot unpins & deletes on disk
+    // while `cap_keep` (active) preserves its aged snapshot.
+    {
+        let db = stand.store.connection().unwrap();
+        db.execute(
+            "UPDATE skillcache_traces SET created_at = '2000-01-01T00:00:00Z' WHERE generation IN (?1, ?2)",
+            rusqlite::params![&obs_pdf_gen, &obs_keep_gen],
+        )
+        .unwrap();
+    }
+    let (status, retired) = stand
+        .http(
+            Method::POST,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/{cap_tpl_src}/retire",
+                stand.project_id
+            ),
+            Some(json!({"reason": "sunset"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{retired}");
+    assert!(
+        !snap1_path.exists(),
+        "retiring capsule with expired trace must unpin and delete snapshot dir on disk: {}",
+        snap1_path.display()
+    );
+    assert!(
+        snap_keep_path.exists(),
+        "active capsule snapshot must stay pinned on disk even when trace is older than TRACE_DAYS: {}",
+        snap_keep_path.display()
+    );
+
+    // 2. Cross-worktree sharing of `cap_tc` in sibling worktree `wt2` + isolation on drift & unrelated repo.
+    let (status, wt2_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{wt2_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{wt2_pre}");
+    assert_eq!(wt2_pre["skillcache"]["decision"], "hit", "{wt2_pre}");
+    assert_eq!(wt2_pre["skillcache"]["capsule"]["capsule_id"], cap_tc);
+
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let (status, wt2_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": wt2_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{wt2_created}");
+    let wt2_sid = wt2_created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&wt2_sid, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "sibling worktree warm direct dispatch must not spawn claude"
+    );
+    let wt2_events = stand.skillcache_events(&wt2_sid);
+    assert!(
+        wt2_events
+            .iter()
+            .any(|ev| ev["phase"] == "hit" && ev["direct_dispatch"] == true),
+        "{wt2_events:?}"
+    );
+
+    // Drift wt2's workspace tree -> cross-worktree sharing isolates cleanly.
+    fs::write(wt2.join("invoices/a.txt"), "Invoice 1\nTotal: 99.00\n").unwrap();
+    git(&wt2, &["add", "-A"]);
+    git(&wt2, &["commit", "-q", "-m", "drift"]);
+    let (_, wt2_drift) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{wt2_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_ne!(
+        wt2_drift["skillcache"]["decision"], "hit",
+        "workspace_tree_sha drift must prevent sibling sharing: {wt2_drift}"
+    );
+
+    // Unrelated repo with identical initial files -> isolated by git_common_dir.
+    let other_repo = stand.root.join("other-repo");
+    fs::create_dir_all(other_repo.join("invoices")).unwrap();
+    fs::write(
+        other_repo.join("invoices/a.txt"),
+        "Invoice 1\nTotal: 10.00\n",
+    )
+    .unwrap();
+    git(&other_repo, &["init", "-q"]);
+    git(&other_repo, &["add", "-A"]);
+    git(&other_repo, &["commit", "-q", "-m", "base"]);
+    let other_id = stand.store.register(&other_repo).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, other_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{other_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_ne!(
+        other_pre["skillcache"]["decision"], "hit",
+        "unrelated git_common_dir must never match sibling capsule: {other_pre}"
+    );
+
+    // 3. Normalized `skill_semantic_sha` template matching in a second Laravel project (zero compiler invocation, Gates 1-3 pass).
+    let laravel2 = stand.root.join("laravel2");
+    fs::create_dir_all(laravel2.join(".claude/skills/pdf/scripts")).unwrap();
+    fs::create_dir_all(laravel2.join("invoices")).unwrap();
+    fs::write(laravel2.join("artisan"), "#!/usr/bin/env php\n").unwrap();
+    fs::write(
+        laravel2.join("composer.json"),
+        r#"{"require":{"laravel/framework":"^11.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".infra-manifest.json"),
+        r#"{"edition":"Laravel"}"#,
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".claude/skills/pdf/SKILL.md"),
+        "---\n# YAML formatting comment\nname: pdf\ndescription:   Work   with PDF files  \n---\n\n<!-- editorial comment -->\n# PDF\n\n\nUse   scripts/extract.py.\n\n",
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".claude/skills/pdf/scripts/extract.py"),
+        "# comment\nprint('rows')   \n\n",
+    )
+    .unwrap();
+    fs::write(laravel2.join("invoices/a.txt"), "Invoice 1\nTotal: 10.00\n").unwrap();
+    git(&laravel2, &["init", "-q"]);
+    git(&laravel2, &["add", "-A"]);
+    git(&laravel2, &["commit", "-q", "-m", "base"]);
+
+    assert_ne!(
+        infra_skillcache::fingerprint::tree_sha256(&project.join(".claude/skills/pdf"))
+            .unwrap()
+            .sha256,
+        infra_skillcache::fingerprint::tree_sha256(&laravel2.join(".claude/skills/pdf"))
+            .unwrap()
+            .sha256,
+        "exact skill_tree_sha256 must differ so matching relies on normalized skill_semantic_sha"
+    );
+
+    let laravel2_id = stand.store.register(&laravel2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    stand.script("claude", &ro_pdf_turn(&laravel2));
+    let (status, l2_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": laravel2_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Count files in invoices/",
+                "skillcache": {"mode": "observe"}
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{l2_created}");
+    let l2_obs_sid = l2_created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&l2_obs_sid, 1).await;
+    let l2_gen = stand.skillcache_events(&l2_obs_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Remove compiler answers so any LLM compiler invocation would fail.
+    let _ = fs::remove_file(stand.root.join("bin/compiler-answer-1.jsonl"));
+    let (_, l2_cap_id) = stand.start_compile(&l2_obs_sid, &l2_gen).await;
+    let l2_cap = stand
+        .settled_in(&laravel2_id, &l2_cap_id, "compiling")
+        .await;
+    assert_eq!(l2_cap["status"], "active", "{l2_cap}");
+    assert_eq!(l2_cap["kind"], "template", "{l2_cap}");
+    assert_eq!(l2_cap["form"], "hybrid", "{l2_cap}");
+    assert_eq!(l2_cap["compile"]["rounds"], 0, "{l2_cap}");
+    assert_eq!(
+        gate_summary(&l2_cap),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+
+    let (status, l2_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{laravel2_id}/preflight"),
+            Some(json!({
+                "prompt": "$pdf count files in invoices/",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "edit", "permissions": "auto"}
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{l2_pre}");
+    assert_eq!(l2_pre["skillcache"]["decision"], "hit", "{l2_pre}");
+    assert_eq!(l2_pre["skillcache"]["capsule"]["capsule_id"], l2_cap_id);
+
+    stand.close().await;
+
+    // 4. Cold-boot `SessionStore::open` recovery prunes aged retired capsules & failed compiles and collects unpinned snapshots.
+    let rec_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let rec_proj = rec_dir.path().join("proj");
+    fs::create_dir_all(&rec_proj).unwrap();
+    let snap_expired = rec_dir
+        .path()
+        .join("state/skillcache/snapshots/gen-exp-ret");
+    let snap_active = rec_dir
+        .path()
+        .join("state/skillcache/snapshots/gen-keep-act");
+    {
+        let s1 = SessionStore::open(&rec_dir.path().join("state")).unwrap();
+        fs::create_dir_all(&snap_expired).unwrap();
+        fs::create_dir_all(&snap_active).unwrap();
+        fs::write(snap_expired.join("tree.json"), "{}").unwrap();
+        fs::write(snap_active.join("tree.json"), "{}").unwrap();
+        let pid = s1.register(&rec_proj).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = s1.connection().unwrap();
+        db.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES ('s-rec','t',?1,?2,'claude','edit','native',0,'completed','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')",
+            rusqlite::params![&pid, rec_proj.to_string_lossy().as_ref()],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_traces(generation,session_id,provider,request,skill_refs,steps,redaction,trace_sha256,created_at) VALUES
+             ('gen-exp-ret','s-rec','claude','q','[]','[]','{}','s1','2000-01-01T00:00:00Z'),
+             ('gen-keep-act','s-rec','claude','q','[]','[]','{}','s2','2000-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_capsules(capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,updated_at,created_at) VALUES
+             ('cap-exp-ret',?1,'pdf','.claude/skills/pdf/SKILL.md','m','d','textual','retired',1,'c','t','{}','e',1,'1','s-rec','gen-exp-ret','cmp-exp','','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z'),
+             ('cap-keep-act',?1,'other','.claude/skills/other/SKILL.md','m','d','textual','active',1,'c','t','{}','e',1,'1','s-rec','gen-keep-act','cmp-keep','','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')",
+            [&pid],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_compiles(compile_id,project_id,source_session_id,source_generation,provider,status,outcome,started_at,finished_at,capsule_id)
+             VALUES ('cmp-exp',?1,'s-rec','gen-exp-ret','claude','failed','err','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z','cap-exp-ret')",
+            [&pid],
+        ).unwrap();
+    }
+    let s2 = SessionStore::open(&rec_dir.path().join("state")).unwrap();
+    let db2 = s2.connection().unwrap();
+    let ret_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_capsules WHERE capsule_id='cap-exp-ret'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let cmp_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_compiles WHERE compile_id='cmp-exp'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let act_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_capsules WHERE capsule_id='cap-keep-act'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ret_cnt, 0,
+        "aged retired capsule pruned by SessionStore::open"
+    );
+    assert_eq!(
+        cmp_cnt, 0,
+        "aged failed compile pruned by SessionStore::open"
+    );
+    assert_eq!(act_cnt, 1, "active capsule preserved by SessionStore::open");
+    assert!(
+        !snap_expired.exists(),
+        "expired retired snapshot removed on reopen"
+    );
+    assert!(
+        snap_active.exists(),
+        "active capsule snapshot preserved on reopen"
+    );
+}
