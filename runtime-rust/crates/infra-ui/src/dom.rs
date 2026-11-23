@@ -1127,30 +1127,145 @@ enum FramePending {
     Timer,
 }
 
+struct RetainedCallback<H> {
+    token: u64,
+    handle: i32,
+    closure: H,
+}
+
+struct CallbackRegistry<H> {
+    next_token: u64,
+    active: std::collections::BTreeMap<String, RetainedCallback<H>>,
+    retired: Vec<H>,
+    executing: usize,
+}
+
+impl<H> Default for CallbackRegistry<H> {
+    fn default() -> Self {
+        Self {
+            next_token: 0,
+            active: std::collections::BTreeMap::new(),
+            retired: Vec::new(),
+            executing: 0,
+        }
+    }
+}
+
+impl<H> CallbackRegistry<H> {
+    fn drain_retired_if_idle(&mut self) {
+        if self.executing == 0 && !self.retired.is_empty() {
+            self.retired.clear();
+        }
+    }
+
+    fn allocate_token(&mut self) -> u64 {
+        self.drain_retired_if_idle();
+        self.next_token = self.next_token.wrapping_add(1).max(1);
+        self.next_token
+    }
+
+    fn insert_with_token(
+        &mut self,
+        key: &str,
+        token: u64,
+        handle: i32,
+        closure: H,
+    ) -> Option<RetainedCallback<H>> {
+        self.drain_retired_if_idle();
+        self.active.insert(
+            key.to_owned(),
+            RetainedCallback {
+                token,
+                handle,
+                closure,
+            },
+        )
+    }
+
+    fn cancel(&mut self, key: &str) -> Option<i32> {
+        self.drain_retired_if_idle();
+        self.active.remove(key).map(|entry| entry.handle)
+    }
+
+    fn begin_fire(&mut self, key: &str, token: u64) -> bool {
+        self.drain_retired_if_idle();
+        let matches = self
+            .active
+            .get(key)
+            .is_some_and(|entry| entry.token == token);
+        if !matches {
+            return false;
+        }
+        let Some(entry) = self.active.remove(key) else {
+            return false;
+        };
+        // Keep the invoked Closure alive until the JS trampoline finishes returning.
+        self.retired.push(entry.closure);
+        self.executing = self.executing.saturating_add(1);
+        true
+    }
+
+    fn end_fire(&mut self) {
+        self.executing = self.executing.saturating_sub(1);
+    }
+}
+
 thread_local! {
     static PENDING_FRAMES: std::cell::RefCell<std::collections::BTreeMap<String, FramePending>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static TIMER_CLOSURES: std::cell::RefCell<CallbackRegistry<Closure<dyn FnMut()>>> =
+        std::cell::RefCell::new(CallbackRegistry::default());
+    static FRAME_CLOSURES: std::cell::RefCell<CallbackRegistry<Closure<dyn FnMut()>>> =
+        std::cell::RefCell::new(CallbackRegistry::default());
+}
+
+struct TimerFireGuard;
+impl Drop for TimerFireGuard {
+    fn drop(&mut self) {
+        TIMER_CLOSURES.with(|reg| reg.borrow_mut().end_fire());
+    }
+}
+
+struct FrameFireGuard;
+impl Drop for FrameFireGuard {
+    fn drop(&mut self) {
+        FRAME_CLOSURES.with(|reg| reg.borrow_mut().end_fire());
+    }
 }
 
 pub fn later(key: &str, ms: i32, callback: impl FnOnce() + 'static) {
     cancel_timer(key);
     let name = key.to_owned();
-    let c = Closure::once_into_js(move || {
+    let token = TIMER_CLOSURES.with(|reg| reg.borrow_mut().allocate_token());
+    let mut cb = Some(callback);
+    let c = Closure::new(move || {
+        let should_run = TIMER_CLOSURES.with(|reg| reg.borrow_mut().begin_fire(&name, token));
+        if !should_run {
+            return;
+        }
+        let _guard = TimerFireGuard;
         crate::model::write(|s| {
             s.timers.remove(&name);
         });
-        callback();
+        if let Some(f) = cb.take() {
+            f();
+        }
     });
-    if let Ok(id) =
-        window().set_timeout_with_callback_and_timeout_and_arguments_0(c.unchecked_ref(), ms)
+    if let Ok(id) = window()
+        .set_timeout_with_callback_and_timeout_and_arguments_0(c.as_ref().unchecked_ref(), ms)
     {
+        TIMER_CLOSURES.with(|reg| {
+            let _ = reg.borrow_mut().insert_with_token(key, token, id, c);
+        });
         crate::model::write(|s| {
             s.timers.insert(key.into(), id);
         });
     }
 }
 pub fn cancel_timer(key: &str) {
-    if let Some(id) = crate::model::write(|s| s.timers.remove(key)) {
+    let registry_id = TIMER_CLOSURES.with(|reg| reg.borrow_mut().cancel(key));
+    let model_id = crate::model::write(|s| s.timers.remove(key));
+    if let Some(id) = model_id.or(registry_id) {
         window().clear_timeout_with_handle(id);
     }
 }
@@ -1181,14 +1296,27 @@ pub fn schedule_frame(key: &str, callback: impl FnOnce() + 'static) {
         return;
     }
     let name_for_cb = name.clone();
-    let c = Closure::once_into_js(move || {
+    let token = FRAME_CLOSURES.with(|reg| reg.borrow_mut().allocate_token());
+    let mut cb = Some(callback);
+    let c = Closure::new(move || {
+        let should_run =
+            FRAME_CLOSURES.with(|reg| reg.borrow_mut().begin_fire(&name_for_cb, token));
+        if !should_run {
+            return;
+        }
+        let _guard = FrameFireGuard;
         let active =
             PENDING_FRAMES.with(|frames| frames.borrow_mut().remove(&name_for_cb).is_some());
         if active {
-            callback();
+            if let Some(f) = cb.take() {
+                f();
+            }
         }
     });
-    if let Ok(id) = window().request_animation_frame(c.unchecked_ref()) {
+    if let Ok(id) = window().request_animation_frame(c.as_ref().unchecked_ref()) {
+        FRAME_CLOSURES.with(|reg| {
+            let _ = reg.borrow_mut().insert_with_token(&name, token, id, c);
+        });
         PENDING_FRAMES.with(|frames| {
             frames.borrow_mut().insert(name, FramePending::Raf(id));
         });
@@ -1201,6 +1329,7 @@ pub fn cancel_frame(key: &str) {
         return;
     }
     let pending = PENDING_FRAMES.with(|frames| frames.borrow_mut().remove(key));
+    let reg_id = FRAME_CLOSURES.with(|reg| reg.borrow_mut().cancel(key));
     match pending {
         Some(FramePending::Raf(id)) => {
             let _ = window().cancel_animation_frame(id);
@@ -1208,7 +1337,11 @@ pub fn cancel_frame(key: &str) {
         Some(FramePending::Timer) => {
             cancel_timer(&format!("frame:{key}"));
         }
-        None => {}
+        None => {
+            if let Some(id) = reg_id {
+                let _ = window().cancel_animation_frame(id);
+            }
+        }
     }
 }
 pub fn num(id: &str) -> V {
@@ -2247,5 +2380,59 @@ mod tests {
         assert!(!should_remove_keyless_child("TEMPLATE", false));
         assert!(!should_remove_keyless_child("template", false));
         assert!(!should_remove_keyless_child("P", true));
+    }
+
+    #[test]
+    fn callback_registry_drops_cancelled_handles_and_survives_reentrant_rearm() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct DropCounter(Rc<Cell<usize>>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut reg = CallbackRegistry::default();
+
+        // Cancel drops closure immediately.
+        let t1 = reg.allocate_token();
+        assert!(reg
+            .insert_with_token("poll", t1, 10, DropCounter(drops.clone()))
+            .is_none());
+        assert_eq!(reg.cancel("poll"), Some(10));
+        assert_eq!(drops.get(), 1);
+        assert!(reg.active.is_empty());
+
+        // Firing retires closure across execution; re-arming during execution must not drop
+        // the currently executing closure mid-frame, and next idle cycle frees it.
+        let t2 = reg.allocate_token();
+        reg.insert_with_token("countdown", t2, 20, DropCounter(drops.clone()));
+        assert!(reg.begin_fire("countdown", t2));
+        assert_eq!(
+            drops.get(),
+            1,
+            "active callback stays alive during execution"
+        );
+
+        let t3 = reg.allocate_token();
+        reg.insert_with_token("countdown", t3, 21, DropCounter(drops.clone()));
+        assert_eq!(
+            drops.get(),
+            1,
+            "retired closure stays alive while executing > 0"
+        );
+
+        reg.end_fire();
+        assert_eq!(reg.cancel("countdown"), Some(21));
+        assert_eq!(
+            drops.get(),
+            3,
+            "both retired and cancelled closures are dropped once idle"
+        );
+        assert!(reg.active.is_empty());
+        assert!(reg.retired.is_empty());
     }
 }

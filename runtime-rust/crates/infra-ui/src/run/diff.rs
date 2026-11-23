@@ -128,16 +128,13 @@ pub(crate) fn compute_diff_numbered_lines(diff: &str) -> Vec<DiffNumberedLine> {
     out
 }
 
-pub(crate) fn render_diff_file_lines_html(
-    diff: &str,
-    max_lines: Option<usize>,
-) -> (String, usize, bool) {
-    let lines = compute_diff_numbered_lines(diff);
-    let total = lines.len();
-    let limit = max_lines.unwrap_or(total);
-    let truncated = total > limit;
+pub(crate) fn render_diff_file_lines_range_html(
+    lines: &[DiffNumberedLine],
+    start: usize,
+    count: usize,
+) -> String {
     let mut out = String::new();
-    for entry in lines.iter().take(limit) {
+    for entry in lines.iter().skip(start).take(count) {
         let escaped = if entry.text.is_empty() {
             " ".to_owned()
         } else {
@@ -163,6 +160,18 @@ pub(crate) fn render_diff_file_lines_html(
             entry.kind
         ));
     }
+    out
+}
+
+pub(crate) fn render_diff_file_lines_html(
+    diff: &str,
+    max_lines: Option<usize>,
+) -> (String, usize, bool) {
+    let lines = compute_diff_numbered_lines(diff);
+    let total = lines.len();
+    let limit = max_lines.unwrap_or(total);
+    let truncated = total > limit;
+    let out = render_diff_file_lines_range_html(&lines, 0, limit);
     (out, total, truncated)
 }
 
@@ -326,8 +335,28 @@ pub(crate) fn parse_diff_files(diff: &str) -> Vec<DiffFileSection> {
 }
 
 const DIFF_PREVIEW_MAX_LINES: usize = 250;
+const DIFF_EXPAND_CHUNK_LINES: usize = 300;
+const DIFF_FILE_BATCH_SIZE: usize = 24;
 const DIFF_AUTO_OPEN_MAX_FILES: usize = 8;
 const DIFF_AUTO_OPEN_MAX_LINES: usize = 400;
+
+struct PendingDiffBatch {
+    container_id: String,
+    hash: String,
+    generation: u64,
+    focused_file: String,
+    file_count: usize,
+    next_idx: usize,
+    sections: Vec<DiffFileSection>,
+}
+
+struct PendingExpandLines {
+    scope_id: String,
+    path: String,
+    generation: u64,
+    lines: Vec<DiffNumberedLine>,
+    offset: usize,
+}
 
 thread_local! {
     static EXPANDED_DIFF_FILES: std::cell::RefCell<std::collections::HashSet<String>> =
@@ -336,6 +365,41 @@ thread_local! {
     static DIFF_FULL_FILES: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     static NEXT_DIFF_COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static DIFF_RENDER_GENERATIONS: std::cell::RefCell<std::collections::BTreeMap<String, u64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static PENDING_DIFF_BATCHES: std::cell::RefCell<std::collections::BTreeMap<String, PendingDiffBatch>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static PENDING_DIFF_EXPANDS: std::cell::RefCell<std::collections::BTreeMap<String, PendingExpandLines>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+fn next_diff_generation(key: &str) -> u64 {
+    DIFF_RENDER_GENERATIONS.with(|gens| {
+        let mut gens = gens.borrow_mut();
+        let next = gens.get(key).copied().unwrap_or(0).saturating_add(1);
+        gens.insert(key.to_owned(), next);
+        next
+    })
+}
+
+fn diff_generation_matches(key: &str, generation: u64) -> bool {
+    DIFF_RENDER_GENERATIONS.with(|gens| gens.borrow().get(key).copied() == Some(generation))
+}
+
+pub(crate) fn diff_next_chunk_end(offset: usize, total: usize, chunk_size: usize) -> usize {
+    (offset + chunk_size.max(1)).min(total)
+}
+
+#[cfg(test)]
+pub(crate) fn diff_chunk_ranges(total: usize, chunk_size: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    while start < total {
+        let end = diff_next_chunk_end(start, total, chunk_size);
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
 }
 
 pub(crate) fn should_default_open_diff_file(
@@ -408,6 +472,25 @@ pub(crate) fn set_diff_file_open(scope_id: &str, path: &str, open: bool) {
 pub(crate) fn reset_diff_view_state() {
     EXPANDED_DIFF_FILES.with(|set| set.borrow_mut().clear());
     DIFF_FULL_FILES.with(|map| map.borrow_mut().clear());
+    let batch_keys: Vec<String> = PENDING_DIFF_BATCHES.with(|batches| {
+        let mut batches = batches.borrow_mut();
+        let keys = batches.keys().cloned().collect();
+        batches.clear();
+        keys
+    });
+    for scope in batch_keys {
+        dom::cancel_frame(&format!("diff-files:{scope}"));
+    }
+    let expand_keys: Vec<String> = PENDING_DIFF_EXPANDS.with(|expands| {
+        let mut expands = expands.borrow_mut();
+        let keys = expands.keys().cloned().collect();
+        expands.clear();
+        keys
+    });
+    for key in expand_keys {
+        dom::cancel_frame(&format!("diff-expand:{key}"));
+    }
+    DIFF_RENDER_GENERATIONS.with(|gens| gens.borrow_mut().clear());
     m::write(|s| {
         s.diff_view.collapsed_files.clear();
         s.diff_view.focused_file.clear();
@@ -443,7 +526,11 @@ fn ensure_diff_toggle_listener() {
             }
             let scope = target.get_attribute("data-diff-scope").unwrap_or_default();
             let path = target.get_attribute("data-diff-file").unwrap_or_default();
-            set_diff_file_open(&scope, &path, target.open());
+            let open = target.open();
+            set_diff_file_open(&scope, &path, open);
+            if open {
+                hydrate_diff_file_group(target.as_ref());
+            }
         },
     );
     let _ = dom::document().add_event_listener_with_callback_and_bool(
@@ -452,6 +539,163 @@ fn ensure_diff_toggle_listener() {
         true,
     );
     cb.forget();
+}
+
+fn append_html_children(target: &web_sys::Element, html: &str) {
+    if html.is_empty() {
+        return;
+    }
+    let staging = dom::el("div", "", "");
+    staging.set_inner_html(html);
+    while let Some(node) = staging.first_child() {
+        let _ = target.append_child(&node);
+    }
+}
+
+fn diff_trunc_bar_html(scope_id: &str, path: &str, total_lines: usize) -> String {
+    let show_more_payload =
+        files_map::escape_html(&json!({"scope": scope_id, "file": path}).to_string());
+    format!(
+        "<div class=\"diff-file-trunc\">\
+         <span class=\"muted\">Showing first {DIFF_PREVIEW_MAX_LINES} of {total_lines} lines</span>\
+         <button type=\"button\" class=\"button compact diff-show-more\" data-action=\"diff-show-more\" data-payload=\"{show_more_payload}\">Show all {total_lines} lines</button>\
+         </div>"
+    )
+}
+
+fn hydrate_diff_file_group(group: &web_sys::Element) {
+    let Ok(Some(pre)) = group.query_selector("pre.diff-file-lines[data-diff-deferred=\"true\"]")
+    else {
+        return;
+    };
+    let scope = group.get_attribute("data-diff-scope").unwrap_or_default();
+    let path = group.get_attribute("data-diff-file").unwrap_or_default();
+    if path.is_empty() {
+        return;
+    }
+    let key = diff_collapse_key(&scope, &path);
+    let Some(raw) = DIFF_FULL_FILES.with(|map| map.borrow().get(&key).cloned()) else {
+        let _ = pre.remove_attribute("data-diff-deferred");
+        return;
+    };
+    let (lines_html, total_lines, truncated) =
+        render_diff_file_lines_html(&raw, Some(DIFF_PREVIEW_MAX_LINES));
+    let _ = pre.remove_attribute("data-diff-deferred");
+    pre.set_inner_html(&lines_html);
+    if truncated
+        && group
+            .query_selector(".diff-file-trunc")
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        append_html_children(group, &diff_trunc_bar_html(&scope, &path, total_lines));
+    }
+}
+
+struct DiffGroupContext<'a> {
+    scope_id: &'a str,
+    scope_esc: &'a str,
+    file_count: usize,
+    expanded: &'a std::collections::HashSet<String>,
+    collapsed: &'a std::collections::BTreeSet<String>,
+    focused_file: &'a str,
+}
+
+fn render_diff_file_group_html(
+    section: &DiffFileSection,
+    idx: usize,
+    ctx: &DiffGroupContext<'_>,
+) -> String {
+    let key = diff_collapse_key(ctx.scope_id, &section.path);
+    let approx_lines = section.raw.lines().count();
+    let default_open = should_default_open_diff_file(ctx.file_count, idx, approx_lines);
+    let is_open = is_diff_file_open(default_open, &key, ctx.expanded, ctx.collapsed);
+    let open_attr = if is_open { " open" } else { "" };
+    let path_esc = files_map::escape_html(&section.path);
+    let status_esc = files_map::escape_html(&section.status);
+    let copy_path_payload = files_map::escape_html(&json!(section.path).to_string());
+    let status_label = match section.status.as_str() {
+        "added" => "Added",
+        "deleted" => "Deleted",
+        "renamed" => "Renamed",
+        _ => "Modified",
+    };
+    let focus_attr = if ctx.focused_file == section.path {
+        " data-focused=\"true\""
+    } else {
+        ""
+    };
+    let (pre_open_tag, lines_html, trunc_bar) = if is_open {
+        let (rendered, total_lines, truncated) =
+            render_diff_file_lines_html(&section.raw, Some(DIFF_PREVIEW_MAX_LINES));
+        let bar = if truncated {
+            diff_trunc_bar_html(ctx.scope_id, &section.path, total_lines)
+        } else {
+            String::new()
+        };
+        (
+            "<pre class=\"diff-file-lines permission-diff\">",
+            rendered,
+            bar,
+        )
+    } else {
+        // Defer line formatting and large DOM creation until collapsed file group is opened.
+        (
+            "<pre class=\"diff-file-lines permission-diff\" data-diff-deferred=\"true\">",
+            String::new(),
+            String::new(),
+        )
+    };
+    format!(
+        "<details class=\"diff-file-group\" data-diff-scope=\"{}\" data-diff-file=\"{path_esc}\" data-status=\"{status_esc}\"{focus_attr}{open_attr}>\
+         <summary class=\"diff-file-summary\">\
+           <span class=\"diff-file-status\" data-status=\"{status_esc}\">{status_label}</span>\
+           <span class=\"diff-file-path\">{path_esc}</span>\
+           <button type=\"button\" class=\"button compact diff-copy-path\" data-action=\"diff-copy-path\" data-payload=\"{copy_path_payload}\" title=\"Copy file path\">Copy path</button>\
+           <span class=\"diff-file-stats\"><span class=\"diff-stat-add\">+{}</span> <span class=\"diff-stat-del\">-{}</span></span>\
+         </summary>\
+         {pre_open_tag}{lines_html}</pre>\
+         {trunc_bar}\
+         </details>",
+        ctx.scope_esc,
+        section.additions,
+        section.deletions,
+    )
+}
+
+fn diff_viewer_header_html(
+    scope_esc: &str,
+    file_count: usize,
+    total_adds: usize,
+    total_dels: usize,
+) -> String {
+    let file_word = if file_count == 1 { "file" } else { "files" };
+    format!(
+        "<div class=\"diff-viewer\" data-diff-scope=\"{scope_esc}\" data-total-files=\"{file_count}\" data-total-adds=\"{total_adds}\" data-total-dels=\"{total_dels}\">\
+         <div class=\"diff-viewer-summary\">\
+           <span class=\"diff-viewer-counts\">{file_count} {file_word} · <span class=\"diff-stat-add\">+{total_adds}</span> <span class=\"diff-stat-del\">-{total_dels}</span></span>\
+           <span class=\"diff-viewer-controls\">\
+             <input type=\"search\" class=\"diff-file-filter\" data-action=\"diff-filter\" data-payload='{{\"scope\":\"{scope_esc}\"}}' placeholder=\"Filter files…\" aria-label=\"Filter diff files\">\
+             <button type=\"button\" class=\"button compact\" data-action=\"diff-expand-all\" data-payload='{{\"scope\":\"{scope_esc}\"}}'>Expand all</button>\
+             <button type=\"button\" class=\"button compact\" data-action=\"diff-collapse-all\" data-payload='{{\"scope\":\"{scope_esc}\"}}'>Collapse all</button>\
+           </span>\
+         </div>"
+    )
+}
+
+fn cache_diff_full_files(scope_id: &str, sections: &[DiffFileSection]) {
+    DIFF_FULL_FILES.with(|map| {
+        let mut map = map.borrow_mut();
+        let prefix = format!("{scope_id}:");
+        map.retain(|k, _| !k.starts_with(&prefix));
+        for section in sections {
+            map.insert(
+                diff_collapse_key(scope_id, &section.path),
+                section.raw.clone(),
+            );
+        }
+    });
 }
 
 /// Renders a file-grouped collapsible diff viewer with jump anchors and zero inline hex colors.
@@ -466,91 +710,31 @@ pub(crate) fn render_grouped_diff_html(diff: &str, scope_id: &str) -> String {
             m::read(|s| s.diff_view.collapsed_files.clone()),
         )
     });
+    let focused_file = m::read(|s| s.diff_view.focused_file.clone());
     let total_adds: usize = sections.iter().map(|s| s.additions).sum();
     let total_dels: usize = sections.iter().map(|s| s.deletions).sum();
-    let file_word = if sections.len() == 1 { "file" } else { "files" };
     let scope_esc = files_map::escape_html(scope_id);
 
-    let mut out = format!(
-        "<div class=\"diff-viewer\" data-diff-scope=\"{scope_esc}\" data-total-files=\"{}\" data-total-adds=\"{total_adds}\" data-total-dels=\"{total_dels}\">\
-         <div class=\"diff-viewer-summary\">\
-           <span class=\"diff-viewer-counts\">{} {file_word} · <span class=\"diff-stat-add\">+{total_adds}</span> <span class=\"diff-stat-del\">-{total_dels}</span></span>\
-           <span class=\"diff-viewer-controls\">\
-             <input type=\"search\" class=\"diff-file-filter\" data-action=\"diff-filter\" data-payload='{{\"scope\":\"{scope_esc}\"}}' placeholder=\"Filter files…\" aria-label=\"Filter diff files\">\
-             <button type=\"button\" class=\"button compact\" data-action=\"diff-expand-all\" data-payload='{{\"scope\":\"{scope_esc}\"}}'>Expand all</button>\
-             <button type=\"button\" class=\"button compact\" data-action=\"diff-collapse-all\" data-payload='{{\"scope\":\"{scope_esc}\"}}'>Collapse all</button>\
-           </span>\
-         </div>",
-        sections.len(),
-        sections.len()
-    );
+    cache_diff_full_files(scope_id, &sections);
 
-    DIFF_FULL_FILES.with(|map| {
-        let mut map = map.borrow_mut();
-        let prefix = format!("{scope_id}:");
-        map.retain(|k, _| !k.starts_with(&prefix));
-        for section in &sections {
-            map.insert(
-                diff_collapse_key(scope_id, &section.path),
-                section.raw.clone(),
-            );
-        }
-    });
-
+    let ctx = DiffGroupContext {
+        scope_id,
+        scope_esc: &scope_esc,
+        file_count: sections.len(),
+        expanded: &expanded,
+        collapsed: &collapsed,
+        focused_file: &focused_file,
+    };
+    let mut out = diff_viewer_header_html(&scope_esc, sections.len(), total_adds, total_dels);
     for (idx, section) in sections.iter().enumerate() {
-        let key = diff_collapse_key(scope_id, &section.path);
-        let (lines_html, total_lines, truncated) =
-            render_diff_file_lines_html(&section.raw, Some(DIFF_PREVIEW_MAX_LINES));
-        let default_open = should_default_open_diff_file(sections.len(), idx, total_lines);
-        let is_open = is_diff_file_open(default_open, &key, &expanded, &collapsed);
-        let open_attr = if is_open { " open" } else { "" };
-        let path_esc = files_map::escape_html(&section.path);
-        let status_esc = files_map::escape_html(&section.status);
-        let copy_path_payload = files_map::escape_html(&json!(section.path).to_string());
-        let show_more_payload =
-            files_map::escape_html(&json!({"scope": scope_id, "file": section.path}).to_string());
-        let status_label = match section.status.as_str() {
-            "added" => "Added",
-            "deleted" => "Deleted",
-            "renamed" => "Renamed",
-            _ => "Modified",
-        };
-        let focused = m::read(|s| s.diff_view.focused_file == section.path);
-        let focus_attr = if focused {
-            " data-focused=\"true\""
-        } else {
-            ""
-        };
-        let trunc_bar = if truncated {
-            format!(
-                "<div class=\"diff-file-trunc\">\
-                 <span class=\"muted\">Showing first {DIFF_PREVIEW_MAX_LINES} of {total_lines} lines</span>\
-                 <button type=\"button\" class=\"button compact diff-show-more\" data-action=\"diff-show-more\" data-payload=\"{show_more_payload}\">Show all {total_lines} lines</button>\
-                 </div>"
-            )
-        } else {
-            String::new()
-        };
-        out.push_str(&format!(
-            "<details class=\"diff-file-group\" data-diff-scope=\"{scope_esc}\" data-diff-file=\"{path_esc}\" data-status=\"{status_esc}\"{focus_attr}{open_attr}>\
-             <summary class=\"diff-file-summary\">\
-               <span class=\"diff-file-status\" data-status=\"{status_esc}\">{status_label}</span>\
-               <span class=\"diff-file-path\">{path_esc}</span>\
-               <button type=\"button\" class=\"button compact diff-copy-path\" data-action=\"diff-copy-path\" data-payload=\"{copy_path_payload}\" title=\"Copy file path\">Copy path</button>\
-               <span class=\"diff-file-stats\"><span class=\"diff-stat-add\">+{}</span> <span class=\"diff-stat-del\">-{}</span></span>\
-             </summary>\
-             <pre class=\"diff-file-lines permission-diff\">{lines_html}</pre>\
-             {trunc_bar}\
-             </details>",
-            section.additions,
-            section.deletions,
-        ));
+        out.push_str(&render_diff_file_group_html(section, idx, &ctx));
     }
     out.push_str("</div>");
     out
 }
 
 pub(crate) fn filter_diff_files(scope_id: &str, query: &str) {
+    flush_pending_diff_batches(scope_id);
     let needle = query.trim().to_ascii_lowercase();
     let scope_escaped = crate::dom::escape_css_attr_value(scope_id);
     let viewer_sel = format!(".diff-viewer[data-diff-scope=\"{scope_escaped}\"]");
@@ -597,6 +781,114 @@ pub(crate) fn filter_diff_files(scope_id: &str, query: &str) {
     }
 }
 
+fn schedule_expand_diff_chunk(key: String) {
+    let frame_key = format!("diff-expand:{key}");
+    dom::schedule_frame(&frame_key, move || {
+        step_expand_diff_chunk(&key);
+    });
+}
+
+fn step_expand_diff_chunk(key: &str) {
+    enum StepOutcome {
+        More {
+            scope_id: String,
+            path: String,
+            chunk_html: String,
+            rendered: usize,
+            total: usize,
+        },
+        Done {
+            scope_id: String,
+            path: String,
+            chunk_html: String,
+        },
+        Drop,
+    }
+    let gen_key = format!("expand:{key}");
+    let outcome = PENDING_DIFF_EXPANDS.with(|expands| {
+        let mut expands = expands.borrow_mut();
+        let Some(pending) = expands.get_mut(key) else {
+            return StepOutcome::Drop;
+        };
+        if !diff_generation_matches(&gen_key, pending.generation) {
+            expands.remove(key);
+            return StepOutcome::Drop;
+        }
+        let end = diff_next_chunk_end(pending.offset, pending.lines.len(), DIFF_EXPAND_CHUNK_LINES);
+        let chunk_html = render_diff_file_lines_range_html(
+            &pending.lines,
+            pending.offset,
+            end.saturating_sub(pending.offset),
+        );
+        pending.offset = end;
+        if end >= pending.lines.len() {
+            let done = StepOutcome::Done {
+                scope_id: pending.scope_id.clone(),
+                path: pending.path.clone(),
+                chunk_html,
+            };
+            expands.remove(key);
+            done
+        } else {
+            StepOutcome::More {
+                scope_id: pending.scope_id.clone(),
+                path: pending.path.clone(),
+                chunk_html,
+                rendered: end,
+                total: pending.lines.len(),
+            }
+        }
+    });
+    match outcome {
+        StepOutcome::Drop => {}
+        StepOutcome::Done {
+            scope_id,
+            path,
+            chunk_html,
+        } => {
+            let selector = format!(
+                "details.diff-file-group[data-diff-scope=\"{}\"][data-diff-file=\"{}\"]",
+                crate::dom::escape_css_attr_value(&scope_id),
+                crate::dom::escape_css_attr_value(&path),
+            );
+            if let Ok(Some(group)) = dom::document().query_selector(&selector) {
+                if let Ok(Some(pre)) = group.query_selector("pre.diff-file-lines") {
+                    append_html_children(&pre, &chunk_html);
+                }
+                if let Ok(Some(trunc)) = group.query_selector(".diff-file-trunc") {
+                    trunc.remove();
+                }
+            }
+        }
+        StepOutcome::More {
+            scope_id,
+            path,
+            chunk_html,
+            rendered,
+            total,
+        } => {
+            let selector = format!(
+                "details.diff-file-group[data-diff-scope=\"{}\"][data-diff-file=\"{}\"]",
+                crate::dom::escape_css_attr_value(&scope_id),
+                crate::dom::escape_css_attr_value(&path),
+            );
+            let Ok(Some(group)) = dom::document().query_selector(&selector) else {
+                PENDING_DIFF_EXPANDS.with(|expands| {
+                    expands.borrow_mut().remove(key);
+                });
+                return;
+            };
+            if let Ok(Some(pre)) = group.query_selector("pre.diff-file-lines") {
+                append_html_children(&pre, &chunk_html);
+            }
+            if let Ok(Some(note)) = group.query_selector(".diff-file-trunc span") {
+                note.set_text_content(Some(&format!("Rendering {rendered} of {total} lines…")));
+            }
+            schedule_expand_diff_chunk(key.to_owned());
+        }
+    }
+}
+
 pub(crate) fn show_all_diff_lines(scope_id: &str, path: &str) {
     if path.is_empty() {
         return;
@@ -613,13 +905,54 @@ pub(crate) fn show_all_diff_lines(scope_id: &str, path: &str) {
     let Ok(Some(group)) = dom::document().query_selector(&selector) else {
         return;
     };
-    let (full_html, _, _) = render_diff_file_lines_html(&raw, None);
+    let frame_key = format!("diff-expand:{key}");
+    dom::cancel_frame(&frame_key);
+    let generation = next_diff_generation(&format!("expand:{key}"));
+    let lines = compute_diff_numbered_lines(&raw);
+    let total = lines.len();
+    if total <= DIFF_EXPAND_CHUNK_LINES {
+        PENDING_DIFF_EXPANDS.with(|expands| {
+            expands.borrow_mut().remove(&key);
+        });
+        let full_html = render_diff_file_lines_range_html(&lines, 0, total);
+        if let Ok(Some(pre)) = group.query_selector("pre.diff-file-lines") {
+            let _ = pre.remove_attribute("data-diff-deferred");
+            pre.set_inner_html(&full_html);
+        }
+        if let Ok(Some(trunc)) = group.query_selector(".diff-file-trunc") {
+            trunc.remove();
+        }
+        return;
+    }
+    let first_html = render_diff_file_lines_range_html(&lines, 0, DIFF_EXPAND_CHUNK_LINES);
     if let Ok(Some(pre)) = group.query_selector("pre.diff-file-lines") {
-        pre.set_inner_html(&full_html);
+        let _ = pre.remove_attribute("data-diff-deferred");
+        pre.set_inner_html(&first_html);
     }
     if let Ok(Some(trunc)) = group.query_selector(".diff-file-trunc") {
-        trunc.remove();
+        trunc.set_text_content(None);
+        dom::add(
+            &trunc,
+            &dom::el(
+                "span",
+                "muted",
+                &format!("Rendering {DIFF_EXPAND_CHUNK_LINES} of {total} lines…"),
+            ),
+        );
     }
+    PENDING_DIFF_EXPANDS.with(|expands| {
+        expands.borrow_mut().insert(
+            key.clone(),
+            PendingExpandLines {
+                scope_id: scope_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+                lines,
+                offset: DIFF_EXPAND_CHUNK_LINES,
+            },
+        );
+    });
+    schedule_expand_diff_chunk(key);
 }
 
 fn flash_diff_copy_button(button: &web_sys::Element, label: &str, default_label: &'static str) {
@@ -700,12 +1033,120 @@ pub(crate) fn render_empty_diff_into(container_id: &str, message: &str) {
     let _ = el.set_attribute("data-diff-empty", "true");
 }
 
+fn schedule_diff_batch(scope_id: String) {
+    let frame_key = format!("diff-files:{scope_id}");
+    dom::schedule_frame(&frame_key, move || {
+        step_diff_batch(&scope_id, false);
+    });
+}
+
+fn flush_pending_diff_batches(scope_id: &str) {
+    if scope_id.is_empty() {
+        return;
+    }
+    dom::cancel_frame(&format!("diff-files:{scope_id}"));
+    step_diff_batch(scope_id, true);
+}
+
+fn step_diff_batch(scope_id: &str, flush_all: bool) {
+    let taken = PENDING_DIFF_BATCHES.with(|batches| {
+        let mut batches = batches.borrow_mut();
+        let pending = batches.get_mut(scope_id)?;
+        if !diff_generation_matches(&format!("files:{scope_id}"), pending.generation) {
+            batches.remove(scope_id);
+            return None;
+        }
+        let end = if flush_all {
+            pending.sections.len()
+        } else {
+            diff_next_chunk_end(
+                pending.next_idx,
+                pending.sections.len(),
+                DIFF_FILE_BATCH_SIZE,
+            )
+        };
+        let slice_start = pending.next_idx;
+        pending.next_idx = end;
+        let container_id = pending.container_id.clone();
+        let hash = pending.hash.clone();
+        let focused_file = pending.focused_file.clone();
+        let file_count = pending.file_count;
+        let sections: Vec<DiffFileSection> = pending.sections[slice_start..end].to_vec();
+        let more = end < pending.sections.len();
+        if !more {
+            batches.remove(scope_id);
+        }
+        Some((
+            container_id,
+            hash,
+            focused_file,
+            file_count,
+            slice_start,
+            sections,
+            more,
+        ))
+    });
+    let Some((container_id, hash, focused_file, file_count, slice_start, sections, more)) = taken
+    else {
+        return;
+    };
+    let Some(container) = dom::get(&container_id) else {
+        PENDING_DIFF_BATCHES.with(|batches| {
+            batches.borrow_mut().remove(scope_id);
+        });
+        return;
+    };
+    if container.get_attribute("data-diff-hash").as_deref() != Some(hash.as_str()) {
+        PENDING_DIFF_BATCHES.with(|batches| {
+            batches.borrow_mut().remove(scope_id);
+        });
+        return;
+    }
+    let Ok(Some(viewer)) = container.query_selector(".diff-viewer") else {
+        PENDING_DIFF_BATCHES.with(|batches| {
+            batches.borrow_mut().remove(scope_id);
+        });
+        return;
+    };
+    let (expanded, collapsed) = EXPANDED_DIFF_FILES.with(|set| {
+        (
+            set.borrow().clone(),
+            m::read(|s| s.diff_view.collapsed_files.clone()),
+        )
+    });
+    let scope_esc = files_map::escape_html(scope_id);
+    let ctx = DiffGroupContext {
+        scope_id,
+        scope_esc: &scope_esc,
+        file_count,
+        expanded: &expanded,
+        collapsed: &collapsed,
+        focused_file: &focused_file,
+    };
+    let mut batch_html = String::new();
+    for (offset, section) in sections.iter().enumerate() {
+        batch_html.push_str(&render_diff_file_group_html(
+            section,
+            slice_start + offset,
+            &ctx,
+        ));
+    }
+    append_html_children(&viewer, &batch_html);
+    if more {
+        schedule_diff_batch(scope_id.to_owned());
+    }
+}
+
 pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id: &str) {
     ensure_diff_toggle_listener();
     let Some(el) = dom::get(container_id) else {
         return;
     };
     if diff.trim().is_empty() {
+        dom::cancel_frame(&format!("diff-files:{scope_id}"));
+        PENDING_DIFF_BATCHES.with(|batches| {
+            batches.borrow_mut().remove(scope_id);
+        });
         el.set_text_content(None);
         let _ = el.remove_attribute("data-diff-hash");
         let _ = el.remove_attribute("data-diff-empty");
@@ -718,12 +1159,67 @@ pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id:
     if has_viewer && el.get_attribute("data-diff-hash").as_deref() == Some(hash.as_str()) {
         return;
     }
-    el.set_inner_html(&render_grouped_diff_html(diff, scope_id));
+    dom::cancel_frame(&format!("diff-files:{scope_id}"));
+    PENDING_DIFF_BATCHES.with(|batches| {
+        batches.borrow_mut().remove(scope_id);
+    });
+    let sections = parse_diff_files(diff);
+    if sections.len() <= DIFF_FILE_BATCH_SIZE {
+        let _ = next_diff_generation(&format!("files:{scope_id}"));
+        el.set_inner_html(&render_grouped_diff_html(diff, scope_id));
+        let _ = el.set_attribute("data-diff-hash", &hash);
+        let _ = el.remove_attribute("data-diff-empty");
+        return;
+    }
+    let generation = next_diff_generation(&format!("files:{scope_id}"));
+    let (expanded, collapsed) = EXPANDED_DIFF_FILES.with(|set| {
+        (
+            set.borrow().clone(),
+            m::read(|s| s.diff_view.collapsed_files.clone()),
+        )
+    });
+    let focused_file = m::read(|s| s.diff_view.focused_file.clone());
+    let total_adds: usize = sections.iter().map(|s| s.additions).sum();
+    let total_dels: usize = sections.iter().map(|s| s.deletions).sum();
+    let scope_esc = files_map::escape_html(scope_id);
+    cache_diff_full_files(scope_id, &sections);
+    let ctx = DiffGroupContext {
+        scope_id,
+        scope_esc: &scope_esc,
+        file_count: sections.len(),
+        expanded: &expanded,
+        collapsed: &collapsed,
+        focused_file: &focused_file,
+    };
+    let mut initial_html =
+        diff_viewer_header_html(&scope_esc, sections.len(), total_adds, total_dels);
+    for (idx, section) in sections.iter().take(DIFF_FILE_BATCH_SIZE).enumerate() {
+        initial_html.push_str(&render_diff_file_group_html(section, idx, &ctx));
+    }
+    initial_html.push_str("</div>");
+    el.set_inner_html(&initial_html);
     let _ = el.set_attribute("data-diff-hash", &hash);
     let _ = el.remove_attribute("data-diff-empty");
+    let file_count = sections.len();
+    PENDING_DIFF_BATCHES.with(|batches| {
+        batches.borrow_mut().insert(
+            scope_id.to_owned(),
+            PendingDiffBatch {
+                container_id: container_id.to_owned(),
+                hash,
+                generation,
+                focused_file,
+                file_count,
+                next_idx: DIFF_FILE_BATCH_SIZE,
+                sections,
+            },
+        );
+    });
+    schedule_diff_batch(scope_id.to_owned());
 }
 
 pub(crate) fn toggle_all_diff_groups(scope_id: &str, expand: bool) {
+    flush_pending_diff_batches(scope_id);
     let selector = format!(
         "details.diff-file-group[data-diff-scope=\"{}\"]",
         crate::dom::escape_css_attr_value(scope_id)
@@ -737,6 +1233,7 @@ pub(crate) fn toggle_all_diff_groups(scope_id: &str, expand: bool) {
         set_diff_file_open(scope_id, &path, expand);
         if expand {
             let _ = group.set_attribute("open", "");
+            hydrate_diff_file_group(group);
         } else {
             let _ = group.remove_attribute("open");
         }
@@ -747,6 +1244,7 @@ pub(crate) fn jump_to_diff_file(scope_id: &str, path: &str) {
     if path.is_empty() {
         return;
     }
+    flush_pending_diff_batches(scope_id);
     set_diff_file_open(scope_id, path, true);
     m::write(|s| {
         s.diff_view.focused_file = path.to_owned();
@@ -770,6 +1268,7 @@ pub(crate) fn jump_to_diff_file(scope_id: &str, path: &str) {
         if same_scope && same_path {
             dom::hide(&group, false);
             let _ = group.set_attribute("open", "");
+            hydrate_diff_file_group(&group);
             let _ = group.set_attribute("data-focused", "true");
             group.scroll_into_view();
             if let Ok(Some(summary)) = group.query_selector("summary") {

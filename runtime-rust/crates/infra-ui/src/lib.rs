@@ -74,6 +74,64 @@ pub(crate) mod test_support {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopDialogEscapeAction<'a> {
+    CloseCommandPalette,
+    CloseApprovalsDrawer,
+    CloseFileCard,
+    CloseGraphExplanation,
+    CloseDialog(&'a str),
+    DelegateToHandlersThenFallbackClose(&'a str),
+    DelegateToHandlers,
+}
+
+pub(crate) fn escape_action_for_top_dialog(top_dialog: Option<&str>) -> TopDialogEscapeAction<'_> {
+    match top_dialog {
+        Some("command-palette") => TopDialogEscapeAction::CloseCommandPalette,
+        Some("approvals-drawer") => TopDialogEscapeAction::CloseApprovalsDrawer,
+        Some("run-file-card") => TopDialogEscapeAction::CloseFileCard,
+        Some("graph-explanation") => TopDialogEscapeAction::CloseGraphExplanation,
+        Some(id @ ("graph-map" | "graph-link")) => {
+            TopDialogEscapeAction::DelegateToHandlersThenFallbackClose(id)
+        }
+        Some(id) => TopDialogEscapeAction::CloseDialog(id),
+        None => TopDialogEscapeAction::DelegateToHandlers,
+    }
+}
+
+fn close_top_dialog_action(
+    action: TopDialogEscapeAction<'_>,
+    key: &web_sys::KeyboardEvent,
+) -> bool {
+    match action {
+        TopDialogEscapeAction::CloseCommandPalette => {
+            commands::close_palette();
+            true
+        }
+        TopDialogEscapeAction::CloseApprovalsDrawer => {
+            run::close_approvals_drawer();
+            true
+        }
+        TopDialogEscapeAction::CloseFileCard => {
+            run::dismiss_file_card(true);
+            activity::dismiss_file_card(true);
+            true
+        }
+        TopDialogEscapeAction::CloseGraphExplanation => {
+            if !graph_explanation::key(key) {
+                dom::dialog("graph-explanation", false);
+            }
+            true
+        }
+        TopDialogEscapeAction::CloseDialog(id) => {
+            dom::dialog(id, false);
+            true
+        }
+        TopDialogEscapeAction::DelegateToHandlersThenFallbackClose(_)
+        | TopDialogEscapeAction::DelegateToHandlers => false,
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     #[cfg(feature = "eval-viewer")]
@@ -204,9 +262,26 @@ pub fn start() -> Result<(), JsValue> {
                     });
                     return;
                 }
-                if commands::palette_key(key)
-                    || run::handle_permission_shortcut(key)
-                    || graph_explanation::key(key)
+                if commands::palette_key(key) || run::handle_permission_shortcut(key) {
+                    event.prevent_default();
+                    return;
+                }
+                let is_escape = key.key() == "Escape";
+                let top_dialog = if is_escape {
+                    dom::top_open_dialog_id()
+                } else {
+                    None
+                };
+                if is_escape
+                    && close_top_dialog_action(
+                        escape_action_for_top_dialog(top_dialog.as_deref()),
+                        key,
+                    )
+                {
+                    event.prevent_default();
+                    return;
+                }
+                if graph_explanation::key(key)
                     || commands::key(key)
                     || knowledge::key_event(key)
                     || graph_map::key(key)
@@ -216,17 +291,11 @@ pub fn start() -> Result<(), JsValue> {
                     event.prevent_default();
                     return;
                 }
-                if key.key() == "Escape" {
-                    if let Some(top_dialog) = dom::top_open_dialog_id() {
-                        match top_dialog.as_str() {
-                            "command-palette" => commands::close_palette(),
-                            "approvals-drawer" => run::close_approvals_drawer(),
-                            "run-file-card" => {
-                                run::dismiss_file_card(true);
-                                activity::dismiss_file_card(true);
-                            }
-                            id => dom::dialog(id, false),
-                        }
+                if is_escape {
+                    if let TopDialogEscapeAction::DelegateToHandlersThenFallbackClose(id) =
+                        escape_action_for_top_dialog(top_dialog.as_deref())
+                    {
+                        dom::dialog(id, false);
                         event.prevent_default();
                         return;
                     }
@@ -569,4 +638,45 @@ async fn dispatch(
         return;
     }
     systems::event(kind, id, action, &payload, &value, checked).await;
+}
+
+#[cfg(test)]
+mod escape_precedence_tests {
+    use super::*;
+
+    #[test]
+    fn top_modal_overlays_close_before_underlying_graph_handlers() {
+        assert_eq!(
+            escape_action_for_top_dialog(Some("approvals-drawer")),
+            TopDialogEscapeAction::CloseApprovalsDrawer
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("command-palette")),
+            TopDialogEscapeAction::CloseCommandPalette
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("run-file-card")),
+            TopDialogEscapeAction::CloseFileCard
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("graph-explanation")),
+            TopDialogEscapeAction::CloseGraphExplanation
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("folder-picker")),
+            TopDialogEscapeAction::CloseDialog("folder-picker")
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("graph-map")),
+            TopDialogEscapeAction::DelegateToHandlersThenFallbackClose("graph-map")
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(Some("graph-link")),
+            TopDialogEscapeAction::DelegateToHandlersThenFallbackClose("graph-link")
+        );
+        assert_eq!(
+            escape_action_for_top_dialog(None),
+            TopDialogEscapeAction::DelegateToHandlers
+        );
+    }
 }

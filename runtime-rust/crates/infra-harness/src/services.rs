@@ -366,10 +366,59 @@ impl NativeServices {
             "latest_event_id": page.latest_event_id,
         })))
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     fn emit_domain_mutation_sse(
         &self,
         operation: &str,
         params: &Value,
+        body: &Value,
+        payload: &Payload,
+    ) {
+        self.emit_domain_mutation_sse_with_query(operation, params, &Value::Null, body, payload);
+    }
+
+    fn resolve_project_id(&self, candidates: &[Option<&Value>]) -> Option<String> {
+        candidates
+            .iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .map(str::to_owned)
+            .next()
+    }
+
+    fn resolve_project_id_for_config_path(&self, config_path: &str) -> Option<String> {
+        let trimmed = config_path.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let projects = self.store.projects().ok()?;
+        projects
+            .into_iter()
+            .filter_map(|project| {
+                let id = project["id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())?
+                    .to_owned();
+                let root = project["path"]
+                    .as_str()
+                    .or_else(|| project["root"].as_str())
+                    .map(|s| s.trim().trim_end_matches('/'))
+                    .filter(|s| !s.is_empty())?;
+                let matches = trimmed == root
+                    || (trimmed.starts_with(root)
+                        && trimmed.as_bytes().get(root.len()).copied() == Some(b'/'));
+                matches.then_some((root.len(), id))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, id)| id)
+    }
+
+    fn emit_domain_mutation_sse_with_query(
+        &self,
+        operation: &str,
+        params: &Value,
+        query: &Value,
         body: &Value,
         payload: &Payload,
     ) {
@@ -571,15 +620,14 @@ impl NativeServices {
                 if body["action"].as_str() == Some("changes") {
                     return;
                 }
-                let project_id = val["project_id"]
-                    .as_str()
-                    .or_else(|| params["project_id"].as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("")
-                    .to_owned();
-                if project_id.is_empty() {
+                let Some(project_id) = self.resolve_project_id(&[
+                    val.get("project_id"),
+                    params.get("project_id"),
+                    query.get("project_id"),
+                    body.get("project_id"),
+                ]) else {
                     return;
-                }
+                };
                 let state = val["state"]
                     .as_str()
                     .or_else(|| body["action"].as_str())
@@ -608,12 +656,28 @@ impl NativeServices {
                     .publish_event("graph_status", None, Some(project_id), ev);
             }
             "system_graph.act" | "system_graph.service_act" => {
-                let project_id = val["project_id"]
-                    .as_str()
-                    .or_else(|| params["project_id"].as_str())
-                    .or_else(|| body["project_id"].as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
+                let config_val = val
+                    .get("config_path")
+                    .or_else(|| body.get("config_path"))
+                    .or_else(|| query.get("config_path"))
+                    .cloned()
+                    .unwrap_or_else(|| body["config_path"].clone());
+                let project_id = self
+                    .resolve_project_id(&[
+                        val.get("project_id"),
+                        val.get("system").and_then(|sys| sys.get("project_id")),
+                        params.get("project_id"),
+                        query.get("project_id"),
+                        body.get("project_id"),
+                    ])
+                    .or_else(|| {
+                        config_val
+                            .as_str()
+                            .and_then(|cp| self.resolve_project_id_for_config_path(cp))
+                    });
+                let Some(project_id) = project_id else {
+                    return;
+                };
                 let action = body["action"].as_str().unwrap_or("updated");
                 let service = val["service"]
                     .as_str()
@@ -623,7 +687,7 @@ impl NativeServices {
                 let mut ev = json!({
                     "project_id": project_id,
                     "service": service,
-                    "config_path": val.get("config_path").cloned().unwrap_or_else(|| body["config_path"].clone()),
+                    "config_path": config_val,
                     "state": state,
                     "action": action,
                     "reason": action,
@@ -632,7 +696,7 @@ impl NativeServices {
                     ev["ir_revision"] = json!(rev);
                 }
                 self.store
-                    .publish_event("system_graph_status", None, project_id, ev);
+                    .publish_event("system_graph_status", None, Some(project_id), ev);
             }
             "omnigraph.setup"
             | "omnigraph.branch_act"
@@ -640,12 +704,12 @@ impl NativeServices {
             | "omnigraph.import"
             | "omnigraph.sync_knowledge"
             | "omnigraph.promote" => {
-                let project_id = val["project_id"]
-                    .as_str()
-                    .or_else(|| params["project_id"].as_str())
-                    .or_else(|| body["project_id"].as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
+                let project_id = self.resolve_project_id(&[
+                    val.get("project_id"),
+                    params.get("project_id"),
+                    query.get("project_id"),
+                    body.get("project_id"),
+                ]);
                 let branch = val["branch"]
                     .as_str()
                     .or_else(|| body["branch"].as_str())
@@ -1490,7 +1554,7 @@ impl Services for NativeServices {
                     .get("graph")
                     .is_some_and(|domain| domain.emits_graph_status_events());
             if !bridged_graph_act {
-                self.emit_domain_mutation_sse(operation, params, body, &payload);
+                self.emit_domain_mutation_sse_with_query(operation, params, query, body, &payload);
             }
             Ok(payload)
         })
@@ -2831,7 +2895,32 @@ mod tests {
         let f2 = rx.recv().await.unwrap();
         assert_eq!(f2.event, "system_graph_status");
         assert_eq!(f2.project_id.as_deref(), Some("p1"));
+        assert_eq!(f2.data["project_id"], "p1");
         assert_eq!(f2.data["action"], "enable");
+
+        // Empty `val["project_id"]` must still fall back to `query["project_id"]` so
+        // `system_graph_status` never drops `project_id` on `?project_id=...` routes.
+        services.emit_domain_mutation_sse_with_query(
+            "system_graph.service_act",
+            &json!({}),
+            &json!({"project_id": "p-query"}),
+            &json!({"action": "enable", "service": "api"}),
+            &Payload::Json(json!({"project_id": "", "state": "ready"})),
+        );
+        let f2_query = rx.recv().await.unwrap();
+        assert_eq!(f2_query.event, "system_graph_status");
+        assert_eq!(f2_query.project_id.as_deref(), Some("p-query"));
+        assert_eq!(f2_query.data["project_id"], "p-query");
+
+        // Without any resolvable `project_id`, `system_graph_status` is suppressed rather than emitted with `null`.
+        services.emit_domain_mutation_sse_with_query(
+            "system_graph.act",
+            &json!({}),
+            &json!({}),
+            &json!({"action": "enable"}),
+            &Payload::Json(json!({"state": "ready"})),
+        );
+        assert!(rx.try_recv().is_err());
 
         services.emit_domain_mutation_sse(
             "omnigraph.publish",

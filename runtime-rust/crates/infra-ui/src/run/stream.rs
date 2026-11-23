@@ -26,6 +26,32 @@ thread_local! {
 
 const TOOL_OUTPUT_MAX_CACHED_KEYS: usize = 256;
 const TOOL_OUTPUT_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const LIVE_STICKY_DOM_BLOCK_CAP: usize = 200;
+const SCROLLED_UP_DOM_BLOCK_CAP: usize = 1_200;
+const FOLD_CHECKPOINT_STRIDE: usize = 64;
+
+#[derive(Default)]
+pub(crate) struct FoldCache {
+    events: Vec<V>,
+    resolved_calls: Vec<Option<String>>,
+    checkpoints: Vec<(V, Option<V>)>,
+    last_run: V,
+    last_before: Option<V>,
+}
+
+impl FoldCache {
+    pub(crate) fn clear(&mut self) {
+        self.events.clear();
+        self.resolved_calls.clear();
+        self.checkpoints.clear();
+        self.last_run = V::Null;
+        self.last_before = None;
+    }
+}
+
+thread_local! {
+    static FOLD_CACHE: RefCell<FoldCache> = RefCell::new(FoldCache::default());
+}
 
 /// Clears DOM-bound stream caches while retaining `TOOL_FULL_OUTPUTS` across in-session replays.
 fn clear_stream_dom_caches() {
@@ -34,16 +60,20 @@ fn clear_stream_dom_caches() {
     CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
     RENDERED_EVENT_IDS.with(|ids| ids.borrow_mut().clear());
     LAST_MAX_RENDERED_ID.with(|max| max.set(None));
-    TOOL_FULL_OUTPUTS.with(|cache| {
+    FOLD_CACHE.with(|cache| cache.borrow_mut().clear());
+    let evicted = TOOL_FULL_OUTPUTS.with(|cache| {
         TOOL_OUTPUT_ORDER.with(|order| {
             prune_tool_outputs_with_budget(
                 &mut cache.borrow_mut(),
                 &mut order.borrow_mut(),
                 TOOL_OUTPUT_MAX_CACHED_KEYS,
                 TOOL_OUTPUT_MAX_TOTAL_BYTES,
-            );
-        });
+            )
+        })
     });
+    if cfg!(target_arch = "wasm32") && !evicted.is_empty() {
+        mark_evicted_tool_output_blocks(&evicted);
+    }
 }
 
 fn touch_tool_output_key(order: &mut VecDeque<String>, key: &str) {
@@ -58,7 +88,8 @@ pub(crate) fn prune_tool_outputs_with_budget(
     order: &mut VecDeque<String>,
     max_entries: usize,
     max_total_bytes: usize,
-) {
+) -> Vec<String> {
+    let mut evicted = Vec::new();
     let mut total_bytes: usize = map.values().map(String::len).sum();
     while map.len() > max_entries || (total_bytes > max_total_bytes && map.len() > 1) {
         let evict_key = loop {
@@ -73,8 +104,10 @@ pub(crate) fn prune_tool_outputs_with_budget(
         };
         if let Some(removed) = map.remove(&key) {
             total_bytes = total_bytes.saturating_sub(removed.len());
+            evicted.push(key);
         }
     }
+    evicted
 }
 
 #[cfg(test)]
@@ -476,7 +509,7 @@ fn find_tool_block_by_call_id(
 }
 
 fn store_tool_output(key: &str, incoming: &str, reset: bool) -> String {
-    TOOL_FULL_OUTPUTS.with(|map| {
+    let (bounded, evicted) = TOOL_FULL_OUTPUTS.with(|map| {
         let mut map = map.borrow_mut();
         let combined = if reset {
             incoming.to_owned()
@@ -504,7 +537,7 @@ fn store_tool_output(key: &str, incoming: &str, reset: bool) -> String {
             combined
         };
         map.insert(key.to_owned(), bounded.clone());
-        TOOL_OUTPUT_ORDER.with(|order| {
+        let evicted = TOOL_OUTPUT_ORDER.with(|order| {
             let mut order = order.borrow_mut();
             touch_tool_output_key(&mut order, key);
             prune_tool_outputs_with_budget(
@@ -512,10 +545,44 @@ fn store_tool_output(key: &str, incoming: &str, reset: bool) -> String {
                 &mut order,
                 TOOL_OUTPUT_MAX_CACHED_KEYS,
                 TOOL_OUTPUT_MAX_TOTAL_BYTES,
-            );
+            )
         });
-        bounded
-    })
+        (bounded, evicted)
+    });
+    if cfg!(target_arch = "wasm32") && !evicted.is_empty() {
+        mark_evicted_tool_output_blocks(&evicted);
+    }
+    bounded
+}
+
+pub(crate) fn evicted_tool_output_label() -> &'static str {
+    "Evicted from memory — reload earlier"
+}
+
+fn mark_tool_output_evicted(block: &web_sys::Element) {
+    let _ = block.set_attribute("data-output-expanded", "false");
+    let _ = block.set_attribute("data-output-evicted", "true");
+    let Ok(Some(bar)) = block.query_selector(".tool-output-trunc") else {
+        return;
+    };
+    bar.set_text_content(None);
+    dom::add(&bar, &dom::el("span", "muted", evicted_tool_output_label()));
+    let btn = dom::el("button", "button compact", evicted_tool_output_label());
+    let _ = btn.set_attribute("type", "button");
+    let _ = btn.set_attribute("disabled", "");
+    dom::add(&bar, &btn);
+}
+
+fn mark_evicted_tool_output_blocks(evicted_keys: &[String]) {
+    for key in evicted_keys {
+        let selector = format!(
+            "details.conversation-tool[data-output-key=\"{}\"]",
+            crate::dom::escape_css_attr_value(key)
+        );
+        if let Ok(Some(block)) = dom::document().query_selector(&selector) {
+            mark_tool_output_evicted(&block);
+        }
+    }
 }
 
 fn apply_tool_output_dom(block: &web_sys::Element, output_key: &str, full_text: &str) {
@@ -577,15 +644,17 @@ pub(crate) fn toggle_tool_output_expand(output_key: &str) {
     let Ok(Some(block)) = dom::document().query_selector(&selector) else {
         return;
     };
+    let full_text = TOOL_FULL_OUTPUTS.with(|map| map.borrow().get(output_key).cloned());
+    let Some(full) = full_text else {
+        mark_tool_output_evicted(&block);
+        return;
+    };
     let expanded = block.get_attribute("data-output-expanded").as_deref() == Some("true");
     let _ = block.set_attribute(
         "data-output-expanded",
         if expanded { "false" } else { "true" },
     );
-    let full_text = TOOL_FULL_OUTPUTS.with(|map| map.borrow().get(output_key).cloned());
-    if let Some(full) = full_text {
-        apply_tool_output_dom(&block, output_key, &full);
-    }
+    apply_tool_output_dom(&block, output_key, &full);
 }
 
 fn format_tool_summary(v: &V) -> String {
@@ -672,16 +741,52 @@ pub(crate) fn jump_to_latest() {
     update_scroll_ui();
 }
 
+pub(crate) fn compute_client_hidden_prefix(
+    events: &[V],
+    limit: usize,
+    first_rendered_event_id: Option<u64>,
+) -> usize {
+    let limit_start = events.len().saturating_sub(limit);
+    if let Some(first_id) = first_rendered_event_id {
+        if let Some(pos) = events
+            .iter()
+            .position(|ev| stream_event_id(ev) == Some(first_id))
+        {
+            return pos;
+        }
+    }
+    limit_start
+}
+
+fn earliest_rendered_dom_event_id() -> Option<u64> {
+    let container = dom::get("events")?;
+    for el in dom::children(&container) {
+        if let Some(id) = el
+            .get_attribute("data-first-event-id")
+            .or_else(|| el.get_attribute("data-event-id"))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
 pub(crate) fn sync_load_earlier_control() {
-    let (total, limit, has_older, loading) = m::read(|s| {
+    let (events, limit, has_older, loading) = m::read(|s| {
         (
-            s.events.len(),
+            s.events.clone(),
             s.stream.visible_limit,
             s.stream.has_older,
             s.stream.loading_older,
         )
     });
-    let client_hidden = total.saturating_sub(limit);
+    let first_rendered_id = if cfg!(target_arch = "wasm32") {
+        earliest_rendered_dom_event_id()
+    } else {
+        None
+    };
+    let client_hidden = compute_client_hidden_prefix(&events, limit, first_rendered_id);
     let show = has_older || client_hidden > 0;
     dom::hidden("events-load-earlier-wrap", !show);
     dom::disabled("events-load-earlier", loading);
@@ -875,6 +980,120 @@ fn record_rendered_event_id(v: &V) {
     }
 }
 
+pub(crate) fn dom_block_cap(sticky: bool) -> usize {
+    if sticky {
+        LIVE_STICKY_DOM_BLOCK_CAP
+    } else {
+        SCROLLED_UP_DOM_BLOCK_CAP
+    }
+}
+
+pub(crate) fn plan_top_dom_eviction(can_evict: &[bool], cap: usize) -> Vec<usize> {
+    if can_evict.len() <= cap {
+        return Vec::new();
+    }
+    let excess = can_evict.len() - cap;
+    can_evict
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &evictable)| evictable.then_some(idx))
+        .take(excess)
+        .collect()
+}
+
+fn evict_excess_top_dom_nodes(
+    container: &web_sys::Element,
+    cap: usize,
+    conv: Option<&web_sys::Element>,
+    was_sticky: bool,
+) {
+    let children = dom::children(container);
+    if children.len() <= cap {
+        return;
+    }
+    let can_evict: Vec<bool> = children
+        .iter()
+        .map(|el| {
+            !(el.class_list().contains("conversation-permission")
+                && el.get_attribute("data-state").as_deref() == Some("pending"))
+        })
+        .collect();
+    let indices = plan_top_dom_eviction(&can_evict, cap);
+    if indices.is_empty() {
+        return;
+    }
+    let prev_metrics = (!was_sticky)
+        .then(|| conv.map(|c| (c.scroll_height(), c.scroll_top())))
+        .flatten();
+    let mut evicted_ranges: Vec<(u64, u64)> = Vec::new();
+    let mut evicted_stream_keys: Vec<String> = Vec::new();
+    let mut evicted_call_ids: Vec<String> = Vec::new();
+    for idx in indices {
+        let el = &children[idx];
+        if let Some(last_id) = el
+            .get_attribute("data-event-id")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            let first_id = el
+                .get_attribute("data-first-event-id")
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(last_id);
+            evicted_ranges.push((first_id.min(last_id), first_id.max(last_id)));
+        }
+        if let Some(sk) = el
+            .get_attribute("data-stream-key")
+            .filter(|s| !s.is_empty())
+        {
+            evicted_stream_keys.push(sk);
+        }
+        if let Some(cid) = el.get_attribute("data-call-id").filter(|s| !s.is_empty()) {
+            evicted_call_ids.push(cid);
+        }
+        el.remove();
+    }
+    if !evicted_stream_keys.is_empty() {
+        STREAM_MD_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            for key in &evicted_stream_keys {
+                cache.remove(key);
+            }
+        });
+        STREAM_RAW_TEXT.with(|raw| {
+            let mut raw = raw.borrow_mut();
+            for key in &evicted_stream_keys {
+                raw.remove(key);
+            }
+        });
+    }
+    if !evicted_call_ids.is_empty() {
+        CALL_BLOCK_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            for cid in &evicted_call_ids {
+                cache.remove(cid);
+            }
+        });
+    }
+    if !evicted_ranges.is_empty() {
+        let new_max = RENDERED_EVENT_IDS.with(|ids| {
+            let mut ids = ids.borrow_mut();
+            ids.retain(|id| {
+                !evicted_ranges
+                    .iter()
+                    .any(|(lo, hi)| (lo..=hi).contains(&id))
+            });
+            ids.iter().copied().max()
+        });
+        LAST_MAX_RENDERED_ID.with(|cell| cell.set(new_max));
+    }
+    if let (Some((prev_h, prev_top)), Some(c)) = (prev_metrics, conv) {
+        let new_h = c.scroll_height();
+        let removed_h = prev_h - new_h;
+        if removed_h > 0 {
+            c.set_scroll_top((prev_top - removed_h).max(0));
+        }
+    }
+}
+
 pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
     record_rendered_event_id(v);
     let Some(events_el) = dom::get("events") else {
@@ -889,7 +1108,14 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
     if !render_event_into(&events_el, v, resolved_call, true) {
         return;
     }
-    if let Some(conv) = dom::get("conversation") {
+    let conv = dom::get("conversation");
+    evict_excess_top_dom_nodes(
+        &events_el,
+        dom_block_cap(was_sticky),
+        conv.as_ref(),
+        was_sticky,
+    );
+    if let Some(conv) = conv {
         if was_sticky {
             conv.set_scroll_top(conv.scroll_height());
             m::write(|s| {
@@ -1203,15 +1429,12 @@ fn prepend_events_range(start: usize, end: usize) {
     if start >= end {
         return;
     }
+    let (_, _, resolved_calls) = fold_run_events_cached(&events);
     let staging = dom::el("div", "", "");
-    let mut scan_run = initial();
-    for (idx, ev) in events.iter().enumerate().take(end) {
-        let (next_run, _, resolved_call) = advance_with_call(scan_run, ev);
-        scan_run = next_run;
-        if idx >= start {
-            record_rendered_event_id(ev);
-            render_event_into(&staging, ev, resolved_call.as_deref(), false);
-        }
+    for (idx, ev) in events.iter().enumerate().take(end).skip(start) {
+        let resolved_call = resolved_calls.get(idx).and_then(|c| c.as_deref());
+        record_rendered_event_id(ev);
+        render_event_into(&staging, ev, resolved_call, false);
     }
     let anchor = events_el.first_child();
     while let Some(node) = staging.first_element_child() {
@@ -1220,20 +1443,69 @@ fn prepend_events_range(start: usize, end: usize) {
     }
 }
 
-/// Folds `events` locally into `(run, run_before, resolved_calls)` without per-event global store writes.
-pub(crate) fn fold_run_events(events: &[V]) -> (V, Option<V>, Vec<Option<String>>) {
-    let mut run = V::Null;
-    let mut before = None;
-    let mut resolved_calls = Vec::with_capacity(events.len());
-    for ev in events {
+pub(crate) fn fold_run_events_with_cache(
+    cache: &mut FoldCache,
+    events: &[V],
+) -> (V, Option<V>, Vec<Option<String>>) {
+    if events.is_empty() {
+        cache.clear();
+        return (V::Null, None, Vec::new());
+    }
+    let common = cache
+        .events
+        .iter()
+        .zip(events.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if common == events.len() && cache.events.len() == events.len() {
+        return (
+            cache.last_run.clone(),
+            cache.last_before.clone(),
+            cache.resolved_calls.clone(),
+        );
+    }
+    let (resume_idx, mut run, mut before) = if common == cache.events.len() {
+        (common, cache.last_run.clone(), cache.last_before.clone())
+    } else {
+        let cp_count = common / FOLD_CHECKPOINT_STRIDE;
+        let idx = cp_count * FOLD_CHECKPOINT_STRIDE;
+        let state = if cp_count > 0 {
+            cache.checkpoints[cp_count - 1].clone()
+        } else {
+            (V::Null, None)
+        };
+        cache.events.truncate(idx);
+        cache.resolved_calls.truncate(idx);
+        cache.checkpoints.truncate(cp_count);
+        (idx, state.0, state.1)
+    };
+    for (offset, ev) in events[resume_idx..].iter().enumerate() {
+        let idx = resume_idx + offset;
         let (next_run, replaced, resolved_call) = advance_with_call(run, ev);
         if let Some(replaced) = replaced {
             before = Some(replaced);
         }
         run = next_run;
-        resolved_calls.push(resolved_call);
+        cache.events.push(ev.clone());
+        cache.resolved_calls.push(resolved_call);
+        if (idx + 1) % FOLD_CHECKPOINT_STRIDE == 0 {
+            cache.checkpoints.push((run.clone(), before.clone()));
+        }
     }
-    (run, before, resolved_calls)
+    cache.last_run = run.clone();
+    cache.last_before = before.clone();
+    (run, before, cache.resolved_calls.clone())
+}
+
+fn fold_run_events_cached(events: &[V]) -> (V, Option<V>, Vec<Option<String>>) {
+    FOLD_CACHE.with(|cache| fold_run_events_with_cache(&mut cache.borrow_mut(), events))
+}
+
+/// Folds `events` locally into `(run, run_before, resolved_calls)` without per-event global store writes.
+#[allow(dead_code)]
+pub(crate) fn fold_run_events(events: &[V]) -> (V, Option<V>, Vec<Option<String>>) {
+    let mut cache = FoldCache::default();
+    fold_run_events_with_cache(&mut cache, events)
 }
 
 #[derive(Default)]
@@ -1317,11 +1589,13 @@ fn restore_stream_replay_ui_state(container: &web_sys::Element, state: &StreamRe
                     let _ = el.set_attribute("open", "");
                 }
                 if state.expanded_outputs.contains(&key) {
-                    let _ = el.set_attribute("data-output-expanded", "true");
                     if let Some(full) =
                         TOOL_FULL_OUTPUTS.with(|map| map.borrow().get(&key).cloned())
                     {
+                        let _ = el.set_attribute("data-output-expanded", "true");
                         apply_tool_output_dom(&el, &key, &full);
+                    } else {
+                        mark_tool_output_evicted(&el);
                     }
                 }
             }
@@ -1386,11 +1660,22 @@ pub(crate) enum ReplayPlan {
     },
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn plan_stream_replay(
     blocks: &[RenderedBlockMeta],
     rendered_ids: &BTreeSet<u64>,
     max_rendered_id: Option<u64>,
     visible_events: &[V],
+) -> ReplayPlan {
+    plan_stream_replay_with_calls(blocks, rendered_ids, max_rendered_id, visible_events, &[])
+}
+
+pub(crate) fn plan_stream_replay_with_calls(
+    blocks: &[RenderedBlockMeta],
+    rendered_ids: &BTreeSet<u64>,
+    max_rendered_id: Option<u64>,
+    visible_events: &[V],
+    resolved_calls: &[Option<String>],
 ) -> ReplayPlan {
     let count_bottom_new = || -> usize {
         if let Some(max_id) = max_rendered_id {
@@ -1424,7 +1709,8 @@ pub(crate) fn plan_stream_replay(
         }
         let kind = m::text(ev, "kind");
         if kind == "tool" {
-            let call_id = conversation_event_call_id(ev, None);
+            let resolved = resolved_calls.get(idx).and_then(|c| c.as_deref());
+            let call_id = conversation_event_call_id(ev, resolved);
             if !call_id.is_empty() {
                 if let Some(block_idx) = blocks.iter().position(|b| b.call_id == call_id) {
                     ops.push(IncrementalOp::UpdateTool {
@@ -1475,27 +1761,55 @@ pub(crate) fn plan_stream_replay(
     }
 }
 
+pub(crate) fn extract_rendered_block_metas<'a>(
+    entries: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>, Option<&'a str>)>,
+) -> Vec<(usize, RenderedBlockMeta)> {
+    let mut out = Vec::new();
+    for (idx, (event_id_attr, first_id_attr, call_id_attr)) in entries.into_iter().enumerate() {
+        let Some(last_id) = event_id_attr.and_then(|s| s.trim().parse::<u64>().ok()) else {
+            continue;
+        };
+        let first_id = first_id_attr
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(last_id);
+        let call_id = call_id_attr.unwrap_or_default().to_owned();
+        out.push((
+            idx,
+            RenderedBlockMeta {
+                first_id,
+                last_id,
+                call_id,
+            },
+        ));
+    }
+    out
+}
+
 fn read_rendered_blocks(
     container: &web_sys::Element,
 ) -> Option<(Vec<web_sys::Element>, Vec<RenderedBlockMeta>)> {
     let dom_nodes = dom::children(container);
-    let mut metas = Vec::with_capacity(dom_nodes.len());
-    for el in &dom_nodes {
-        let last_id = el
-            .get_attribute("data-event-id")
-            .and_then(|s| s.trim().parse::<u64>().ok())?;
-        let first_id = el
-            .get_attribute("data-first-event-id")
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(last_id);
-        let call_id = el.get_attribute("data-call-id").unwrap_or_default();
-        metas.push(RenderedBlockMeta {
-            first_id,
-            last_id,
-            call_id,
-        });
-    }
-    Some((dom_nodes, metas))
+    let attrs: Vec<(Option<String>, Option<String>, Option<String>)> = dom_nodes
+        .iter()
+        .map(|el| {
+            (
+                el.get_attribute("data-event-id"),
+                el.get_attribute("data-first-event-id"),
+                el.get_attribute("data-call-id"),
+            )
+        })
+        .collect();
+    // Skip permission / status cards lacking numeric `data-event-id` so `#events` stays incremental.
+    let extracted =
+        extract_rendered_block_metas(attrs.iter().map(|(event_id, first_id, call_id)| {
+            (event_id.as_deref(), first_id.as_deref(), call_id.as_deref())
+        }));
+    let tracked_nodes = extracted
+        .iter()
+        .map(|(idx, _)| dom_nodes[*idx].clone())
+        .collect();
+    let metas = extracted.into_iter().map(|(_, meta)| meta).collect();
+    Some((tracked_nodes, metas))
 }
 
 fn update_existing_tool_block(block: &web_sys::Element, v: &V, resolved_call: Option<&str>) {
@@ -1552,7 +1866,7 @@ pub(crate) fn replay_visible_stream() {
 
     let (events, limit) = m::read(|s| (s.events.clone(), s.stream.visible_limit));
     let start = events.len().saturating_sub(limit);
-    let (next_run, next_before, resolved_calls) = fold_run_events(&events);
+    let (next_run, next_before, resolved_calls) = fold_run_events_cached(&events);
     if events.is_empty() {
         m::take("run");
         m::take("run-before");
@@ -1566,15 +1880,28 @@ pub(crate) fn replay_visible_stream() {
     }
 
     let visible_events = &events[start..];
+    let visible_resolved_calls = &resolved_calls[start..];
     let dom_snapshot = events_el.as_ref().and_then(read_rendered_blocks);
     let plan = match &dom_snapshot {
         Some((_, metas)) => RENDERED_EVENT_IDS.with(|ids| {
             let max_id = LAST_MAX_RENDERED_ID.with(Cell::get);
-            plan_stream_replay(metas, &ids.borrow(), max_id, visible_events)
+            plan_stream_replay_with_calls(
+                metas,
+                &ids.borrow(),
+                max_id,
+                visible_events,
+                visible_resolved_calls,
+            )
         }),
         None => RENDERED_EVENT_IDS.with(|ids| {
             let max_id = LAST_MAX_RENDERED_ID.with(Cell::get);
-            plan_stream_replay(&[], &ids.borrow(), max_id, visible_events)
+            plan_stream_replay_with_calls(
+                &[],
+                &ids.borrow(),
+                max_id,
+                visible_events,
+                visible_resolved_calls,
+            )
         }),
     };
 
@@ -1634,7 +1961,14 @@ pub(crate) fn replay_visible_stream() {
             }
         }
         if rendered_any {
-            if let Some(conv) = dom::get("conversation") {
+            let conv = dom::get("conversation");
+            evict_excess_top_dom_nodes(
+                container,
+                dom_block_cap(was_sticky),
+                conv.as_ref(),
+                was_sticky,
+            );
+            if let Some(conv) = conv {
                 if was_sticky {
                     conv.set_scroll_top(conv.scroll_height());
                     m::write(|s| {
@@ -1693,6 +2027,12 @@ pub(crate) fn replay_visible_stream() {
     }
     if let Some(ref container) = events_el {
         restore_stream_replay_ui_state(container, &preserved);
+        evict_excess_top_dom_nodes(
+            container,
+            dom_block_cap(was_sticky),
+            dom::get("conversation").as_ref(),
+            was_sticky,
+        );
     }
     if rendered_any {
         if let Some(conv) = dom::get("conversation") {
@@ -1719,12 +2059,12 @@ pub(crate) fn replay_visible_stream() {
 }
 
 pub(crate) async fn load_earlier_events() {
-    let (sid, has_older, oldest_id, total, limit, loading) = m::read(|s| {
+    let (sid, has_older, oldest_id, events, limit, loading) = m::read(|s| {
         (
             s.sid.clone(),
             s.stream.has_older,
             s.stream.oldest_event_id,
-            s.events.len(),
+            s.events.clone(),
             s.stream.visible_limit,
             s.stream.loading_older,
         )
@@ -1732,15 +2072,20 @@ pub(crate) async fn load_earlier_events() {
     if loading || sid.is_empty() {
         return;
     }
+    let total = events.len();
     let prev_metrics = dom::get("conversation").map(|c| (c.scroll_height(), c.scroll_top()));
-    let client_hidden = total.saturating_sub(limit);
+    let first_rendered_id = if cfg!(target_arch = "wasm32") {
+        earliest_rendered_dom_event_id()
+    } else {
+        None
+    };
+    let client_hidden = compute_client_hidden_prefix(&events, limit, first_rendered_id);
     if client_hidden > 0 {
-        let old_start = total.saturating_sub(limit);
-        let new_limit = m::write(|s| {
-            s.stream.visible_limit = s.stream.visible_limit.saturating_add(120);
-            s.stream.visible_limit
+        let old_start = client_hidden;
+        let new_start = old_start.saturating_sub(120);
+        m::write(|s| {
+            s.stream.visible_limit = s.stream.visible_limit.max(total.saturating_sub(new_start));
         });
-        let new_start = total.saturating_sub(new_limit);
         prepend_events_range(new_start, old_start);
         sync_load_earlier_control();
         if let (Some((prev_h, prev_top)), Some(conv)) = (prev_metrics, dom::get("conversation")) {
@@ -1944,5 +2289,115 @@ mod tests {
             plan_stream_replay(&coalesced_blocks, &coalesced_ids, Some(12), &visible_split),
             ReplayPlan::FullRebuild { bottom_appended: 0 }
         );
+    }
+
+    #[test]
+    fn incremental_replay_survives_non_numeric_cards_and_uses_resolved_calls() {
+        let metas = extract_rendered_block_metas([
+            (Some("10"), None, Some("call-10")),
+            (None, None, None),
+            (Some("perm-card"), None, None),
+            (Some("12"), Some("11"), None),
+        ]);
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].0, 0);
+        assert_eq!(metas[0].1.last_id, 10);
+        assert_eq!(metas[0].1.call_id, "call-10");
+        assert_eq!(metas[1].0, 3);
+        assert_eq!(metas[1].1.first_id, 11);
+        assert_eq!(metas[1].1.last_id, 12);
+
+        let blocks: Vec<_> = metas.into_iter().map(|(_, m)| m).collect();
+        let rendered_ids = BTreeSet::from([10, 11, 12]);
+        let visible = vec![
+            json!({"id": 10, "kind": "tool", "call": "call-10", "state": "started"}),
+            json!({"id": 11, "kind": "text", "text": "a"}),
+            json!({"id": 12, "kind": "text", "text": "b"}),
+            json!({"id": 13, "kind": "tool", "text": "done"}),
+            json!({"id": 14, "kind": "text", "text": "next"}),
+        ];
+        let resolved_calls = vec![
+            Some("call-10".to_owned()),
+            None,
+            None,
+            Some("call-10".to_owned()),
+            None,
+        ];
+        assert_eq!(
+            plan_stream_replay_with_calls(
+                &blocks,
+                &rendered_ids,
+                Some(12),
+                &visible,
+                &resolved_calls,
+            ),
+            ReplayPlan::Incremental {
+                ops: vec![
+                    IncrementalOp::UpdateTool {
+                        event_idx: 3,
+                        block_idx: 0,
+                    },
+                    IncrementalOp::AppendBottom { event_idx: 4 },
+                ],
+                bottom_appended: 1,
+                inserted_above: false,
+            }
+        );
+    }
+
+    #[test]
+    fn incremental_fold_cache_matches_full_fold_on_append_mutation_and_eviction_updates() {
+        let mut events = Vec::new();
+        for i in 1..=140u64 {
+            if i % 2 == 1 {
+                events.push(json!({
+                    "id": i,
+                    "kind": "tool",
+                    "tool": "Bash",
+                    "call": format!("c-{i}"),
+                    "state": "started"
+                }));
+            } else {
+                events.push(json!({
+                    "id": i,
+                    "kind": "tool",
+                    "ok": true,
+                    "text": format!("ok {i}")
+                }));
+            }
+        }
+        let mut cache = FoldCache::default();
+        let first = fold_run_events_with_cache(&mut cache, &events);
+        let expected_first = fold_run_events(&events);
+        assert_eq!(first, expected_first);
+
+        // Append delta reuses strided checkpoint.
+        events.push(json!({"id": 141, "kind": "text", "text": "tail"}));
+        let appended = fold_run_events_with_cache(&mut cache, &events);
+        assert_eq!(appended, fold_run_events(&events));
+
+        // Middle update invalidates from nearest prior stride checkpoint and still matches.
+        events[70] = json!({"id": 71, "kind": "tool", "call": "c-edited", "state": "started"});
+        let edited = fold_run_events_with_cache(&mut cache, &events);
+        assert_eq!(edited, fold_run_events(&events));
+
+        // Top DOM eviction preserves non-evictable pending permission cards and updates client_hidden.
+        let evict_indices = plan_top_dom_eviction(&[false, true, true, true, true], 3);
+        assert_eq!(evict_indices, vec![1, 2]);
+        assert_eq!(
+            compute_client_hidden_prefix(&events, 120, Some(50)),
+            49,
+            "client_hidden follows earliest rendered event id after top DOM eviction"
+        );
+
+        // Evicted tool output keys are returned cleanly and expose an explicit notice.
+        let mut map = BTreeMap::from([
+            ("k1".to_owned(), "aaaaaa".to_owned()),
+            ("k2".to_owned(), "bbbbbb".to_owned()),
+        ]);
+        let mut order = VecDeque::from(["k1".to_owned(), "k2".to_owned()]);
+        let evicted = prune_tool_outputs_with_budget(&mut map, &mut order, 1, 100);
+        assert_eq!(evicted, vec!["k1".to_owned()]);
+        assert!(evicted_tool_output_label().contains("Evicted"));
     }
 }

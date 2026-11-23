@@ -38,6 +38,27 @@ pub fn initialize() {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProjectChangeViewAction {
+    Setup,
+    Skills,
+    SkillCapsules,
+    CreateSkill,
+    Accelerators,
+    None,
+}
+
+pub(super) fn project_change_view_action(view: &str) -> ProjectChangeViewAction {
+    match view {
+        "setup" => ProjectChangeViewAction::Setup,
+        "skills" => ProjectChangeViewAction::Skills,
+        "skill-capsules" => ProjectChangeViewAction::SkillCapsules,
+        "create-skill" => ProjectChangeViewAction::CreateSkill,
+        "accelerators" => ProjectChangeViewAction::Accelerators,
+        _ => ProjectChangeViewAction::None,
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn on_global_project_change(project: &str) {
     let project = project.trim();
@@ -51,6 +72,11 @@ pub(crate) fn on_global_project_change(project: &str) {
     m::take("skills-change-preview");
     m::take("skills-installed");
     m::take("skills-installed-project");
+    // Another project's capsules and open detail are not this project's.
+    m::take("skill-capsules");
+    m::take("skill-capsules-project");
+    m::take("skill-capsule-open");
+    m::take("skill-capsule-detail");
     if !m::yes(&m::data("creator-pending")) {
         let prev_creator = if cfg!(target_arch = "wasm32") {
             dom::value("creator-project")
@@ -71,22 +97,33 @@ pub(crate) fn on_global_project_change(project: &str) {
         }
     }
     if cfg!(target_arch = "wasm32") {
-        if active_view == "setup" {
-            spawn_local(async {
-                load_setup().await;
-            });
-        } else if active_view == "skills" {
-            skills_controls();
-            spawn_local(async {
-                installed_skills().await;
-            });
-        } else if active_view == "skill-capsules" {
-            // Another project's capsule is not this project's.
-            m::take("skill-capsule-open");
-            m::take("skill-capsule-detail");
-            spawn_local(async {
-                load_capsules().await;
-            });
+        match project_change_view_action(&active_view) {
+            ProjectChangeViewAction::Setup => {
+                spawn_local(async {
+                    load_setup().await;
+                });
+            }
+            ProjectChangeViewAction::Skills => {
+                skills_controls();
+                spawn_local(async {
+                    installed_skills().await;
+                });
+            }
+            ProjectChangeViewAction::SkillCapsules => {
+                spawn_local(async {
+                    load_capsules().await;
+                });
+            }
+            ProjectChangeViewAction::CreateSkill => {
+                create_skill_controls();
+                spawn_local(async {
+                    load_skills().await;
+                });
+            }
+            ProjectChangeViewAction::Accelerators => {
+                accelerators();
+            }
+            ProjectChangeViewAction::None => {}
         }
     }
 }
@@ -346,4 +383,57 @@ mod test_exports {
     pub(super) use super::creator::*;
     pub(super) use super::setup::*;
     pub(super) use super::skills::*;
+}
+
+#[cfg(test)]
+mod project_sync_tests {
+    use super::*;
+
+    #[test]
+    fn global_project_change_covers_create_skill_accelerators_and_clears_capsules() {
+        assert_eq!(
+            project_change_view_action("create-skill"),
+            ProjectChangeViewAction::CreateSkill
+        );
+        assert_eq!(
+            project_change_view_action("accelerators"),
+            ProjectChangeViewAction::Accelerators
+        );
+        assert_eq!(
+            project_change_view_action("skill-capsules"),
+            ProjectChangeViewAction::SkillCapsules
+        );
+        assert_eq!(
+            project_change_view_action("setup"),
+            ProjectChangeViewAction::Setup
+        );
+        assert_eq!(
+            project_change_view_action("skills"),
+            ProjectChangeViewAction::Skills
+        );
+        assert_eq!(
+            project_change_view_action("sessions"),
+            ProjectChangeViewAction::None
+        );
+
+        m::set("skill-capsules", json!([{"capsule_id": "cap-old"}]));
+        m::set("skill-capsules-project", json!("proj-old"));
+        m::set("skill-capsule-open", json!("cap-old"));
+        m::set("skill-capsule-detail", json!({"capsule_id": "cap-old"}));
+        m::set("skills-installed", json!([{"id": "sk-old"}]));
+        m::set("creator-project-sync", json!("proj-old"));
+
+        on_global_project_change("proj-new");
+
+        assert!(m::data("skill-capsules").is_null());
+        assert!(m::data("skill-capsules-project").is_null());
+        assert!(m::data("skill-capsule-open").is_null());
+        assert!(m::data("skill-capsule-detail").is_null());
+        assert!(m::data("skills-installed").is_null());
+        assert_eq!(m::string(&m::data("creator-project-sync")), "proj-new");
+
+        m::take("creator-project-sync");
+        m::take("creator-detail");
+        m::take("creator-run");
+    }
 }
