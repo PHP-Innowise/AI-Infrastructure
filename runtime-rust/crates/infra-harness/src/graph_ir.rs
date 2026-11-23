@@ -36,7 +36,7 @@ use std::{
 };
 
 pub(crate) const NATIVE_IR_TOOL: &str = "native-tree-sitter-ir";
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 const DB_FILENAME: &str = "graph_ir.sqlite3";
 pub(crate) const MAX_IR_FILES: usize = 30_000;
 const MAX_WALK_DEPTH: usize = 64;
@@ -137,6 +137,11 @@ pub(crate) struct IrUpdateDelta {
     pub manifest_changed: bool,
     pub semantic_changed: bool,
     pub ir_revision: u64,
+    pub touched_semantic_targets: Vec<String>,
+    pub prev_semantic_anchor_files: Vec<String>,
+    pub touched_di_files: Vec<String>,
+    #[allow(dead_code)]
+    pub reexport_changed: bool,
 }
 
 /// Result returned by [`GraphIrStore::verify_path_or_symbol`] for read-only verification
@@ -150,6 +155,7 @@ pub(crate) struct IrPathSymbolVerification {
 }
 
 /// Incremental Graph IR elements exported strictly for dirty files and their incident edges.
+#[derive(Clone, Debug)]
 pub(crate) struct IrDeltaElements {
     pub files: Vec<String>,
     pub edited_files: BTreeSet<String>,
@@ -170,6 +176,7 @@ pub(crate) struct GraphIrStore {
     read_pool: Mutex<Vec<Connection>>,
     read_only: bool,
     write_epoch: AtomicU64,
+    reexport_cache: Mutex<Option<(u64, ReexportIndex)>>,
 }
 
 struct WalkedFile {
@@ -354,6 +361,16 @@ impl GraphIrStore {
                  line INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_ir_reexports_file_path ON ir_reexports(file_path);
+             CREATE TABLE IF NOT EXISTS ir_file_extractions(
+                 file_path TEXT PRIMARY KEY,
+                 summary_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS ir_symbol_refs(
+                 token_lower TEXT NOT NULL,
+                 file_path TEXT NOT NULL,
+                 PRIMARY KEY (token_lower, file_path)
+             );
+             CREATE INDEX IF NOT EXISTS idx_ir_symbol_refs_file_path ON ir_symbol_refs(file_path);
              CREATE TABLE IF NOT EXISTS ir_unresolved_imports(
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  source_file TEXT NOT NULL,
@@ -407,6 +424,7 @@ impl GraphIrStore {
             read_pool: Mutex::new(Vec::new()),
             read_only: false,
             write_epoch: AtomicU64::new(epoch),
+            reexport_cache: Mutex::new(None),
         })
     }
 
@@ -527,6 +545,7 @@ impl GraphIrStore {
             read_pool: Mutex::new(Vec::new()),
             read_only: true,
             write_epoch: AtomicU64::new(epoch),
+            reexport_cache: Mutex::new(None),
         }))
     }
 
@@ -729,10 +748,23 @@ impl GraphIrStore {
                 (Vec::new(), BTreeSet::new())
             };
 
-        let (summary, re_resolved_out, semantic_changed, pre_tx_incoming) = loop {
+        let mut cached_re_resolve =
+            self.with_read_conn(|conn| load_persisted_ir_extractions(conn, &pending_re_resolve))?;
+        let (
+            summary,
+            re_resolved_out,
+            semantic_changed,
+            pre_tx_incoming,
+            touched_semantic_targets,
+            prev_semantic_anchor_files,
+            touched_di_files,
+            reexport_changed,
+        ) = loop {
             let missing_re_resolve: Vec<String> = pending_re_resolve
                 .iter()
-                .filter(|p| !parsed_re_resolve.contains_key(*p))
+                .filter(|p| {
+                    !cached_re_resolve.contains_key(*p) && !parsed_re_resolve.contains_key(*p)
+                })
                 .cloned()
                 .collect();
             if !missing_re_resolve.is_empty() {
@@ -760,16 +792,37 @@ impl GraphIrStore {
                     pre_tx_incoming.clear();
                     pending_re_resolve.clear();
                 }
-                if pending_re_resolve
+                let missing_cached: Vec<String> = pending_re_resolve
                     .iter()
-                    .any(|p| !parsed_re_resolve.contains_key(p))
-                {
+                    .filter(|p| {
+                        !cached_re_resolve.contains_key(*p) && !parsed_re_resolve.contains_key(*p)
+                    })
+                    .cloned()
+                    .collect();
+                if !missing_cached.is_empty() {
+                    let extra_cached = load_persisted_ir_extractions(&conn, &missing_cached)?;
+                    cached_re_resolve.extend(extra_cached);
+                }
+                if pending_re_resolve.iter().any(|p| {
+                    !cached_re_resolve.contains_key(p) && !parsed_re_resolve.contains_key(p)
+                }) {
                     continue;
                 }
             }
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
+            let touched_before: Vec<String> = removed
+                .iter()
+                .chain(parsed_units.iter().map(|u| &u.rel_path))
+                .cloned()
+                .collect();
+            let PrevReexportSemanticState {
+                prev_reexports,
+                prev_sem_targets,
+                prev_di_targets,
+                prev_sem_anchors,
+            } = collect_prev_reexport_and_semantic_state(&tx, &touched_before)?;
             let semantic_changed = detect_semantic_changed(&tx, removed.iter(), &parsed_units)?;
 
             for path in &removed {
@@ -779,12 +832,30 @@ impl GraphIrStore {
                 upsert_parsed_file(&tx, unit, &now)?;
             }
 
-            let reexports = build_reexport_index_from_db(&tx)?;
+            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx, epoch_before)?;
+            update_reexport_index_for_units(&mut reexports, &removed, &parsed_units);
+
             for unit in &parsed_units {
                 replace_file_edges(&tx, unit, &known_files, &manifests, &reexports, &crate_map)?;
             }
             for path in &pending_re_resolve {
-                if let Some(unit) = parsed_re_resolve.get(path) {
+                if let Some(ir) = cached_re_resolve.get(path) {
+                    replace_file_edges_for_ir(
+                        &tx,
+                        path,
+                        ir,
+                        &known_files,
+                        &manifests,
+                        &reexports,
+                        &crate_map,
+                    )?;
+                } else if let Some(unit) = parsed_re_resolve.get(path) {
+                    upsert_parsed_file(&tx, unit, &now)?;
+                    update_reexport_index_for_units(
+                        &mut reexports,
+                        &[],
+                        std::slice::from_ref(unit),
+                    );
                     replace_file_edges(
                         &tx,
                         unit,
@@ -795,6 +866,16 @@ impl GraphIrStore {
                     )?;
                 }
             }
+
+            let reexp_changed =
+                !compute_reexport_changed_files(&prev_reexports, &removed, &parsed_units)
+                    .is_empty();
+            let (post_sem_targets, post_di_files) = collect_post_semantic_delta(
+                &tx,
+                &prev_sem_targets,
+                &prev_di_targets,
+                &parsed_units,
+            )?;
 
             let summary = recompute_summary(&tx, &now, truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
@@ -807,11 +888,16 @@ impl GraphIrStore {
             let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
             self.write_epoch.store(next_epoch, Ordering::Release);
+            store_reexport_cache(&self.reexport_cache, next_epoch, reexports);
             break (
                 summary,
                 pending_re_resolve,
                 semantic_changed,
                 pre_tx_incoming,
+                post_sem_targets,
+                prev_sem_anchors,
+                post_di_files,
+                reexp_changed,
             );
         };
 
@@ -843,6 +929,10 @@ impl GraphIrStore {
             manifest_changed,
             semantic_changed,
             ir_revision: 0,
+            touched_semantic_targets,
+            prev_semantic_anchor_files,
+            touched_di_files,
+            reexport_changed,
         })
     }
 
@@ -955,6 +1045,7 @@ impl GraphIrStore {
         let mut manifests = Arc::new(ManifestIndex::default());
         let mut crate_map = Arc::new(CratePackageMap::default());
         let mut cached_bundle_key_len: Option<usize> = None;
+        let mut cached_re_resolve: BTreeMap<String, AstFileExtraction> = BTreeMap::new();
         let (
             files_removed,
             summary,
@@ -962,6 +1053,10 @@ impl GraphIrStore {
             re_resolved_out,
             semantic_changed,
             pre_tx_incoming,
+            touched_semantic_targets,
+            prev_semantic_anchor_files,
+            touched_di_files,
+            reexport_changed,
         ) = loop {
             let (
                 existing_files,
@@ -1045,12 +1140,37 @@ impl GraphIrStore {
                 && !manifest_changed
             {
                 let summary = self.summary_counts()?.unwrap_or_default();
-                break (0, summary, Vec::new(), Vec::new(), false, BTreeSet::new());
+                break (
+                    0,
+                    summary,
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    BTreeSet::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                );
             }
 
+            let need_cached: Vec<String> = re_resolve_paths
+                .iter()
+                .filter(|p| {
+                    !cached_re_resolve.contains_key(*p) && !parsed_re_resolve.contains_key(*p)
+                })
+                .cloned()
+                .collect();
+            if !need_cached.is_empty() {
+                let loaded =
+                    self.with_read_conn(|conn| load_persisted_ir_extractions(conn, &need_cached))?;
+                cached_re_resolve.extend(loaded);
+            }
             let missing_re_resolve: Vec<String> = re_resolve_paths
                 .iter()
-                .filter(|p| !parsed_re_resolve.contains_key(*p))
+                .filter(|p| {
+                    !cached_re_resolve.contains_key(*p) && !parsed_re_resolve.contains_key(*p)
+                })
                 .cloned()
                 .collect();
             if !missing_re_resolve.is_empty() {
@@ -1081,6 +1201,18 @@ impl GraphIrStore {
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
+            let removed_vec_pre: Vec<String> = removed_files.iter().cloned().collect();
+            let touched_before: Vec<String> = removed_vec_pre
+                .iter()
+                .chain(parsed_units.iter().map(|u| &u.rel_path))
+                .cloned()
+                .collect();
+            let PrevReexportSemanticState {
+                prev_reexports,
+                prev_sem_targets,
+                prev_di_targets,
+                prev_sem_anchors,
+            } = collect_prev_reexport_and_semantic_state(&tx, &touched_before)?;
             let semantic_changed =
                 detect_semantic_changed(&tx, removed_files.iter(), &parsed_units)?;
             for path in &removed_files {
@@ -1091,8 +1223,10 @@ impl GraphIrStore {
             }
 
             let _ = (&affected_targets, &skip_re_resolve);
-            if !parsed_units.is_empty() || !re_resolve_paths.is_empty() {
-                let reexports = build_reexport_index_from_db(&tx)?;
+            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx, epoch_before)?;
+            if !parsed_units.is_empty() || !removed_files.is_empty() || !re_resolve_paths.is_empty()
+            {
+                update_reexport_index_for_units(&mut reexports, &removed_vec_pre, &parsed_units);
                 for unit in &parsed_units {
                     replace_file_edges(
                         &tx,
@@ -1104,7 +1238,23 @@ impl GraphIrStore {
                     )?;
                 }
                 for path in &re_resolve_paths {
-                    if let Some(unit) = parsed_re_resolve.get(path) {
+                    if let Some(ir) = cached_re_resolve.get(path) {
+                        replace_file_edges_for_ir(
+                            &tx,
+                            path,
+                            ir,
+                            &existing_files,
+                            &manifests,
+                            &reexports,
+                            &crate_map,
+                        )?;
+                    } else if let Some(unit) = parsed_re_resolve.get(path) {
+                        upsert_parsed_file(&tx, unit, &now)?;
+                        update_reexport_index_for_units(
+                            &mut reexports,
+                            &[],
+                            std::slice::from_ref(unit),
+                        );
                         replace_file_edges(
                             &tx,
                             unit,
@@ -1116,6 +1266,16 @@ impl GraphIrStore {
                     }
                 }
             }
+
+            let reexp_changed =
+                !compute_reexport_changed_files(&prev_reexports, &removed_vec_pre, &parsed_units)
+                    .is_empty();
+            let (post_sem_targets, post_di_files) = collect_post_semantic_delta(
+                &tx,
+                &prev_sem_targets,
+                &prev_di_targets,
+                &parsed_units,
+            )?;
 
             let prev_truncated: bool = tx
                 .query_row("SELECT truncated FROM ir_summary WHERE id = 1", [], |r| {
@@ -1135,14 +1295,18 @@ impl GraphIrStore {
             let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
             self.write_epoch.store(next_epoch, Ordering::Release);
-            let removed_vec: Vec<String> = removed_files.into_iter().collect();
+            store_reexport_cache(&self.reexport_cache, next_epoch, reexports);
             break (
                 actually_removed,
                 summary,
-                removed_vec,
+                removed_vec_pre,
                 re_resolve_paths,
                 semantic_changed,
                 pre_tx_incoming,
+                post_sem_targets,
+                prev_sem_anchors,
+                post_di_files,
+                reexp_changed,
             );
         };
 
@@ -1166,6 +1330,10 @@ impl GraphIrStore {
             manifest_changed,
             semantic_changed,
             ir_revision: 0,
+            touched_semantic_targets,
+            prev_semantic_anchor_files,
+            touched_di_files,
+            reexport_changed,
         })
     }
 
@@ -1212,9 +1380,20 @@ impl GraphIrStore {
         })
     }
 
-    /// Builds a `ReexportIndex` directly from SQLite `ir_reexports` and `ir_symbols`.
+    /// Builds or returns the epoch-cached `ReexportIndex` from SQLite `ir_reexports` and `ir_symbols`.
     pub(crate) fn reexport_index(&self) -> Result<ReexportIndex> {
-        self.with_read_conn(build_reexport_index_from_db)
+        let epoch = self.current_write_epoch();
+        if let Ok(guard) = self.reexport_cache.lock()
+            && let Some((cached_epoch, ref idx)) = *guard
+            && cached_epoch == epoch
+        {
+            return Ok(idx.clone());
+        }
+        let fresh = self.with_read_conn(build_reexport_index_from_db)?;
+        if let Ok(mut guard) = self.reexport_cache.lock() {
+            *guard = Some((epoch, fresh.clone()));
+        }
+        Ok(fresh)
     }
 
     /// Queries reverse-caller edges targeting `target_rel` directly from SQLite `ir_edges`.
@@ -1223,7 +1402,7 @@ impl GraphIrStore {
             let mut stmt = conn.prepare(
                 "SELECT source_file, target_symbol, relation, context, line
                  FROM ir_edges
-                 WHERE target_file = ?1
+                 WHERE target_file = ?1 AND source_file != ?1
                  ORDER BY source_file, line, id",
             )?;
             let rows = stmt.query_map([target_rel], |row| {
@@ -1390,8 +1569,9 @@ impl GraphIrStore {
     /// Returns deduplicated `(source_file, target_file)` dependency pairs from `ir_edges`.
     pub(crate) fn all_resolved_file_edges(&self) -> Result<Vec<(String, String)>> {
         self.with_read_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT DISTINCT source_file, target_file FROM ir_edges")?;
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT source_file, target_file FROM ir_edges WHERE source_file != target_file",
+            )?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
@@ -1444,6 +1624,7 @@ impl GraphIrStore {
                      FROM ir_files f
                      LEFT JOIN ir_edges e
                        ON e.source_file = f.path
+                      AND e.target_file != e.source_file
                       AND e.relation IN ('reads', 'writes')
                      WHERE f.path IN ({placeholders})
                      ORDER BY f.path, e.id"
@@ -1561,7 +1742,7 @@ impl GraphIrStore {
                 let mut stmt = conn.prepare(
                     "SELECT target_file, target_symbol, relation, context, line
                      FROM ir_edges
-                     WHERE source_file = ?1
+                     WHERE source_file = ?1 AND target_file != ?1
                      ORDER BY id",
                 )?;
                 let rows = stmt.query_map([&rel], |row| {
@@ -1786,25 +1967,26 @@ impl GraphIrStore {
         ))
     }
 
-    /// Exports only nodes of edited files and edges incident to `dirty` files
-    /// (`edited ∪ re-resolved ∪ removed`), returning `None` when semantic or manifest changes
-    /// warrant a full graph element export.
+    /// Exports incremental nodes/links for `Index::update_files`, supporting regular code
+    /// edges, `ir_reexports` propagation, and `ir_semantic_edges` (`sem:*` & `di_binds`).
     pub(crate) fn export_ir_delta_for_files(
         &self,
         delta: &IrUpdateDelta,
     ) -> Result<Option<IrDeltaElements>> {
-        if delta.semantic_changed || delta.manifest_changed {
+        if delta.manifest_changed {
             return Ok(None);
         }
-        let edited_files: BTreeSet<String> = delta.edited_files.iter().cloned().collect();
+        let mut effective_edited: BTreeSet<String> = delta.edited_files.iter().cloned().collect();
         let removed_files: BTreeSet<String> = delta.removed_files.iter().cloned().collect();
-        let mut dirty_files: BTreeSet<String> = edited_files.clone();
+        let mut dirty_files: BTreeSet<String> = effective_edited.clone();
         dirty_files.extend(removed_files.iter().cloned());
         dirty_files.extend(delta.re_resolved_files.iter().cloned());
+        dirty_files.extend(delta.incoming_caller_files.iter().cloned());
+        dirty_files.extend(delta.touched_di_files.iter().cloned());
         if dirty_files.is_empty() || dirty_files.len() > 256 {
             return Ok(None);
         }
-        let rs_touched = edited_files
+        let rs_touched = effective_edited
             .iter()
             .chain(removed_files.iter())
             .any(|p| p.ends_with(".rs") || p.ends_with(".rs.modules"));
@@ -1817,23 +1999,186 @@ impl GraphIrStore {
             };
             let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
 
-            let dirty_vec: Vec<&str> = dirty_files.iter().map(String::as_str).collect();
-            let placeholders = vec!["?"; dirty_vec.len()].join(", ");
-            let sem_sql = format!(
-                "SELECT EXISTS(SELECT 1 FROM ir_semantic_edges WHERE file_path IN ({placeholders}))"
-            );
-            let has_sem: bool = conn
-                .query_row(
-                    &sem_sql,
-                    rusqlite::params_from_iter(dirty_vec.iter().copied()),
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if has_sem {
+            for prev_anchor in &delta.prev_semantic_anchor_files {
+                if file_set.contains(prev_anchor.as_str()) {
+                    effective_edited.insert(prev_anchor.clone());
+                    dirty_files.insert(prev_anchor.clone());
+                }
+            }
+
+            // Discover all canonical semantic targets & DI bindings touched by dirty or edited files.
+            let mut touched_sem_targets: BTreeSet<String> =
+                delta.touched_semantic_targets.iter().cloned().collect();
+            let mut touched_di_targets: BTreeSet<String> = BTreeSet::new();
+            let seed_sem_files: Vec<String> = effective_edited
+                .iter()
+                .chain(dirty_files.iter())
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            for chunk in seed_sem_files.chunks(200) {
+                let placeholders = (1..=chunk.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT kind, target FROM ir_semantic_edges WHERE file_path IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (kind, target) = row?;
+                    if kind == "di_binds" {
+                        touched_di_targets.insert(target);
+                    } else {
+                        touched_sem_targets.insert(canonical_sem_target(&kind, &target));
+                    }
+                }
+            }
+
+            let sem_targets_vec: Vec<String> = touched_sem_targets.iter().cloned().collect();
+            let mut sem_rows = query_semantic_rows_for_targets(conn, &sem_targets_vec)?;
+
+            // Add all `di_binds` rows touching `touched_di_targets` or files in `dirty_files`.
+            let mut seen_sem_row_keys: BTreeSet<(String, String, String, u32)> = sem_rows
+                .iter()
+                .map(|r| (r.file_path.clone(), r.kind.clone(), r.target.clone(), r.line))
+                .collect();
+            if !touched_di_targets.is_empty() {
+                let di_vec: Vec<String> = touched_di_targets.iter().cloned().collect();
+                for chunk in di_vec.chunks(200) {
+                    let placeholders = (1..=chunk.len())
+                        .map(|i| format!("?{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "SELECT file_path, kind, target, source_symbol, line, evidence
+                         FROM ir_semantic_edges
+                         WHERE kind = 'di_binds' AND target IN ({placeholders})
+                         ORDER BY id"
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        Ok(StoredSemanticRow {
+                            file_path: row.get(0)?,
+                            kind: row.get(1)?,
+                            target: row.get(2)?,
+                            source_symbol: row.get(3)?,
+                            line: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                            evidence: row.get(5)?,
+                        })
+                    })?;
+                    for r in rows {
+                        let r = r?;
+                        if seen_sem_row_keys.insert((
+                            r.file_path.clone(),
+                            r.kind.clone(),
+                            r.target.clone(),
+                            r.line,
+                        )) {
+                            sem_rows.push(r);
+                        }
+                    }
+                }
+            }
+
+            // Compute new anchors for every touched semantic target and ensure new anchor files
+            // are in `effective_edited` so `sem:*` nodes are created/moved/removed cleanly.
+            let new_anchors = compute_semantic_anchor_map(&sem_rows, Some(&file_set));
+            for (_, anchor_file, _) in new_anchors.values() {
+                effective_edited.insert((*anchor_file).to_owned());
+                dirty_files.insert((*anchor_file).to_owned());
+            }
+            for row in &sem_rows {
+                if file_set.contains(row.file_path.as_str()) {
+                    dirty_files.insert(row.file_path.clone());
+                }
+            }
+
+            // Ensure any file in `effective_edited` also has ALL of its own semantic rows loaded so
+            // unrelated `sem:*` nodes anchored on an edited file are never dropped on replacement.
+            let edited_vec: Vec<String> = effective_edited.iter().cloned().collect();
+            let mut extra_targets = BTreeSet::new();
+            for chunk in edited_vec.chunks(200) {
+                let placeholders = (1..=chunk.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT kind, target FROM ir_semantic_edges WHERE file_path IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (kind, target) = row?;
+                    if kind == "di_binds" {
+                        touched_di_targets.insert(target);
+                    } else {
+                        let canon = canonical_sem_target(&kind, &target);
+                        if !touched_sem_targets.contains(&canon) {
+                            extra_targets.insert(canon);
+                        }
+                    }
+                }
+            }
+            if !extra_targets.is_empty() {
+                let extra_vec: Vec<String> = extra_targets.into_iter().collect();
+                for r in query_semantic_rows_for_targets(conn, &extra_vec)? {
+                    if seen_sem_row_keys.insert((
+                        r.file_path.clone(),
+                        r.kind.clone(),
+                        r.target.clone(),
+                        r.line,
+                    )) {
+                        sem_rows.push(r);
+                    }
+                }
+            }
+
+            if dirty_files.len() > 256 {
                 return Ok(None);
             }
 
+            let mut di_concrete_files = BTreeSet::new();
+            if !touched_di_targets.is_empty() {
+                let short_names: Vec<String> = touched_di_targets
+                    .iter()
+                    .filter_map(|t| t.strip_prefix("service:"))
+                    .flat_map(|s| {
+                        let tail = s.rsplit(['\\', ':', '.']).next().unwrap_or(s).trim();
+                        (!tail.is_empty()).then(|| tail.to_owned())
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                for chunk in short_names.chunks(200) {
+                    let placeholders = (1..=chunk.len())
+                        .map(|i| format!("?{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "SELECT DISTINCT file_path FROM ir_symbols WHERE name IN ({placeholders})"
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                        r.get::<_, String>(0)
+                    })?;
+                    for r in rows {
+                        let fp = r?;
+                        if file_set.contains(fp.as_str()) {
+                            di_concrete_files.insert(fp);
+                        }
+                    }
+                }
+            }
+
+            let dirty_vec: Vec<&str> = dirty_files.iter().map(String::as_str).collect();
+            let placeholders = vec!["?"; dirty_vec.len()].join(", ");
             let edge_sql = format!(
                 "SELECT DISTINCT id, source_file, source_symbol, target_file, target_symbol, relation, context, line, confidence
                  FROM ir_edges
@@ -1860,7 +2205,15 @@ impl GraphIrStore {
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-            let mut needed_symbol_files: BTreeSet<String> = edited_files.clone();
+            let mut needed_symbol_files: BTreeSet<String> = effective_edited.clone();
+            for fp in &di_concrete_files {
+                needed_symbol_files.insert(fp.clone());
+            }
+            for row in &sem_rows {
+                if file_set.contains(row.file_path.as_str()) {
+                    needed_symbol_files.insert(row.file_path.clone());
+                }
+            }
             for edge in &edges {
                 if file_set.contains(edge.source_file.as_str()) {
                     needed_symbol_files.insert(edge.source_file.clone());
@@ -1891,7 +2244,7 @@ impl GraphIrStore {
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-            let emit_files: Vec<String> = edited_files
+            let emit_files: Vec<String> = effective_edited
                 .iter()
                 .filter(|f| file_set.contains(f.as_str()))
                 .cloned()
@@ -1899,27 +2252,41 @@ impl GraphIrStore {
             let communities = compute_file_communities_for_delta(conn, &files)?;
             let mut used_node_ids = BTreeSet::new();
             for path in &needed_symbol_files {
-                if !edited_files.contains(path) {
+                if !effective_edited.contains(path) {
                     used_node_ids.insert(format!("file:{path}"));
                 }
             }
-            let (node_specs, mut link_specs, maps) = collect_symbol_nodes_and_maps(
+            let (mut node_specs, mut link_specs, maps) = collect_symbol_nodes_and_maps(
                 &emit_files,
-                Some(&edited_files),
+                Some(&effective_edited),
                 &symbols,
                 &communities,
                 &mut used_node_ids,
             );
-            let (edge_links, _) = collect_resolved_edge_links(&edges, &file_set, &maps);
+            let (edge_links, resolved_targets_by_source) =
+                collect_resolved_edge_links(&edges, &file_set, &maps);
             link_specs.extend(edge_links);
+
+            emit_semantic_nodes_and_links(
+                &sem_rows,
+                &file_set,
+                &maps,
+                &resolved_targets_by_source,
+                &communities,
+                Some(&effective_edited),
+                Some(&dirty_files),
+                &mut node_specs,
+                &mut link_specs,
+            );
+
             let neighbor_files: Vec<String> = needed_symbol_files
                 .into_iter()
-                .filter(|f| !edited_files.contains(f) && !removed_files.contains(f))
+                .filter(|f| !effective_edited.contains(f) && !removed_files.contains(f))
                 .collect();
 
             Ok(Some(IrDeltaElements {
                 files,
-                edited_files,
+                edited_files: effective_edited,
                 dirty_files,
                 removed_files,
                 neighbor_files,
@@ -2174,6 +2541,355 @@ pub(crate) fn normalize_rel_path(root: &Path, raw: &str) -> Option<String> {
         return None;
     }
     Some(clean)
+}
+
+#[derive(Deserialize)]
+struct LiveNodeDeser {
+    id: String,
+    label: String,
+    source_file: String,
+    #[serde(default)]
+    source_location: Option<String>,
+    #[serde(default)]
+    end_line: u32,
+    #[serde(default)]
+    file_type: Option<String>,
+    #[serde(default)]
+    node_kind: Option<String>,
+    #[serde(default)]
+    community: Option<u32>,
+    #[serde(default)]
+    community_name: Option<String>,
+    #[serde(rename = "_callable_class", default)]
+    callable_class: bool,
+    #[serde(rename = "abstract", default)]
+    is_abstract: bool,
+    #[serde(default)]
+    is_test: bool,
+}
+
+impl From<LiveNodeDeser> for IrNodeSpec {
+    fn from(n: LiveNodeDeser) -> Self {
+        Self {
+            id: n.id,
+            label: n.label,
+            source_file: n.source_file,
+            source_location: n.source_location,
+            end_line: n.end_line,
+            file_type: n.file_type,
+            node_kind: n.node_kind,
+            community: n.community,
+            community_name: n.community_name,
+            callable_class: n.callable_class,
+            is_abstract: n.is_abstract,
+            is_test: n.is_test,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LiveLinkDeser {
+    source: String,
+    target: String,
+    #[serde(default)]
+    relation: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+    #[serde(default)]
+    source_file: Option<String>,
+    #[serde(default)]
+    evidence: Option<String>,
+}
+
+impl From<LiveLinkDeser> for IrLinkSpec {
+    fn from(l: LiveLinkDeser) -> Self {
+        Self {
+            source: l.source,
+            target: l.target,
+            relation: l.relation,
+            context: l.context,
+            confidence: l.confidence,
+            source_file: l.source_file,
+            evidence: l.evidence,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LiveGraphDocDeser {
+    #[serde(default)]
+    nodes: Vec<LiveNodeDeser>,
+    #[serde(default)]
+    links: Vec<LiveLinkDeser>,
+}
+
+impl GraphIrStore {
+    /// Returns the persisted AST extraction for `rel_path` without disk parsing when file stamp matches.
+    pub(crate) fn load_file_extraction_if_fresh(
+        &self,
+        root: &Path,
+        rel_path: &str,
+    ) -> Result<Option<AstFileExtraction>> {
+        let rel = clean_rel_key(rel_path);
+        if rel.is_empty() {
+            return Ok(None);
+        }
+        let Ok(real_root) = fs::canonicalize(root) else {
+            return Ok(None);
+        };
+        let full = real_root.join(&rel);
+        let Ok(meta) = fs::symlink_metadata(&full) else {
+            return Ok(None);
+        };
+        if !meta.is_file() {
+            return Ok(None);
+        }
+        let disk_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+        let disk_mtime = mtime_nanos(&meta);
+
+        self.with_read_conn(|conn| {
+            let row: Option<(i64, i64, String)> = conn
+                .query_row(
+                    "SELECT f.size, f.mtime_ns, e.summary_json
+                     FROM ir_files f
+                     JOIN ir_file_extractions e ON e.file_path = f.path
+                     WHERE f.path = ?1",
+                    [&rel],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((size_bytes, mtime_ns, json_str)) = row else {
+                return Ok(None);
+            };
+            if size_bytes != disk_size || mtime_ns != disk_mtime {
+                return Ok(None);
+            }
+            Ok(serde_json::from_str::<AstFileExtraction>(&json_str).ok())
+        })
+    }
+
+    /// Returns `true` when the indexed `ir_symbol_refs` table has at least one row.
+    pub(crate) fn has_symbol_refs_index(&self) -> Result<bool> {
+        self.with_read_conn(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ir_symbol_refs LIMIT 1)",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            Ok(exists)
+        })
+    }
+
+    /// Queries indexed files referencing any of `tokens` via SQLite `ir_symbol_refs`.
+    pub(crate) fn lookup_symbol_ref_callers(&self, tokens: &[&str]) -> Result<Vec<String>> {
+        let lowered: BTreeSet<String> = tokens
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| t.len() >= 2)
+            .collect();
+        if lowered.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_read_conn(|conn| {
+            let mut found = BTreeSet::new();
+            let list: Vec<String> = lowered.into_iter().collect();
+            for chunk in list.chunks(200) {
+                let placeholders = (1..=chunk.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT DISTINCT file_path FROM ir_symbol_refs WHERE token_lower IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    r.get::<_, String>(0)
+                })?;
+                for row in rows {
+                    found.insert(row?);
+                }
+            }
+            Ok(found.into_iter().collect())
+        })
+    }
+
+    /// Matches lowercased probe keywords against `ir_symbol_refs` in SQLite without disk reads.
+    pub(crate) fn find_probe_matching_files(
+        &self,
+        tokens: &[&str],
+    ) -> Result<Vec<(String, Vec<String>)>> {
+        let lowered: Vec<String> = tokens
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| t.len() >= 2)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if lowered.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_read_conn(|conn| {
+            let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for chunk in lowered.chunks(200) {
+                let placeholders = (1..=chunk.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT file_path, token_lower FROM ir_symbol_refs WHERE token_lower IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (fp, tok) = row?;
+                    by_file.entry(fp).or_default().push(tok);
+                }
+            }
+            Ok(by_file.into_iter().collect())
+        })
+    }
+
+    /// Patches `live/graph.json` incrementally from queued IR deltas, falling back to a full
+    /// export when the existing file is missing or cannot be read cleanly.
+    pub(crate) fn patch_live_graph_from_deltas_atomic(
+        &self,
+        live_graph_path: &Path,
+        deltas: &[&IrDeltaElements],
+    ) -> Result<(u64, u64)> {
+        if deltas.is_empty() {
+            return self.write_live_graph_atomic(live_graph_path);
+        }
+        let Ok(file) = File::open(live_graph_path) else {
+            return self.write_live_graph_atomic(live_graph_path);
+        };
+        let mut doc: LiveGraphDocDeser =
+            match serde_json::from_reader(std::io::BufReader::new(file)) {
+                Ok(d) => d,
+                Err(_) => return self.write_live_graph_atomic(live_graph_path),
+            };
+        let mut nodes: Vec<IrNodeSpec> = doc.nodes.drain(..).map(IrNodeSpec::from).collect();
+        let mut links: Vec<IrLinkSpec> = doc.links.drain(..).map(IrLinkSpec::from).collect();
+
+        for d in deltas {
+            let drop_files: BTreeSet<&str> = d
+                .removed_files
+                .iter()
+                .chain(d.edited_files.iter())
+                .map(String::as_str)
+                .collect();
+            let dirty_files: BTreeSet<&str> = d
+                .dirty_files
+                .iter()
+                .chain(d.removed_files.iter())
+                .chain(d.edited_files.iter())
+                .map(String::as_str)
+                .collect();
+            let new_node_ids: BTreeSet<&str> = d.node_specs.iter().map(|n| n.id.as_str()).collect();
+            let dirty_node_ids: BTreeSet<String> = nodes
+                .iter()
+                .filter(|n| {
+                    dirty_files.contains(n.source_file.as_str())
+                        || new_node_ids.contains(n.id.as_str())
+                })
+                .map(|n| n.id.clone())
+                .collect();
+
+            nodes.retain(|n| {
+                !drop_files.contains(n.source_file.as_str())
+                    && !new_node_ids.contains(n.id.as_str())
+            });
+            nodes.extend(d.node_specs.iter().cloned());
+
+            links.retain(|l| {
+                let src_file_dirty = l
+                    .source_file
+                    .as_deref()
+                    .is_some_and(|sf| dirty_files.contains(sf));
+                !src_file_dirty
+                    && !dirty_node_ids.contains(&l.source)
+                    && !dirty_node_ids.contains(&l.target)
+            });
+            links.extend(d.link_specs.iter().cloned());
+        }
+
+        // Deduplicate nodes and links deterministically.
+        let mut node_map: BTreeMap<String, IrNodeSpec> = BTreeMap::new();
+        for n in nodes {
+            node_map.insert(n.id.clone(), n);
+        }
+        let final_nodes: Vec<IrNodeSpec> = node_map.into_values().collect();
+        let mut seen_links: BTreeSet<(String, String, Option<String>, Option<String>)> =
+            BTreeSet::new();
+        let mut final_links = Vec::with_capacity(links.len());
+        for l in links {
+            let key = (
+                l.source.clone(),
+                l.target.clone(),
+                l.relation.clone(),
+                l.context.clone(),
+            );
+            if seen_links.insert(key) {
+                final_links.push(l);
+            }
+        }
+        let node_count = final_nodes.len() as u64;
+        let link_count = final_links.len() as u64;
+        write_live_graph_json_stream_atomic(live_graph_path, |writer| {
+            write_node_link_payload_to_writer(writer, &final_nodes, &final_links)
+        })?;
+        Ok((node_count, link_count))
+    }
+}
+
+fn collect_symbol_ref_tokens(ir: &AstFileExtraction) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut push_tok = |raw: &str| {
+        for part in raw.split(['\\', '/', '.', ':', ' ', '(', ')', ',', '<', '>']) {
+            let trimmed = part.trim().trim_start_matches('$');
+            if trimmed.len() >= 2 && trimmed.len() <= 96 {
+                out.insert(trimmed.to_ascii_lowercase());
+            }
+        }
+    };
+    for ident in &ir.identifiers {
+        push_tok(ident);
+    }
+    for decl in &ir.declarations {
+        push_tok(&decl.entity.name);
+        if let Some(ref p) = decl.entity.parent {
+            push_tok(p);
+        }
+    }
+    for imp in &ir.imports {
+        push_tok(&imp.path);
+        for s in &imp.symbols {
+            push_tok(s);
+        }
+    }
+    for r in &ir.calls_and_refs {
+        push_tok(&r.target_name);
+        if let Some(ref m) = r.member {
+            push_tok(m);
+        }
+        if let Some(ref o) = r.owner_type {
+            push_tok(o);
+        }
+    }
+    for sem in &ir.semantic_edges {
+        if let Some((_, rest)) = sem.target.split_once(':') {
+            push_tok(rest);
+        } else {
+            push_tok(&sem.target);
+        }
+    }
+    out
 }
 
 fn ensure_column(conn: &Connection, table: &str, col: &str, col_def: &str) -> Result<()> {
@@ -2543,7 +3259,7 @@ fn query_incoming_callers_from_conn(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT DISTINCT source_file FROM ir_edges WHERE target_file IN ({placeholders})"
+            "SELECT DISTINCT source_file FROM ir_edges WHERE target_file IN ({placeholders}) AND source_file != target_file"
         );
         let mut stmt = conn.prepare(&sql)?;
         let params_vec: Vec<&dyn rusqlite::ToSql> =
@@ -2567,6 +3283,51 @@ fn collect_affected_dependents(
     for src in query_incoming_callers_from_conn(conn, affected_targets)? {
         if !skip_files.contains(&src) {
             candidates.insert(src);
+        }
+    }
+
+    // Re-export propagation: files referencing an edited module/barrel token (via `ir_symbol_refs`)
+    // or importing from a re-exported module must also be considered when re-exports exist on
+    // affected targets.
+    let reexp_tokens: Vec<String> = {
+        let mut set = BTreeSet::new();
+        for target in affected_targets {
+            let has_reexp: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ir_reexports WHERE file_path = ?1)",
+                    [target],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if has_reexp {
+                for tok in candidate_path_tokens(target) {
+                    let t = tok.trim().to_ascii_lowercase();
+                    if t.len() >= 2 {
+                        set.insert(t);
+                    }
+                }
+            }
+        }
+        set.into_iter().collect()
+    };
+    for chunk in reexp_tokens.chunks(200) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT DISTINCT file_path FROM ir_symbol_refs WHERE token_lower IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
+        for r in rows {
+            let fp = r?;
+            if !skip_files.contains(&fp) {
+                candidates.insert(fp);
+            }
         }
     }
 
@@ -2983,6 +3744,14 @@ fn delete_file_records(tx: &Transaction<'_>, rel_path: &str) -> Result<()> {
         "DELETE FROM ir_edges WHERE source_file = ?1 OR target_file = ?1",
         [rel_path],
     )?;
+    tx.execute(
+        "DELETE FROM ir_file_extractions WHERE file_path = ?1",
+        [rel_path],
+    )?;
+    tx.execute(
+        "DELETE FROM ir_symbol_refs WHERE file_path = ?1",
+        [rel_path],
+    )?;
     Ok(())
 }
 
@@ -3116,7 +3885,669 @@ fn upsert_parsed_file(tx: &Transaction<'_>, unit: &ParsedUnit, now: &str) -> Res
         }
     }
 
+    persist_file_extraction_and_refs(tx, &unit.rel_path, &unit.ir)?;
+
     Ok(())
+}
+
+fn persist_file_extraction_and_refs(
+    tx: &Transaction<'_>,
+    rel_path: &str,
+    ir: &AstFileExtraction,
+) -> Result<()> {
+    let summary_json = serde_json::to_string(ir)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO ir_file_extractions(file_path, summary_json) VALUES (?1, ?2)",
+        params![rel_path, summary_json],
+    )?;
+    tx.execute(
+        "DELETE FROM ir_symbol_refs WHERE file_path = ?1",
+        [rel_path],
+    )?;
+    let tokens = collect_symbol_ref_tokens(ir);
+    if !tokens.is_empty() {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR IGNORE INTO ir_symbol_refs(token_lower, file_path) VALUES (?1, ?2)",
+        )?;
+        for tok in tokens {
+            stmt.execute(params![tok, rel_path])?;
+        }
+    }
+    Ok(())
+}
+
+fn load_persisted_ir_extractions(
+    conn: &Connection,
+    paths: &[String],
+) -> Result<BTreeMap<String, AstFileExtraction>> {
+    let mut out = BTreeMap::new();
+    if paths.is_empty() {
+        return Ok(out);
+    }
+    for chunk in paths.chunks(200) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT file_path, summary_json FROM ir_file_extractions WHERE file_path IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (fp, json_str) = row?;
+            if let Ok(ir) = serde_json::from_str::<AstFileExtraction>(&json_str) {
+                out.insert(fp, ir);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn update_reexport_index_for_units(
+    index: &mut ReexportIndex,
+    removed: &[String],
+    parsed_units: &[ParsedUnit],
+) {
+    for rel in removed {
+        index.by_file.remove(rel);
+        index.declared_by_file.remove(rel);
+    }
+    for unit in parsed_units {
+        let rel = &unit.rel_path;
+        let decls = index.declared_by_file.entry(rel.clone()).or_default();
+        decls.clear();
+        for d in &unit.ir.declarations {
+            if d.entity.parent.as_deref() == Some(rel.as_str())
+                || !matches!(d.entity.kind.as_str(), "method" | "field" | "property")
+            {
+                decls.insert(d.entity.name.clone());
+            }
+        }
+        let entries = index.by_file.entry(rel.clone()).or_default();
+        entries.clear();
+        for imp in &unit.ir.imports {
+            if !imp.is_reexport {
+                continue;
+            }
+            if imp.is_wildcard {
+                entries.push(ReexportEntry {
+                    source_module_path: imp.path.clone(),
+                    exported_symbol: "*".to_owned(),
+                    original_symbol: "*".to_owned(),
+                    is_wildcard: true,
+                });
+            } else {
+                for orig in &imp.symbols {
+                    let exported = imp.alias.clone().unwrap_or_else(|| orig.clone());
+                    entries.push(ReexportEntry {
+                        source_module_path: imp.path.clone(),
+                        exported_symbol: exported,
+                        original_symbol: orig.clone(),
+                        is_wildcard: false,
+                    });
+                }
+            }
+        }
+        if entries.is_empty() {
+            index.by_file.remove(rel);
+        }
+    }
+}
+
+fn canonical_sem_target(kind: &str, target: &str) -> String {
+    if matches!(kind, "exposes_route" | "route" | "calls_route")
+        && let Some(raw) = target.strip_prefix("route:")
+    {
+        let trimmed = raw.trim();
+        let (verb, path) = match trimmed.split_once(' ') {
+            Some((v, p)) if p.trim_start().starts_with('/') => (Some(v), p.trim()),
+            _ => (None, trimmed),
+        };
+        if let Some(norm) = normalize_route_contract(verb, path, false) {
+            return norm;
+        }
+    }
+    target.to_owned()
+}
+
+fn semantic_anchor_priority(kind: &str) -> u8 {
+    match kind {
+        "writes_table" | "publishes_event" | "exposes_route" | "di_binds" => 0u8,
+        _ => 1u8,
+    }
+}
+
+fn compute_semantic_anchor_map<'a>(
+    sem_edges: &'a [StoredSemanticRow],
+    file_set: Option<&BTreeSet<&str>>,
+) -> BTreeMap<String, (u8, &'a str, u32)> {
+    let mut semantic_anchors: BTreeMap<String, (u8, &'a str, u32)> = BTreeMap::new();
+    for edge in sem_edges {
+        if let Some(allowed) = file_set
+            && !allowed.contains(edge.file_path.as_str())
+        {
+            continue;
+        }
+        let target_key = canonical_sem_target(&edge.kind, &edge.target);
+        let prio = semantic_anchor_priority(&edge.kind);
+        let cand = (prio, edge.file_path.as_str(), edge.line);
+        match semantic_anchors.get(target_key.as_str()) {
+            Some(prev) if *prev <= cand => {}
+            _ => {
+                semantic_anchors.insert(target_key, cand);
+            }
+        }
+    }
+    semantic_anchors
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_semantic_nodes_and_links(
+    sem_edges: &[StoredSemanticRow],
+    file_set: &BTreeSet<&str>,
+    maps: &SymbolResolutionMaps<'_>,
+    resolved_targets_by_source: &BTreeMap<&str, Vec<(&str, Option<&str>)>>,
+    communities: &BTreeMap<&str, (u32, String)>,
+    emit_node_files: Option<&BTreeSet<String>>,
+    emit_link_dirty_files: Option<&BTreeSet<String>>,
+    nodes: &mut Vec<IrNodeSpec>,
+    links: &mut Vec<IrLinkSpec>,
+) {
+    let semantic_anchors = compute_semantic_anchor_map(sem_edges, Some(file_set));
+
+    let resolve_di_target = |source_file: &str, src_id: &str, svc: &str| -> Option<String> {
+        let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
+        if short.is_empty() {
+            return None;
+        }
+        if let Some(same_file) = maps.type_by_file_and_name.get(&(source_file, short))
+            && same_file != src_id
+        {
+            return Some(same_file.clone());
+        }
+        if let Some(imports) = resolved_targets_by_source.get(source_file) {
+            let mut candidates: Vec<String> = Vec::new();
+            for &(target_file, target_sym) in imports {
+                let sym_matches = target_sym.is_some_and(|s| {
+                    s == short
+                        || s.rsplit(['\\', ':', '.'])
+                            .next()
+                            .is_some_and(|tail| tail == short)
+                });
+                if (sym_matches || target_sym.is_none())
+                    && let Some(id) = maps.type_by_file_and_name.get(&(target_file, short))
+                    && id != src_id
+                    && !candidates.contains(id)
+                {
+                    candidates.push(id.clone());
+                }
+            }
+            if candidates.len() == 1 {
+                return candidates.into_iter().next();
+            }
+        }
+        if let Some(all_matches) = maps.type_ids_by_name.get(short) {
+            let qual_norm = svc.replace(['\\', '.'], "/").replace("::", "/");
+            if qual_norm.contains('/') {
+                let mut qual_hits: Vec<String> = all_matches
+                    .iter()
+                    .filter(|(id, f)| {
+                        id != src_id
+                            && f.to_ascii_lowercase()
+                                .contains(&qual_norm.to_ascii_lowercase())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                qual_hits.sort();
+                qual_hits.dedup();
+                if qual_hits.len() == 1 {
+                    return qual_hits.into_iter().next();
+                }
+            }
+            if all_matches.len() == 1 && all_matches[0].0 != src_id {
+                return Some(all_matches[0].0.clone());
+            }
+        }
+        None
+    };
+
+    let mut emitted_semantic_nodes: BTreeMap<String, String> = BTreeMap::new();
+    let mut di_groups: BTreeMap<(&str, Option<&str>, u32, &str), Vec<String>> = BTreeMap::new();
+    for edge in sem_edges {
+        if !file_set.contains(edge.file_path.as_str()) {
+            continue;
+        }
+        let target_key = canonical_sem_target(&edge.kind, &edge.target);
+        let src_id = maps.resolve_symbol(
+            &edge.file_path,
+            edge.source_symbol.as_deref(),
+            "calls",
+            edge.line,
+        );
+        let matched_type_id = if edge.kind == "di_binds"
+            && let Some(svc) = target_key.strip_prefix("service:")
+        {
+            resolve_di_target(&edge.file_path, &src_id, svc)
+        } else {
+            None
+        };
+        if let Some(ref type_id) = matched_type_id {
+            di_groups
+                .entry((
+                    edge.file_path.as_str(),
+                    edge.source_symbol.as_deref(),
+                    edge.line,
+                    edge.evidence.as_str(),
+                ))
+                .or_default()
+                .push(type_id.clone());
+        }
+
+        let dst_id = if let Some(type_id) = matched_type_id {
+            type_id
+        } else if let Some(existing) = emitted_semantic_nodes.get(target_key.as_str()) {
+            existing.clone()
+        } else {
+            let sem_id = format!("sem:{target_key}");
+            let (_, anchor_file, anchor_line) = semantic_anchors
+                .get(target_key.as_str())
+                .copied()
+                .unwrap_or((1, edge.file_path.as_str(), edge.line));
+            let should_emit_node =
+                emit_node_files.is_none_or(|allowed| allowed.contains(anchor_file));
+            if should_emit_node {
+                let (comm_id, comm_name) = communities
+                    .get(anchor_file)
+                    .map_or((None, None), |(id, name)| (Some(*id), Some(name.clone())));
+                nodes.push(IrNodeSpec {
+                    id: sem_id.clone(),
+                    label: target_key.clone(),
+                    source_file: anchor_file.to_owned(),
+                    source_location: Some(format!("L{anchor_line}")),
+                    end_line: 0,
+                    file_type: None,
+                    node_kind: Some("semantic".to_owned()),
+                    community: comm_id,
+                    community_name: comm_name,
+                    callable_class: false,
+                    is_abstract: false,
+                    is_test: is_test_path(anchor_file),
+                });
+            }
+            emitted_semantic_nodes.insert(target_key.clone(), sem_id.clone());
+            sem_id
+        };
+
+        let should_emit_link =
+            emit_link_dirty_files.is_none_or(|dirty| dirty.contains(&edge.file_path));
+        if should_emit_link && src_id != dst_id {
+            links.push(IrLinkSpec {
+                source: src_id,
+                target: dst_id,
+                relation: Some(edge.kind.clone()),
+                confidence: Some("EXTRACTED".to_owned()),
+                source_file: Some(edge.file_path.clone()),
+                context: Some(edge.kind.clone()),
+                evidence: Some(edge.evidence.clone()),
+            });
+        }
+    }
+
+    let mut seen_di_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    for ((src_file, _, _, evidence), targets) in di_groups {
+        if let Some(dirty) = emit_link_dirty_files
+            && !dirty.contains(src_file)
+        {
+            continue;
+        }
+        if targets.len() < 2 {
+            continue;
+        }
+        let iface_id = &targets[0];
+        for impl_id in &targets[1..] {
+            if iface_id != impl_id && seen_di_pairs.insert((iface_id.clone(), impl_id.clone())) {
+                links.push(IrLinkSpec {
+                    source: iface_id.clone(),
+                    target: impl_id.clone(),
+                    relation: Some("di_binds".to_owned()),
+                    confidence: Some("EXTRACTED".to_owned()),
+                    source_file: None,
+                    context: Some("di_binds".to_owned()),
+                    evidence: Some(evidence.to_owned()),
+                });
+            }
+        }
+    }
+}
+
+fn obtain_tx_reexport_index(
+    cache: &Mutex<Option<(u64, ReexportIndex)>>,
+    conn: &Connection,
+    epoch: u64,
+) -> Result<ReexportIndex> {
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_epoch, ref idx)) = *guard
+        && cached_epoch == epoch
+    {
+        return Ok(idx.clone());
+    }
+    let idx = build_reexport_index_from_db(conn)?;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((epoch, idx.clone()));
+    }
+    Ok(idx)
+}
+
+fn store_reexport_cache(
+    cache: &Mutex<Option<(u64, ReexportIndex)>>,
+    epoch: u64,
+    index: ReexportIndex,
+) {
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((epoch, index));
+    }
+}
+
+fn query_semantic_rows_for_targets(
+    conn: &Connection,
+    canonical_targets: &[String],
+) -> Result<Vec<StoredSemanticRow>> {
+    if canonical_targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target_set: BTreeSet<&str> = canonical_targets.iter().map(String::as_str).collect();
+    let has_route = canonical_targets.iter().any(|t| t.starts_with("route:"));
+    let mut out = Vec::new();
+    let non_route: Vec<&String> = canonical_targets
+        .iter()
+        .filter(|t| !t.starts_with("route:"))
+        .collect();
+    for chunk in non_route.chunks(200) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT file_path, kind, target, source_symbol, line, evidence
+             FROM ir_semantic_edges
+             WHERE target IN ({placeholders})
+             ORDER BY id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+            Ok(StoredSemanticRow {
+                file_path: row.get(0)?,
+                kind: row.get(1)?,
+                target: row.get(2)?,
+                source_symbol: row.get(3)?,
+                line: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                evidence: row.get(5)?,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+    if has_route {
+        let mut stmt = conn.prepare(
+            "SELECT file_path, kind, target, source_symbol, line, evidence
+             FROM ir_semantic_edges
+             WHERE kind IN ('exposes_route', 'calls_route', 'route')
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredSemanticRow {
+                file_path: row.get(0)?,
+                kind: row.get(1)?,
+                target: row.get(2)?,
+                source_symbol: row.get(3)?,
+                line: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                evidence: row.get(5)?,
+            })
+        })?;
+        for r in rows {
+            let row = r?;
+            let canon = canonical_sem_target(&row.kind, &row.target);
+            if target_set.contains(canon.as_str()) {
+                out.push(row);
+            }
+        }
+    }
+    Ok(out)
+}
+
+struct PrevReexportSemanticState {
+    prev_reexports: BTreeMap<String, Vec<(String, String, String, bool)>>,
+    prev_sem_targets: BTreeSet<String>,
+    prev_di_targets: BTreeSet<String>,
+    prev_sem_anchors: Vec<String>,
+}
+
+fn collect_prev_reexport_and_semantic_state(
+    conn: &Connection,
+    touched_files: &[String],
+) -> Result<PrevReexportSemanticState> {
+    let mut prev_reexports: BTreeMap<String, Vec<(String, String, String, bool)>> = BTreeMap::new();
+    let mut prev_sem_targets = BTreeSet::new();
+    let mut prev_di_targets = BTreeSet::new();
+    let mut prev_decl_names = BTreeSet::new();
+
+    for chunk in touched_files.chunks(200) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reexp_sql = format!(
+            "SELECT file_path, alias, orig_path, orig_symbol, is_wildcard
+             FROM ir_reexports WHERE file_path IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&reexp_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)? != 0,
+            ))
+        })?;
+        for row in rows {
+            let (fp, alias, orig_path, orig_symbol, is_wild) = row?;
+            prev_reexports
+                .entry(fp)
+                .or_default()
+                .push((alias, orig_path, orig_symbol, is_wild));
+        }
+
+        let sem_sql = format!(
+            "SELECT kind, target FROM ir_semantic_edges WHERE file_path IN ({placeholders})"
+        );
+        let mut sem_stmt = conn.prepare(&sem_sql)?;
+        let sem_rows = sem_stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in sem_rows {
+            let (kind, target) = row?;
+            if kind == "di_binds" {
+                prev_di_targets.insert(target);
+            } else {
+                prev_sem_targets.insert(canonical_sem_target(&kind, &target));
+            }
+        }
+
+        let sym_sql =
+            format!("SELECT DISTINCT name FROM ir_symbols WHERE file_path IN ({placeholders})");
+        let mut sym_stmt = conn.prepare(&sym_sql)?;
+        let sym_rows = sym_stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
+        for r in sym_rows {
+            prev_decl_names.insert(r?);
+        }
+    }
+    for list in prev_reexports.values_mut() {
+        list.sort();
+    }
+
+    if !prev_decl_names.is_empty() {
+        let mut di_stmt =
+            conn.prepare("SELECT DISTINCT target FROM ir_semantic_edges WHERE kind = 'di_binds'")?;
+        let di_rows = di_stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in di_rows {
+            let target = r?;
+            if let Some(svc) = target.strip_prefix("service:") {
+                let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
+                if prev_decl_names.contains(short) {
+                    prev_di_targets.insert(target);
+                }
+            }
+        }
+    }
+
+    let target_list: Vec<String> = prev_sem_targets.iter().cloned().collect();
+    let prev_rows = query_semantic_rows_for_targets(conn, &target_list)?;
+    let prev_anchors = compute_semantic_anchor_map(&prev_rows, None);
+    let prev_anchor_files: BTreeSet<String> = prev_anchors
+        .into_values()
+        .map(|(_, fp, _)| fp.to_owned())
+        .collect();
+
+    Ok(PrevReexportSemanticState {
+        prev_reexports,
+        prev_sem_targets,
+        prev_di_targets,
+        prev_sem_anchors: prev_anchor_files.into_iter().collect(),
+    })
+}
+
+fn compute_reexport_changed_files(
+    prev_reexports: &BTreeMap<String, Vec<(String, String, String, bool)>>,
+    removed: &[String],
+    parsed_units: &[ParsedUnit],
+) -> Vec<String> {
+    let mut changed = BTreeSet::new();
+    for rem in removed {
+        if prev_reexports.contains_key(rem) {
+            changed.insert(rem.clone());
+        }
+    }
+    for unit in parsed_units {
+        let mut next: Vec<(String, String, String, bool)> = Vec::new();
+        for imp in &unit.ir.imports {
+            if !imp.is_reexport {
+                continue;
+            }
+            if imp.is_wildcard {
+                next.push(("*".to_owned(), imp.path.clone(), "*".to_owned(), true));
+            } else {
+                for orig in &imp.symbols {
+                    let alias = imp.alias.clone().unwrap_or_else(|| orig.clone());
+                    next.push((alias, imp.path.clone(), orig.clone(), false));
+                }
+            }
+        }
+        next.sort();
+        let prev = prev_reexports
+            .get(&unit.rel_path)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if prev != next.as_slice() {
+            changed.insert(unit.rel_path.clone());
+        }
+    }
+    changed.into_iter().collect()
+}
+
+fn collect_post_semantic_delta(
+    conn: &Connection,
+    prev_sem_targets: &BTreeSet<String>,
+    prev_di_targets: &BTreeSet<String>,
+    parsed_units: &[ParsedUnit],
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut all_sem_targets = prev_sem_targets.clone();
+    let mut all_di_targets = prev_di_targets.clone();
+    let mut edited_decl_names = BTreeSet::new();
+    for unit in parsed_units {
+        for d in &unit.ir.declarations {
+            edited_decl_names.insert(d.entity.name.clone());
+        }
+        for edge in &unit.ir.semantic_edges {
+            if edge.kind == "di_binds" {
+                all_di_targets.insert(edge.target.clone());
+            } else {
+                all_sem_targets.insert(canonical_sem_target(&edge.kind, &edge.target));
+            }
+        }
+    }
+    if !edited_decl_names.is_empty() {
+        let mut di_stmt =
+            conn.prepare("SELECT DISTINCT target FROM ir_semantic_edges WHERE kind = 'di_binds'")?;
+        let di_rows = di_stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in di_rows {
+            let target = r?;
+            if let Some(svc) = target.strip_prefix("service:") {
+                let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
+                if edited_decl_names.contains(short) {
+                    all_di_targets.insert(target);
+                }
+            }
+        }
+    }
+
+    let mut touched_di_files = BTreeSet::new();
+    if !all_di_targets.is_empty() {
+        let di_vec: Vec<String> = all_di_targets.iter().cloned().collect();
+        for chunk in di_vec.chunks(200) {
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT DISTINCT file_path FROM ir_semantic_edges
+                 WHERE kind = 'di_binds' AND target IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                r.get::<_, String>(0)
+            })?;
+            for r in rows {
+                touched_di_files.insert(r?);
+            }
+        }
+        let sym_names: Vec<String> = all_di_targets
+            .iter()
+            .filter_map(|t| t.strip_prefix("service:"))
+            .flat_map(|s| {
+                let tail = s.rsplit(['\\', ':', '.']).next().unwrap_or(s).trim();
+                (!tail.is_empty()).then(|| tail.to_owned())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in sym_names.chunks(200) {
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql =
+                format!("SELECT DISTINCT file_path FROM ir_symbols WHERE name IN ({placeholders})");
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                r.get::<_, String>(0)
+            })?;
+            for r in rows {
+                touched_di_files.insert(r?);
+            }
+        }
+    }
+
+    Ok((
+        all_sem_targets.into_iter().collect(),
+        touched_di_files.into_iter().collect(),
+    ))
 }
 
 fn build_reexport_index_from_db(conn: &Connection) -> Result<ReexportIndex> {
@@ -3180,22 +4611,33 @@ fn replace_file_edges(
     reexports: &ReexportIndex,
     crate_map: &CratePackageMap,
 ) -> Result<()> {
-    tx.execute(
-        "DELETE FROM ir_edges WHERE source_file = ?1",
-        [&unit.rel_path],
-    )?;
-    tx.execute(
-        "DELETE FROM ir_unresolved_imports WHERE source_file = ?1",
-        [&unit.rel_path],
-    )?;
-    let (rows, unresolved) = extract_ir_edges_for_file(
+    replace_file_edges_for_ir(
+        tx,
         &unit.rel_path,
         &unit.ir,
         known_files,
         manifests,
         reexports,
         crate_map,
-    );
+    )
+}
+
+fn replace_file_edges_for_ir(
+    tx: &Transaction<'_>,
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    known_files: &BTreeSet<String>,
+    manifests: &ManifestIndex,
+    reexports: &ReexportIndex,
+    crate_map: &CratePackageMap,
+) -> Result<()> {
+    tx.execute("DELETE FROM ir_edges WHERE source_file = ?1", [rel_path])?;
+    tx.execute(
+        "DELETE FROM ir_unresolved_imports WHERE source_file = ?1",
+        [rel_path],
+    )?;
+    let (rows, unresolved) =
+        extract_ir_edges_for_file(rel_path, ir, known_files, manifests, reexports, crate_map);
     let mut stmt = tx.prepare_cached(
         "INSERT INTO ir_edges(
             source_file, source_symbol, target_file, target_symbol,
@@ -3239,7 +4681,7 @@ fn extract_ir_edges_for_file(
     reexports: &ReexportIndex,
     crate_map: &CratePackageMap,
 ) -> (Vec<IrEdgeRow>, Vec<UnresolvedImportRow>) {
-    let deps = graph_deps::extract_file_deps_from_ir(
+    let deps = graph_deps::extract_file_deps_with_intra_from_ir(
         rel_path,
         ir,
         known_files,
@@ -3261,6 +4703,13 @@ fn extract_ir_edges_for_file(
     let mut seen_unresolved: BTreeSet<(String, String, u32)> = BTreeSet::new();
 
     let mut push_row = |row: IrEdgeRow| {
+        if row.target_file == rel_path
+            && (row.source_symbol.is_none()
+                || row.target_symbol.is_none()
+                || row.source_symbol == row.target_symbol)
+        {
+            return;
+        }
         let key = (
             row.source_symbol.clone(),
             row.target_file.clone(),
@@ -3276,11 +4725,7 @@ fn extract_ir_edges_for_file(
 
     for dep in deps {
         let dep_line = dep.line.unwrap_or(1);
-        if !dep.resolved
-            || !dep.exists
-            || dep.target == rel_path
-            || !known_files.contains(&dep.target)
-        {
+        if !dep.resolved || !dep.exists || !known_files.contains(&dep.target) {
             if dep.target != rel_path {
                 let unresolved_kind = if dep.resolved && dep.exists {
                     format!("{}:truncated_target", dep.kind)
@@ -3905,7 +5350,9 @@ fn compute_file_communities_for_delta<'a>(
         return Ok(finish_file_communities(files, raw_labels, false, &[]));
     }
     let owned_pairs: Vec<(String, String)> = {
-        let mut stmt = conn.prepare("SELECT source_file, target_file FROM ir_edges")?;
+        let mut stmt = conn.prepare(
+            "SELECT source_file, target_file FROM ir_edges WHERE source_file != target_file",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -4262,196 +5709,17 @@ fn collect_graph_elements(
         collect_resolved_edge_links(edges, &file_set, &maps);
     links.extend(edge_links);
 
-    let canonical_sem_target = |kind: &str, target: &str| -> String {
-        if matches!(kind, "exposes_route" | "route" | "calls_route")
-            && let Some(raw) = target.strip_prefix("route:")
-        {
-            let trimmed = raw.trim();
-            let (verb, path) = match trimmed.split_once(' ') {
-                Some((v, p)) if p.trim_start().starts_with('/') => (Some(v), p.trim()),
-                _ => (None, trimmed),
-            };
-            if let Some(norm) = normalize_route_contract(verb, path, false) {
-                return norm;
-            }
-        }
-        target.to_owned()
-    };
-
-    // Choose a deterministic anchor file for each shared semantic target (e.g., writers/publishers
-    // before readers/listeners) so `graph_map::patterns` and `system_graph` join across files.
-    let mut semantic_anchors: BTreeMap<String, (u8, &str, u32)> = BTreeMap::new();
-    for edge in sem_edges {
-        if !file_set.contains(edge.file_path.as_str()) {
-            continue;
-        }
-        let target_key = canonical_sem_target(&edge.kind, &edge.target);
-        let prio = match edge.kind.as_str() {
-            "writes_table" | "publishes_event" | "exposes_route" | "di_binds" => 0u8,
-            _ => 1u8,
-        };
-        let cand = (prio, edge.file_path.as_str(), edge.line);
-        match semantic_anchors.get(target_key.as_str()) {
-            Some(prev) if *prev <= cand => {}
-            _ => {
-                semantic_anchors.insert(target_key, cand);
-            }
-        }
-    }
-
-    let resolve_di_target = |source_file: &str, src_id: &str, svc: &str| -> Option<String> {
-        let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
-        if short.is_empty() {
-            return None;
-        }
-        if let Some(same_file) = maps.type_by_file_and_name.get(&(source_file, short))
-            && same_file != src_id
-        {
-            return Some(same_file.clone());
-        }
-        if let Some(imports) = resolved_targets_by_source.get(source_file) {
-            let mut candidates: Vec<String> = Vec::new();
-            for &(target_file, target_sym) in imports {
-                let sym_matches = target_sym.is_some_and(|s| {
-                    s == short
-                        || s.rsplit(['\\', ':', '.'])
-                            .next()
-                            .is_some_and(|tail| tail == short)
-                });
-                if (sym_matches || target_sym.is_none())
-                    && let Some(id) = maps.type_by_file_and_name.get(&(target_file, short))
-                    && id != src_id
-                    && !candidates.contains(id)
-                {
-                    candidates.push(id.clone());
-                }
-            }
-            if candidates.len() == 1 {
-                return candidates.into_iter().next();
-            }
-        }
-        if let Some(all_matches) = maps.type_ids_by_name.get(short) {
-            let qual_norm = svc.replace(['\\', '.'], "/").replace("::", "/");
-            if qual_norm.contains('/') {
-                let mut qual_hits: Vec<String> = all_matches
-                    .iter()
-                    .filter(|(id, f)| {
-                        id != src_id
-                            && f.to_ascii_lowercase()
-                                .contains(&qual_norm.to_ascii_lowercase())
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                qual_hits.sort();
-                qual_hits.dedup();
-                if qual_hits.len() == 1 {
-                    return qual_hits.into_iter().next();
-                }
-            }
-            if all_matches.len() == 1 && all_matches[0].0 != src_id {
-                return Some(all_matches[0].0.clone());
-            }
-        }
-        None
-    };
-
-    let mut emitted_semantic_nodes: BTreeMap<String, String> = BTreeMap::new();
-    let mut di_groups: BTreeMap<(&str, Option<&str>, u32, &str), Vec<String>> = BTreeMap::new();
-    for edge in sem_edges {
-        if !file_set.contains(edge.file_path.as_str()) {
-            continue;
-        }
-        let target_key = canonical_sem_target(&edge.kind, &edge.target);
-        let src_id = maps.resolve_symbol(
-            &edge.file_path,
-            edge.source_symbol.as_deref(),
-            "calls",
-            edge.line,
-        );
-        let matched_type_id = if edge.kind == "di_binds"
-            && let Some(svc) = target_key.strip_prefix("service:")
-        {
-            resolve_di_target(&edge.file_path, &src_id, svc)
-        } else {
-            None
-        };
-        if let Some(ref type_id) = matched_type_id {
-            di_groups
-                .entry((
-                    edge.file_path.as_str(),
-                    edge.source_symbol.as_deref(),
-                    edge.line,
-                    edge.evidence.as_str(),
-                ))
-                .or_default()
-                .push(type_id.clone());
-        }
-
-        let dst_id = if let Some(type_id) = matched_type_id {
-            type_id
-        } else if let Some(existing) = emitted_semantic_nodes.get(target_key.as_str()) {
-            existing.clone()
-        } else {
-            let sem_id = format!("sem:{target_key}");
-            let (_, anchor_file, anchor_line) = semantic_anchors
-                .get(target_key.as_str())
-                .copied()
-                .unwrap_or((1, edge.file_path.as_str(), edge.line));
-            let (comm_id, comm_name) = communities
-                .get(anchor_file)
-                .map_or((None, None), |(id, name)| (Some(*id), Some(name.clone())));
-            nodes.push(IrNodeSpec {
-                id: sem_id.clone(),
-                label: target_key.clone(),
-                source_file: anchor_file.to_owned(),
-                source_location: Some(format!("L{anchor_line}")),
-                end_line: 0,
-                file_type: None,
-                node_kind: Some("semantic".to_owned()),
-                community: comm_id,
-                community_name: comm_name,
-                callable_class: false,
-                is_abstract: false,
-                is_test: is_test_path(anchor_file),
-            });
-            emitted_semantic_nodes.insert(target_key, sem_id.clone());
-            sem_id
-        };
-
-        if src_id == dst_id {
-            continue;
-        }
-        links.push(IrLinkSpec {
-            source: src_id,
-            target: dst_id,
-            relation: Some(edge.kind.clone()),
-            confidence: Some("EXTRACTED".to_owned()),
-            source_file: Some(edge.file_path.clone()),
-            context: Some(edge.kind.clone()),
-            evidence: Some(edge.evidence.clone()),
-        });
-    }
-
-    let mut seen_di_pairs: BTreeSet<(String, String)> = BTreeSet::new();
-    for ((_, _, _, evidence), targets) in di_groups {
-        if targets.len() < 2 {
-            continue;
-        }
-        let iface_id = &targets[0];
-        for impl_id in &targets[1..] {
-            if iface_id != impl_id && seen_di_pairs.insert((iface_id.clone(), impl_id.clone())) {
-                links.push(IrLinkSpec {
-                    source: iface_id.clone(),
-                    target: impl_id.clone(),
-                    relation: Some("di_binds".to_owned()),
-                    confidence: Some("EXTRACTED".to_owned()),
-                    source_file: None,
-                    context: Some("di_binds".to_owned()),
-                    evidence: Some(evidence.to_owned()),
-                });
-            }
-        }
-    }
+    emit_semantic_nodes_and_links(
+        sem_edges,
+        &file_set,
+        &maps,
+        &resolved_targets_by_source,
+        &communities,
+        None,
+        None,
+        &mut nodes,
+        &mut links,
+    );
 
     let node_count = nodes.len() as u64;
     let link_count = links.len() as u64;
@@ -5536,5 +6804,239 @@ mod tests {
             "expected incoming caller src/use.ts: {:?}",
             second.incoming_caller_files
         );
+    }
+
+    #[test]
+    fn persisted_extractions_and_symbol_refs_power_lookup_past_300_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/callers")).unwrap();
+        std::fs::write(
+            root.join("src/target.ts"),
+            "export function hotSpot(v: number): number { return v + 1; }\n",
+        )
+        .unwrap();
+        for i in 0..320 {
+            std::fs::write(
+                root.join(format!("src/callers/c{i:03}.ts")),
+                "import { hotSpot } from '../target';\nexport const r = hotSpot(1);\n",
+            )
+            .unwrap();
+        }
+
+        let store = GraphIrStore::open(&state, "persisted-refs").unwrap();
+        store.sync_workspace(&root).unwrap();
+
+        assert!(store.has_symbol_refs_index().unwrap());
+        let callers = store.lookup_symbol_ref_callers(&["hotSpot"]).unwrap();
+        assert_eq!(
+            callers.len(),
+            321,
+            "target + 320 callers must all be indexed"
+        );
+        assert!(
+            store
+                .load_file_extraction_if_fresh(&root, "src/callers/c000.ts")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn intra_file_edges_surface_in_symbol_graph_without_polluting_file_coupling() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/calc.ts"),
+            r#"
+export class Calc {
+    compute(v: number): number {
+        return helper(v) + this.double(v);
+    }
+    double(v: number): number {
+        return v * 2;
+    }
+}
+function helper(v: number): number { return v + 1; }
+"#,
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "intra-file").unwrap();
+        store.sync_workspace(&root).unwrap();
+
+        // Cross-file coupling metrics must stay empty (no self file edge).
+        assert!(store.all_resolved_file_edges().unwrap().is_empty());
+        assert!(
+            store
+                .incoming_caller_files("src/calc.ts")
+                .unwrap()
+                .is_empty()
+        );
+
+        // Symbol-level graph export must surface intra-file edges.
+        let (nodes, links, _, _) = store.export_ir_graph_elements().unwrap();
+        assert!(
+            links.iter().any(|l| {
+                l.source.contains("compute")
+                    && l.target.contains("double")
+                    && l.relation.as_deref() == Some("calls")
+            }),
+            "expected intra-file Calc.compute -> Calc.double symbol link in: {links:?}"
+        );
+        assert!(
+            links.iter().any(|l| {
+                l.source.contains("compute")
+                    && l.target.contains("helper")
+                    && l.relation.as_deref() == Some("calls")
+            }),
+            "expected intra-file Calc.compute -> helper symbol link in: {links:?}"
+        );
+        let idx = crate::graph_map::Index::from_ir_parts(&root, None, None, nodes, links).unwrap();
+        let sym_view = idx.view_at_lod_unfiltered(
+            "intra-file",
+            crate::graph_map::Lod::Symbol,
+            &crate::graph_map::LodFilter {
+                scope: "",
+                focus: None,
+                filter: "",
+                certain: false,
+                offset: 0,
+                limit: None,
+            },
+        );
+        let sym_edges = sym_view["edges"].as_array().unwrap();
+        assert!(
+            !sym_edges.is_empty(),
+            "expected intra-file symbol edges at Lod::Symbol: {sym_view}"
+        );
+        assert!(
+            idx.pairs().is_empty(),
+            "intra-file symbol edges must not pollute cross-file coupling pairs: {:?}",
+            idx.pairs()
+        );
+    }
+
+    #[test]
+    fn incremental_semantic_reexport_deltas_and_live_json_patch_match_full_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        let live_json = state.join("live/graph.json");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/impl_a.ts"),
+            "export function op(): number { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/impl_b.ts"),
+            "export function op(): number { return 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/barrel.ts"),
+            "export { op } from './impl_a';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { op } from './barrel';\nexport function run(): number { return op(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("app.php"), "<?php\nDB::table('orders')->get();\n").unwrap();
+        std::fs::write(
+            root.join("writer.php"),
+            "<?php\nclass OrderWriter { public function save() { DB::table('orders')->insert([]); } }\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "inc-sem-reexp").unwrap();
+        store.sync_workspace(&root).unwrap();
+        store.write_live_graph_atomic(&live_json).unwrap();
+        let (base_nodes, base_links, _, _) = store.export_ir_graph_elements().unwrap();
+        let mut live_index =
+            crate::graph_map::Index::from_ir_parts(&root, None, None, base_nodes, base_links)
+                .unwrap();
+
+        // 1. Re-export target swap in barrel.ts propagates incrementally to consumer.ts.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/barrel.ts"),
+            "export { op } from './impl_b';\n",
+        )
+        .unwrap();
+        let d_reexp = store
+            .update_paths_with_delta(&root, &["src/barrel.ts".to_owned()])
+            .unwrap();
+        assert!(d_reexp.reexport_changed);
+        assert!(
+            d_reexp
+                .re_resolved_files
+                .contains(&"src/consumer.ts".to_owned()),
+            "re-export consumer should be re-resolved: {:?}",
+            d_reexp.re_resolved_files
+        );
+        let ir_d_reexp = store
+            .export_ir_delta_for_files(&d_reexp)
+            .unwrap()
+            .expect("reexport delta must be incremental");
+        store
+            .patch_live_graph_from_deltas_atomic(&live_json, &[&ir_d_reexp])
+            .unwrap();
+        live_index = live_index.update_files(&root, ir_d_reexp.clone()).unwrap();
+
+        // 2. Semantic table write addition updates sem:table:invoices incrementally without Ok(None).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("writer.php"),
+            "<?php\nclass OrderWriter { public function save() { DB::table('orders')->insert([]); DB::table('invoices')->insert([]); } }\n",
+        )
+        .unwrap();
+        let d_sem = store
+            .update_paths_with_delta(&root, &["writer.php".to_owned()])
+            .unwrap();
+        assert!(d_sem.semantic_changed);
+        let ir_d_sem = store
+            .export_ir_delta_for_files(&d_sem)
+            .unwrap()
+            .expect("semantic delta must export incrementally instead of Ok(None)");
+        store
+            .patch_live_graph_from_deltas_atomic(&live_json, &[&ir_d_sem])
+            .unwrap();
+        live_index = live_index.update_files(&root, ir_d_sem.clone()).unwrap();
+
+        // Patched live/graph.json & incrementally updated Index must reflect impl_b and invoices.
+        let patched_bytes = std::fs::read(&live_json).unwrap();
+        let patched_val: Value = serde_json::from_slice(&patched_bytes).unwrap();
+        let has_invoices = patched_val["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "sem:table:invoices");
+        assert!(
+            has_invoices,
+            "patched live/graph.json missing sem:table:invoices"
+        );
+        assert!(
+            patched_val["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["source_file"] == "src/consumer.ts"
+                    && l["target"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("impl_b.ts"))),
+            "patched live/graph.json missing consumer -> impl_b link: {}",
+            patched_val["links"]
+        );
+        let (full_nodes, full_links, _, _) = store.export_ir_graph_elements().unwrap();
+        let full_idx =
+            crate::graph_map::Index::from_ir_parts(&root, None, None, full_nodes, full_links)
+                .unwrap();
+        assert_eq!(live_index.node_link_counts(), full_idx.node_link_counts());
     }
 }

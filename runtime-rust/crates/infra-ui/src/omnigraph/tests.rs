@@ -1615,3 +1615,156 @@ fn system_jump_and_code_map_jump_preserve_full_context() {
     assert_eq!(fallback.target_commit.as_deref(), Some("9999aaa"));
     assert_eq!(fallback.semantic_kind.as_deref(), Some("di_binds"));
 }
+
+#[test]
+fn constellation_surfaces_ir_edges_semantics_violations_and_blast_markers() {
+    let graph = json!({
+        "active_branch": "main",
+        "files": [
+            { "id": "src/controller/OrderController.php", "path": "src/controller/OrderController.php", "touch_count": 2 }
+        ],
+        "ir_edges": [
+            {
+                "from": "src/controller/OrderController.php",
+                "to": "src/db/OrderRepo.php",
+                "source_file": "src/controller/OrderController.php",
+                "target_file": "src/db/OrderRepo.php",
+                "relation": "calls",
+                "confidence": "EXTRACTED"
+            }
+        ],
+        "ir_semantic_edges": [
+            {
+                "file_path": "src/controller/OrderController.php",
+                "relation": "writes_table",
+                "target": "table:orders"
+            },
+            {
+                "file_path": "src/worker/OrderReader.php",
+                "relation": "reads_table",
+                "target": "table:orders"
+            }
+        ],
+        "architecture_violations": [
+            {
+                "kind": "layer",
+                "rule_id": "controller",
+                "from": "src/controller/OrderController.php",
+                "to": "src/db/OrderRepo.php",
+                "message": "Layer Controller forbids DB"
+            }
+        ],
+        "blast_markers": [
+            {
+                "path": "src/controller/OrderController.php",
+                "blast_files": 4,
+                "blast_tests": 2,
+                "violation_count": 1,
+                "in_cycle": false,
+                "risk": "high"
+            },
+            {
+                "path": "src/db/OrderRepo.php",
+                "blast_files": 6,
+                "blast_tests": 3,
+                "violation_count": 1,
+                "in_cycle": true,
+                "risk": "high"
+            }
+        ]
+    });
+
+    let filter = omnigraph_canvas::ConstellationFilter {
+        show_sessions: true,
+        show_files: true,
+        ..Default::default()
+    };
+    let rendered = omnigraph_canvas::render_constellation(
+        &graph,
+        &filter,
+        &omnigraph_canvas::CanvasViewport::default(),
+    );
+    assert!(
+        rendered.html.contains("data-arch-violation=\"true\""),
+        "expected architecture violation edge marker in Constellation HTML: {}",
+        rendered.html
+    );
+    assert!(
+        rendered.html.contains("data-code-edge=\"true\""),
+        "expected code edge marker in Constellation HTML"
+    );
+    assert!(
+        rendered.html.contains("omni-arch-badge"),
+        "expected architecture violation badge"
+    );
+    assert!(
+        rendered.html.contains("omni-blast-badge"),
+        "expected blast radius badge"
+    );
+    assert!(
+        rendered.html.contains("omni-cycle-badge"),
+        "expected cycle badge on synthesized OrderRepo.php"
+    );
+    assert!(
+        rendered.html.contains("omni-sem-badge"),
+        "expected semantic badge"
+    );
+    assert!(
+        rendered
+            .node_rects
+            .iter()
+            .any(|(id, ..)| id == "src/db/OrderRepo.php"),
+        "expected synthesized target file node from ir_edges"
+    );
+    assert!(
+        rendered
+            .node_rects
+            .iter()
+            .any(|(id, ..)| id == "src/worker/OrderReader.php"),
+        "expected cross-file semantic partner node"
+    );
+
+    let node_index_by_id: HashMap<String, usize> = rendered
+        .node_rects
+        .iter()
+        .enumerate()
+        .map(|(i, (id, ..))| (id.clone(), i))
+        .collect();
+    let node_titles: Vec<String> = rendered
+        .node_rects
+        .iter()
+        .map(|(id, ..)| id.clone())
+        .collect();
+    let meta = constellation_view::build_omni_dense_scene_meta(
+        &graph,
+        &rendered.node_rects,
+        &rendered.edge_endpoints,
+        &node_titles,
+        &node_index_by_id,
+    );
+    let ctrl_idx = node_index_by_id["src/controller/OrderController.php"];
+    assert_eq!(meta.nodes[&ctrl_idx].blast_tag, "1 viol");
+    assert_eq!(meta.nodes[&ctrl_idx].badge_text, "!1 · 4f");
+    assert_eq!(
+        meta.nodes[&ctrl_idx].explain_payload["violation_count"],
+        json!(1)
+    );
+    assert_eq!(
+        meta.nodes[&ctrl_idx].explain_payload["blast_files"],
+        json!(4)
+    );
+    let repo_idx = node_index_by_id["src/db/OrderRepo.php"];
+    assert!(meta.nodes[&repo_idx].in_cycle);
+    assert!(
+        meta.edges
+            .values()
+            .any(|e| e.explain_payload["arch_violation"] == json!(true)),
+        "expected arch_violation flag on DenseEdgeMeta"
+    );
+
+    let insp =
+        constellation_view::build_arch_inspector_html(&graph, "src/controller/OrderController.php");
+    assert!(insp.contains("Layer Controller forbids DB"), "{insp}");
+    assert!(insp.contains("writes_table"), "{insp}");
+    assert!(insp.contains("4 files, 2 tests"), "{insp}");
+}

@@ -29,7 +29,7 @@ mod ts_js;
 
 pub(crate) use self::semantics::normalize_route_contract;
 use self::{
-    php::extract_php,
+    php::{collect_blade_identifiers, extract_blade, extract_php},
     polyglot::{
         extract_csharp, extract_go, extract_java, extract_kotlin, extract_ruby, extract_scala,
         extract_swift,
@@ -62,6 +62,7 @@ const MAX_SQL_LITERAL_BYTES: usize = 8192;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AstGrammar {
     Php,
+    Blade,
     Rust,
     TypeScript,
     Tsx,
@@ -79,7 +80,7 @@ pub(crate) enum AstGrammar {
 impl AstGrammar {
     pub(crate) fn from_rel_path(rel_path: &str) -> Option<Self> {
         if is_blade_template(rel_path) {
-            return None;
+            return Some(Self::Blade);
         }
         let ext = rel_path.rsplit_once('.')?.1.to_ascii_lowercase();
         match ext.as_str() {
@@ -102,7 +103,7 @@ impl AstGrammar {
 
     pub(crate) fn to_live_language(self) -> Language {
         match self {
-            Self::Php => Language::Php,
+            Self::Php | Self::Blade => Language::Php,
             Self::Rust => Language::Rust,
             Self::TypeScript | Self::Tsx | Self::JavaScript => Language::TsJs,
             Self::Python => Language::Python,
@@ -119,6 +120,7 @@ impl AstGrammar {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Php => "php",
+            Self::Blade => "blade",
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
@@ -136,6 +138,7 @@ impl AstGrammar {
 
     fn ts_language(self, source: &str) -> TsLanguage {
         match self {
+            Self::Blade => tree_sitter_php::LANGUAGE_PHP.into(),
             Self::Php => {
                 if source.contains("<?") {
                     tree_sitter_php::LANGUAGE_PHP.into()
@@ -255,6 +258,7 @@ pub(crate) fn parse_file_ir(rel_path: &str, source: &str) -> Option<AstFileExtra
     let root = tree.root_node();
     match grammar {
         AstGrammar::Php => extract_php(&mut ctx, root),
+        AstGrammar::Blade => extract_blade(&mut ctx, root),
         AstGrammar::Rust => extract_rust(&mut ctx, root),
         AstGrammar::TypeScript | AstGrammar::Tsx | AstGrammar::JavaScript => {
             extract_ts_js(&mut ctx, root)
@@ -270,7 +274,10 @@ pub(crate) fn parse_file_ir(rel_path: &str, source: &str) -> Option<AstFileExtra
     }
     // Extract SQL queries and code identifiers in one combined traversal, anchoring SQL edges
     // to their tightest enclosing declaration from the language extraction above.
-    let identifiers = scan_sql_and_identifiers(&mut ctx, root);
+    let mut identifiers = scan_sql_and_identifiers(&mut ctx, root);
+    if grammar == AstGrammar::Blade {
+        collect_blade_identifiers(source, &mut identifiers);
+    }
     let mut out = ctx.into_extraction();
     out.identifiers = identifiers;
     Some(out)
@@ -338,7 +345,11 @@ pub(crate) fn extract_code_identifiers(rel_path: &str, source: &str) -> BTreeSet
     let Some(tree) = parse_tree_with_grammar(grammar, source) else {
         return BTreeSet::new();
     };
-    collect_code_identifiers_from_root(tree.root_node(), source)
+    let mut out = collect_code_identifiers_from_root(tree.root_node(), source);
+    if grammar == AstGrammar::Blade {
+        collect_blade_identifiers(source, &mut out);
+    }
+    out
 }
 
 /// Manifest basenames whose edits alter cross-file import / workspace resolution.

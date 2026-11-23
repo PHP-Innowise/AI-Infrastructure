@@ -7992,3 +7992,248 @@ fn lod_symbol_preserves_focus_blast_marks_architecture_and_discovers_extended_ma
         .expect("cached ir_summary");
     assert!(summary.files >= 2);
 }
+
+#[test]
+fn architecture_rules_support_forbids_package_boundaries_cycle_budgets_and_semantic_rules() {
+    use crate::graph_ir::{IrLinkSpec, IrNodeSpec};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let bad = crate::graph_map::layer_rules::Rules::parse(
+        br#"{"version":1,"layers":[{"id":"api","name":"API","paths":["src/api/**"],"forbids":["ghost"]}]}"#,
+    );
+    assert!(
+        bad.is_err(),
+        "unknown layer ID in `forbids` must be rejected"
+    );
+
+    let rules_json = serde_json::json!({
+        "version": 1,
+        "enforce_crate_boundaries": true,
+        "max_cycles": 0,
+        "layers": [
+            {
+                "id": "controller",
+                "name": "Controllers",
+                "paths": ["app/Controllers/**"],
+                "forbids": ["ui"],
+                "forbids_semantic": ["writes_table"],
+                "max_cycles": 0
+            },
+            {
+                "id": "service",
+                "name": "Services",
+                "paths": ["app/Services/**"]
+            },
+            {
+                "id": "ui",
+                "name": "UI",
+                "paths": ["app/Ui/**"],
+                "allows": []
+            }
+        ],
+        "package_rules": [
+            {
+                "id": "ui-pkg",
+                "paths": ["packages/ui/**"],
+                "forbids": ["db-pkg"]
+            },
+            {
+                "id": "db-pkg",
+                "paths": ["packages/db/**"]
+            }
+        ],
+        "semantic_rules": [
+            {
+                "id": "no-ui-routes",
+                "from": "app/Ui/**",
+                "relation": "exposes_route",
+                "target": "*",
+                "effect": "forbid"
+            }
+        ]
+    });
+    let rules = crate::graph_map::layer_rules::Rules::parse(rules_json.to_string().as_bytes())
+        .expect("parse extended rules");
+
+    let mk_file = |path: &str| IrNodeSpec {
+        id: format!("file:{path}"),
+        label: path.rsplit('/').next().unwrap_or(path).to_owned(),
+        source_file: path.to_owned(),
+        source_location: None,
+        end_line: 0,
+        file_type: Some("code".into()),
+        node_kind: Some("page".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_fn = |id: &str, path: &str, name: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: format!("{name}()"),
+        source_file: path.to_owned(),
+        source_location: Some("L1".into()),
+        end_line: 1,
+        file_type: None,
+        node_kind: Some("function".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+
+    let nodes = vec![
+        mk_file("app/Controllers/OrderController.php"),
+        mk_fn("fn:ctrl", "app/Controllers/OrderController.php", "store"),
+        mk_file("app/Services/OrderService.php"),
+        mk_fn("fn:svc", "app/Services/OrderService.php", "handle"),
+        mk_file("app/Ui/Button.php"),
+        mk_fn("fn:ui", "app/Ui/Button.php", "render"),
+        mk_file("packages/ui/view.ts"),
+        mk_fn("fn:pkg_ui", "packages/ui/view.ts", "renderView"),
+        mk_file("packages/db/client.ts"),
+        mk_fn("fn:pkg_db", "packages/db/client.ts", "queryDb"),
+        IrNodeSpec {
+            id: "sem:table:orders".into(),
+            label: "table:orders".into(),
+            source_file: "app/Services/OrderService.php".into(),
+            source_location: Some("L2".into()),
+            end_line: 0,
+            file_type: None,
+            node_kind: Some("semantic".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        IrNodeSpec {
+            id: "sem:route:GET /bad".into(),
+            label: "route:GET /bad".into(),
+            source_file: "app/Ui/Button.php".into(),
+            source_location: Some("L2".into()),
+            end_line: 0,
+            file_type: None,
+            node_kind: Some("semantic".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+    ];
+    let mk_call = |src: &str, dst: &str, file: &str| IrLinkSpec {
+        source: src.into(),
+        target: dst.into(),
+        relation: Some("calls".into()),
+        confidence: Some("EXTRACTED".into()),
+        source_file: Some(file.into()),
+        context: None,
+        evidence: None,
+    };
+    let links = vec![
+        // Allowed: controller -> service (since controller only `forbids: ["ui"]`).
+        mk_call("fn:ctrl", "fn:svc", "app/Controllers/OrderController.php"),
+        // Layer `forbids` violation + cycle: controller -> ui and ui -> controller.
+        mk_call("fn:ctrl", "fn:ui", "app/Controllers/OrderController.php"),
+        mk_call("fn:ui", "fn:ctrl", "app/Ui/Button.php"),
+        // Package boundary violation: ui-pkg -> db-pkg.
+        mk_call("fn:pkg_ui", "fn:pkg_db", "packages/ui/view.ts"),
+        // Semantic violation: controller -> writes_table.
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:table:orders".into(),
+            relation: Some("writes_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Controllers/OrderController.php".into()),
+            context: Some("writes_table".into()),
+            evidence: Some("DB::table('orders')->insert".into()),
+        },
+        // Top-level semantic_rules violation: app/Ui/** -> exposes_route.
+        IrLinkSpec {
+            source: "fn:ui".into(),
+            target: "sem:route:GET /bad".into(),
+            relation: Some("exposes_route".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Ui/Button.php".into()),
+            context: Some("exposes_route".into()),
+            evidence: Some("Route::get('/bad')".into()),
+        },
+    ];
+
+    let idx = Index::from_ir_parts(root, None, None, nodes, links).unwrap();
+    let violations = idx.architecture_violations("", false, &rules);
+    assert!(
+        violations.iter().any(|v| v.kind == "layer"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.to == "app/Ui/Button.php"),
+        "expected layer forbids violation: {violations:?}"
+    );
+    assert!(
+        !violations.iter().any(|v| v.kind == "layer"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.to == "app/Services/OrderService.php"),
+        "omitting `allows` with `forbids` must allow non-forbidden layer `service`: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "package"
+            && v.from == "packages/ui/view.ts"
+            && v.to == "packages/db/client.ts"),
+        "expected package boundary violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "cycle_budget"),
+        "expected max_cycles budget violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "semantic"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.relation.as_deref() == Some("writes_table")),
+        "expected semantic writes_table violation on controller: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "semantic"
+            && v.from == "app/Ui/Button.php"
+            && v.relation.as_deref() == Some("exposes_route")),
+        "expected top-level semantic_rules violation: {violations:?}"
+    );
+
+    let mut file_view = idx.view_at_lod_unfiltered(
+        "demo",
+        Lod::File,
+        &LodFilter {
+            scope: "",
+            focus: None,
+            filter: "",
+            certain: false,
+            offset: 0,
+            limit: None,
+        },
+    );
+    idx.mark_architecture(&mut file_view, false, Some(&rules));
+    assert!(
+        file_view["pattern"]["cycle_budget"]["exceeded"] == true,
+        "expected cycle_budget telemetry in mark_architecture: {}",
+        file_view["pattern"]
+    );
+    assert!(
+        !file_view["pattern"]["package_violations"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected package_violations in mark_architecture: {}",
+        file_view["pattern"]
+    );
+    assert!(
+        !file_view["pattern"]["semantic_violations"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected semantic_violations in mark_architecture: {}",
+        file_view["pattern"]
+    );
+}

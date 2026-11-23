@@ -615,6 +615,55 @@ fn walk_ts_js(
         "member_expression" => {
             emit_ts_member_expr(ctx, node, false, owner_class, this_props, var_types);
         }
+        "required_parameter" | "optional_parameter" => {
+            emit_ts_decorators(ctx, node, owner_class);
+        }
+        "object" => {
+            let mut has_provide = false;
+            let mut targets = Vec::new();
+            for pair in children_by_kind(node, "pair") {
+                let Some(k_node) = pair.child_by_field_name("key") else {
+                    continue;
+                };
+                let key = ctx
+                    .text(k_node)
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"');
+                if !matches!(key, "provide" | "useClass" | "useExisting") {
+                    continue;
+                }
+                if key == "provide" {
+                    has_provide = true;
+                }
+                if let Some(v_node) = pair.child_by_field_name("value") {
+                    let raw_v = ctx.text(v_node).trim();
+                    let tok = unquote_literal(raw_v).unwrap_or_else(|| {
+                        raw_v
+                            .split(['<', '.', ' '])
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_owned()
+                    });
+                    if !tok.is_empty() && !targets.contains(&tok) {
+                        targets.push(tok);
+                    }
+                }
+            }
+            if has_provide {
+                let line = start_line(node);
+                let evidence = ctx.text(node);
+                for svc in targets {
+                    ctx.push_semantic(
+                        "di_binds",
+                        format!("service:{svc}"),
+                        owner_class.map(str::to_owned),
+                        line,
+                        evidence,
+                    );
+                }
+            }
+        }
         _ => {}
     }
 
@@ -903,6 +952,7 @@ fn extract_ts_params(
         if !matches!(p.kind(), "required_parameter" | "optional_parameter") {
             continue;
         }
+        emit_ts_decorators(ctx, p, owner_class);
         let pname = p
             .child_by_field_name("pattern")
             .or_else(|| p.child_by_field_name("name"))

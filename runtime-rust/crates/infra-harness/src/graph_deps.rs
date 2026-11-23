@@ -788,6 +788,400 @@ pub(crate) fn extract_file_deps_from_ir(
     reexports_opt: Option<&ReexportIndex>,
     crate_map_opt: Option<&CratePackageMap>,
 ) -> Vec<DepRef> {
+    extract_file_deps_from_ir_inner(
+        rel_path,
+        ir,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+        false,
+    )
+}
+
+/// Resolves cross-file and intra-file symbol-to-symbol dependencies directly from an
+/// already-parsed `AstFileExtraction` (for `GraphIrStore` / `lod=symbol`).
+pub(crate) fn extract_file_deps_with_intra_from_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Vec<DepRef> {
+    extract_file_deps_from_ir_inner(
+        rel_path,
+        ir,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+        true,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn extract_file_deps_with_intra(
+    rel_path: &str,
+    source: &str,
+    known_files: &BTreeSet<String>,
+) -> Vec<DepRef> {
+    let rel = clean_rel_key(rel_path);
+    if rel.is_empty() {
+        return Vec::new();
+    }
+    let Some(ir) = parse_file_ir(&rel, source) else {
+        return Vec::new();
+    };
+    extract_file_deps_with_intra_from_ir(&rel, &ir, known_files, None, None, None)
+}
+
+#[derive(Clone)]
+struct IntraLocalSym {
+    name: String,
+    kind: String,
+    parent: Option<String>,
+    line: u32,
+}
+
+fn strip_generic_and_ns(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let without_gen = trimmed.split('<').next().unwrap_or(trimmed).trim();
+    let tail = without_gen
+        .rsplit(['\\', ':'])
+        .next()
+        .unwrap_or(without_gen)
+        .trim();
+    tail.strip_prefix('$').unwrap_or(tail)
+}
+
+fn find_enclosing_container(line: u32, containers: &[(String, u32, u32)]) -> Option<String> {
+    containers
+        .iter()
+        .filter(|(_, start, end)| line >= *start && (*end == 0 || line <= *end))
+        .min_by_key(|(_, start, end)| {
+            if *end >= *start {
+                *end - *start
+            } else {
+                u32::MAX
+            }
+        })
+        .map(|(name, _, _)| name.clone())
+}
+
+fn record_intra_sym(
+    by_parent_member: &mut BTreeMap<(String, String), IntraLocalSym>,
+    by_parent_member_ci: &mut BTreeMap<(String, String), IntraLocalSym>,
+    top_by_name: &mut BTreeMap<String, IntraLocalSym>,
+    top_by_name_ci: &mut BTreeMap<String, IntraLocalSym>,
+    sym: IntraLocalSym,
+) {
+    let bare = sym.name.strip_prefix('$').unwrap_or(&sym.name).to_owned();
+    let bare_lower = bare.to_ascii_lowercase();
+    if let Some(ref parent) = sym.parent {
+        let parent_clean = strip_generic_and_ns(parent).to_owned();
+        if !parent_clean.is_empty() {
+            by_parent_member
+                .entry((parent_clean.clone(), bare.clone()))
+                .or_insert_with(|| sym.clone());
+            by_parent_member_ci
+                .entry((parent_clean.to_ascii_lowercase(), bare_lower))
+                .or_insert(sym);
+            return;
+        }
+    }
+    top_by_name.entry(bare).or_insert_with(|| sym.clone());
+    top_by_name_ci.entry(bare_lower).or_insert(sym);
+}
+
+fn lookup_intra_member<'a>(
+    container: &str,
+    member_raw: &str,
+    by_parent_member: &'a BTreeMap<(String, String), IntraLocalSym>,
+    by_parent_member_ci: &'a BTreeMap<(String, String), IntraLocalSym>,
+) -> Option<&'a IntraLocalSym> {
+    let container_clean = strip_generic_and_ns(container);
+    let mem_clean = norm_member_name(member_raw);
+    let key = (container_clean.to_owned(), mem_clean.to_owned());
+    by_parent_member.get(&key).or_else(|| {
+        by_parent_member_ci.get(&(
+            container_clean.to_ascii_lowercase(),
+            mem_clean.to_ascii_lowercase(),
+        ))
+    })
+}
+
+fn resolve_intra_file_ir_refs(rel_path: &str, ir: &AstFileExtraction, acc: &mut DepAccumulator) {
+    let mut by_parent_member: BTreeMap<(String, String), IntraLocalSym> = BTreeMap::new();
+    let mut by_parent_member_ci: BTreeMap<(String, String), IntraLocalSym> = BTreeMap::new();
+    let mut top_by_name: BTreeMap<String, IntraLocalSym> = BTreeMap::new();
+    let mut top_by_name_ci: BTreeMap<String, IntraLocalSym> = BTreeMap::new();
+    let mut containers: Vec<(String, u32, u32)> = Vec::new();
+
+    for decl in &ir.declarations {
+        let kind_lower = decl.entity.kind.to_ascii_lowercase();
+        let is_container = matches!(
+            kind_lower.as_str(),
+            "class"
+                | "struct"
+                | "enum"
+                | "trait"
+                | "interface"
+                | "impl"
+                | "module"
+                | "object"
+                | "protocol"
+        );
+        if is_container && decl.start_line > 0 {
+            let short_name = strip_generic_and_ns(&decl.entity.name).to_owned();
+            if !short_name.is_empty() {
+                containers.push((short_name, decl.start_line, decl.end_line));
+            }
+        }
+        record_intra_sym(
+            &mut by_parent_member,
+            &mut by_parent_member_ci,
+            &mut top_by_name,
+            &mut top_by_name_ci,
+            IntraLocalSym {
+                name: decl.entity.name.clone(),
+                kind: decl.entity.kind.clone(),
+                parent: decl.entity.parent.clone(),
+                line: decl.entity.line.unwrap_or(decl.start_line),
+            },
+        );
+    }
+    for dm in &ir.declared_members {
+        record_intra_sym(
+            &mut by_parent_member,
+            &mut by_parent_member_ci,
+            &mut top_by_name,
+            &mut top_by_name_ci,
+            IntraLocalSym {
+                name: dm.name.clone(),
+                kind: dm.kind.clone(),
+                parent: dm.parent.clone(),
+                line: dm.line.unwrap_or(0),
+            },
+        );
+    }
+
+    // Track names explicitly imported from external files so local fallback doesn't shadow them.
+    let mut imported_locals: BTreeSet<String> = BTreeSet::new();
+    for imp in &ir.imports {
+        if let Some(ref alias) = imp.alias {
+            imported_locals.insert(alias.to_ascii_lowercase());
+        }
+        for sym in &imp.symbols {
+            let s = sym.trim();
+            if !s.is_empty() {
+                imported_locals.insert(s.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let is_php = ir.language.eq_ignore_ascii_case("php");
+
+    for inh in &ir.inheritance {
+        let parent_clean = strip_generic_and_ns(&inh.parent);
+        if parent_clean.is_empty() || imported_locals.contains(&parent_clean.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(sym) = top_by_name
+            .get(parent_clean)
+            .or_else(|| top_by_name_ci.get(&parent_clean.to_ascii_lowercase()))
+        {
+            let m = DepMemberRef::basic(
+                &sym.name,
+                &sym.kind,
+                sym.parent.clone(),
+                &inh.kind,
+                inh.line,
+            );
+            acc.add_resolved_members(
+                rel_path.to_owned(),
+                &inh.kind,
+                &[&sym.name],
+                &[m],
+                inh.line,
+                &inh.evidence,
+            );
+        }
+    }
+
+    for r in &ir.calls_and_refs {
+        let raw_target = r
+            .owner_type
+            .as_deref()
+            .filter(|_| r.target_name.starts_with('$'))
+            .unwrap_or(&r.target_name)
+            .trim();
+        let is_self_receiver = matches!(raw_target, "self" | "Self" | "static" | "this" | "$this");
+        let container_from_self = if is_self_receiver {
+            r.enclosing_symbol
+                .as_deref()
+                .and_then(|enc| {
+                    enc.split_once("::")
+                        .or_else(|| enc.split_once('.'))
+                        .map(|(head, _)| strip_generic_and_ns(head).to_owned())
+                })
+                .filter(|c| !c.is_empty())
+                .or_else(|| find_enclosing_container(r.line, &containers))
+        } else {
+            None
+        };
+
+        if let Some(container) = container_from_self {
+            if let Some(ref mem) = r.member {
+                if let Some(target_sym) =
+                    lookup_intra_member(&container, mem, &by_parent_member, &by_parent_member_ci)
+                {
+                    let (dep_kind, members) = ref_dep_kind_and_member(
+                        r,
+                        &container,
+                        if target_sym.kind.is_empty() {
+                            "field"
+                        } else {
+                            &target_sym.kind
+                        },
+                        Some(container.clone()),
+                        is_php,
+                    );
+                    let mut final_members = members;
+                    for m in &mut final_members {
+                        m.kind = target_sym.kind.clone();
+                        m.parent = Some(container.clone());
+                    }
+                    if !final_members.is_empty() {
+                        acc.add_resolved_members(
+                            rel_path.to_owned(),
+                            dep_kind,
+                            &[&container, &target_sym.name],
+                            &final_members,
+                            r.line,
+                            &r.evidence,
+                        );
+                    }
+                }
+            } else if let Some(target_sym) = top_by_name
+                .get(&container)
+                .or_else(|| top_by_name_ci.get(&container.to_ascii_lowercase()))
+            {
+                let (dep_kind, _) =
+                    ref_dep_kind_and_member(r, &target_sym.name, "class", None, is_php);
+                let access = if dep_kind == "calls" {
+                    "call"
+                } else {
+                    &r.access
+                };
+                let m =
+                    DepMemberRef::basic(&target_sym.name, &target_sym.kind, None, access, r.line);
+                acc.add_resolved_members(
+                    rel_path.to_owned(),
+                    dep_kind,
+                    &[&target_sym.name],
+                    &[m],
+                    r.line,
+                    &r.evidence,
+                );
+            }
+            continue;
+        }
+
+        if raw_target.starts_with('$') || is_self_receiver {
+            continue;
+        }
+        let target_clean = strip_generic_and_ns(raw_target);
+        if target_clean.is_empty() {
+            continue;
+        }
+        // Only skip external imports when the imported symbol is not declared in this file.
+        let is_declared_top = top_by_name.contains_key(target_clean)
+            || top_by_name_ci.contains_key(&target_clean.to_ascii_lowercase());
+        if !is_declared_top && imported_locals.contains(&target_clean.to_ascii_lowercase()) {
+            continue;
+        }
+
+        if let Some(ref mem) = r.member {
+            if let Some(target_sym) =
+                lookup_intra_member(target_clean, mem, &by_parent_member, &by_parent_member_ci)
+            {
+                let container = target_sym
+                    .parent
+                    .clone()
+                    .unwrap_or_else(|| target_clean.to_owned());
+                let (dep_kind, mut members) = ref_dep_kind_and_member(
+                    r,
+                    &container,
+                    if target_sym.kind.is_empty() {
+                        "field"
+                    } else {
+                        &target_sym.kind
+                    },
+                    Some(container.clone()),
+                    is_php,
+                );
+                for m in &mut members {
+                    m.kind = target_sym.kind.clone();
+                    m.parent = Some(container.clone());
+                }
+                if !members.is_empty() {
+                    acc.add_resolved_members(
+                        rel_path.to_owned(),
+                        dep_kind,
+                        &[&container, &target_sym.name],
+                        &members,
+                        r.line,
+                        &r.evidence,
+                    );
+                }
+            }
+            continue;
+        }
+
+        if let Some(target_sym) = top_by_name
+            .get(target_clean)
+            .or_else(|| top_by_name_ci.get(&target_clean.to_ascii_lowercase()))
+        {
+            if r.line == target_sym.line && r.context != "call" {
+                continue;
+            }
+            let (dep_kind, _) =
+                ref_dep_kind_and_member(r, &target_sym.name, &target_sym.kind, None, is_php);
+            let access = match dep_kind {
+                "calls" => "call",
+                "writes" => "write",
+                "reads" => "read",
+                _ => "type",
+            };
+            let m = DepMemberRef::basic(
+                &target_sym.name,
+                &target_sym.kind,
+                target_sym.parent.clone(),
+                access,
+                r.line,
+            );
+            acc.add_resolved_members(
+                rel_path.to_owned(),
+                dep_kind,
+                &[&target_sym.name],
+                &[m],
+                r.line,
+                &r.evidence,
+            );
+        }
+    }
+}
+
+fn extract_file_deps_from_ir_inner(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+    include_self: bool,
+) -> Vec<DepRef> {
     let rel = clean_rel_key(rel_path);
     if rel.is_empty() {
         return Vec::new();
@@ -796,7 +1190,7 @@ pub(crate) fn extract_file_deps_from_ir(
         return Vec::new();
     };
     let lookup = KnownLookup::new(known_files);
-    let mut acc = DepAccumulator::new(&rel, known_files);
+    let mut acc = DepAccumulator::new_with_self(&rel, known_files, include_self);
 
     match lang {
         Language::Php => resolve_php_ir(&rel, ir, &lookup, manifests_opt, reexports_opt, &mut acc),
@@ -814,6 +1208,10 @@ pub(crate) fn extract_file_deps_from_ir(
         Language::CSharp => resolve_csharp_ir(&rel, ir, &lookup, &mut acc),
         Language::Ruby => resolve_ruby_ir(&rel, ir, &lookup, &mut acc),
         Language::Swift => resolve_swift_ir(&rel, ir, &lookup, &mut acc),
+    }
+
+    if include_self {
+        resolve_intra_file_ir_refs(&rel, ir, &mut acc);
     }
 
     acc.into_sorted_vec()
@@ -1495,14 +1893,20 @@ fn push_unique_str(out: &mut Vec<String>, sym: &str) {
 struct DepAccumulator<'a> {
     self_path: String,
     known_files: &'a BTreeSet<String>,
+    include_self: bool,
     entries: BTreeMap<(String, String), DepRef>,
 }
 
 impl<'a> DepAccumulator<'a> {
-    fn new(self_path: &str, known_files: &'a BTreeSet<String>) -> Self {
+    fn new_with_self(
+        self_path: &str,
+        known_files: &'a BTreeSet<String>,
+        include_self: bool,
+    ) -> Self {
         Self {
             self_path: clean_rel_key(self_path),
             known_files,
+            include_self,
             entries: BTreeMap::new(),
         }
     }
@@ -1528,10 +1932,14 @@ impl<'a> DepAccumulator<'a> {
         evidence: &str,
     ) {
         let cleaned = clean_rel_key(&target);
-        if cleaned.is_empty() || cleaned == self.self_path {
+        if cleaned.is_empty() {
             return;
         }
-        let exists = self.known_files.contains(&target);
+        let is_self = cleaned == self.self_path;
+        if is_self && (!self.include_self || (kind == "imports" && members.is_empty())) {
+            return;
+        }
+        let exists = is_self || self.known_files.contains(&target);
         self.insert_dep(target, true, exists, kind, symbols, members, line, evidence);
     }
 
@@ -2358,6 +2766,33 @@ fn resolve_php_ir(
     for imp in &ir.imports {
         match imp.kind.as_str() {
             "include" => {
+                let resolved_blade = if let Some(view_name) = imp.path.strip_prefix("blade-view:") {
+                    Some(resolve_blade_view_target(view_name, lookup))
+                } else if let Some(comp_name) = imp.path.strip_prefix("blade-component:") {
+                    Some(resolve_blade_component_target(
+                        comp_name,
+                        lookup,
+                        manifests_opt,
+                    ))
+                } else {
+                    imp.path.strip_prefix("blade-livewire:").map(|lw_name| {
+                        resolve_blade_livewire_target(lw_name, lookup, manifests_opt)
+                    })
+                };
+                if let Some(found_opt) = resolved_blade {
+                    let sym = imp.symbols.first().map(String::as_str).unwrap_or("");
+                    match found_opt {
+                        Some(t) => acc.add_resolved(t, "imports", &[sym], imp.line, &imp.evidence),
+                        None => acc.add_unresolved(
+                            &imp.path,
+                            "imports",
+                            &[sym],
+                            imp.line,
+                            &imp.evidence,
+                        ),
+                    }
+                    continue;
+                }
                 let norm = imp.path.trim().trim_start_matches('/');
                 let sym = file_stem(norm);
                 let resolved =
@@ -2539,6 +2974,161 @@ fn resolve_php_fqn(
         return lookup.resolve_unambiguous_stem(short, PHP_EXTS, None);
     }
     None
+}
+
+fn split_blade_ns_and_rel(raw: &str) -> (Option<String>, String) {
+    let cleaned = raw
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"' || c == '/');
+    let (ns, rest) = if let Some((ns, tail)) = cleaned.split_once("::") {
+        let ns_clean = ns.trim();
+        (
+            (!ns_clean.is_empty()).then(|| ns_clean.to_owned()),
+            tail.trim(),
+        )
+    } else {
+        (None, cleaned)
+    };
+    let rel = rest.replace('.', "/").trim_matches('/').to_owned();
+    (ns, rel)
+}
+
+fn resolve_blade_template_candidates(
+    rel: &str,
+    ns: Option<&str>,
+    subpath: &str,
+    lookup: &KnownLookup,
+) -> Option<String> {
+    if rel.is_empty() {
+        return None;
+    }
+    let join_sub = |prefix: &str| -> String {
+        if subpath.is_empty() {
+            format!("{prefix}{rel}")
+        } else {
+            format!("{prefix}{subpath}/{rel}")
+        }
+    };
+    if let Some(ns_name) = ns {
+        for base in [
+            format!("resources/views/vendor/{ns_name}/{}", join_sub("")),
+            format!("resources/views/{ns_name}/{}", join_sub("")),
+            format!("{ns_name}/resources/views/{}", join_sub("")),
+        ] {
+            for ext in ["blade.php", "index.blade.php"] {
+                let sep = if ext.starts_with("index.") { "/" } else { "." };
+                if let Some(found) = lookup.resolve_exact_or_ci(&format!("{base}{sep}{ext}")) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    let views_base = join_sub("resources/views/");
+    for cand in [
+        format!("{views_base}.blade.php"),
+        format!("{views_base}/index.blade.php"),
+        format!("{rel}.blade.php"),
+    ] {
+        if let Some(found) = lookup.resolve_exact_or_ci(&cand) {
+            return Some(found);
+        }
+    }
+    let suffix_base = join_sub("views/");
+    lookup
+        .resolve_suffix(&format!("{suffix_base}.blade.php"), None)
+        .or_else(|| lookup.resolve_suffix(&format!("{suffix_base}/index.blade.php"), None))
+        .or_else(|| lookup.resolve_suffix(&format!("{rel}.blade.php"), None))
+}
+
+fn kebab_to_pascal_path(raw: &str) -> String {
+    raw.split(['.', '/', '\\'])
+        .filter(|seg| !seg.trim().is_empty())
+        .map(|seg| {
+            seg.split(['-', '_'])
+                .filter(|w| !w.is_empty())
+                .map(|w| {
+                    let mut chars = w.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            let mut s = first.to_ascii_uppercase().to_string();
+                            s.extend(chars);
+                            s
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Resolves `@include`, `@extends`, `view(...)` template targets (`blade-view:<name>`).
+fn resolve_blade_view_target(view_name: &str, lookup: &KnownLookup) -> Option<String> {
+    let (ns, rel) = split_blade_ns_and_rel(view_name);
+    resolve_blade_template_candidates(&rel, ns.as_deref(), "", lookup)
+}
+
+/// Resolves `<x-...>` / `@component` template and class-based Blade components.
+fn resolve_blade_component_target(
+    comp_name: &str,
+    lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
+) -> Option<String> {
+    let stripped = comp_name.trim().strip_prefix("x-").unwrap_or(comp_name);
+    let (ns, rel) = split_blade_ns_and_rel(stripped);
+    if let Some(found) =
+        resolve_blade_template_candidates(&rel, ns.as_deref(), "components", lookup)
+    {
+        return Some(found);
+    }
+    let pascal = kebab_to_pascal_path(rel.trim_matches('/'));
+    if pascal.is_empty() {
+        return None;
+    }
+    let fqn = format!("App\\View\\Components\\{}", pascal.replace('/', "\\"));
+    manifests_opt
+        .and_then(|m| m.resolve_php_fqn(&fqn, lookup.known_files))
+        .or_else(|| lookup.resolve_exact_or_ci(&format!("app/View/Components/{pascal}.php")))
+        .or_else(|| lookup.resolve_suffix(&format!("View/Components/{pascal}.php"), Some(PHP_EXTS)))
+}
+
+/// Resolves `@livewire(...)` / `<livewire:...>` PHP component classes and Volt Blade templates.
+fn resolve_blade_livewire_target(
+    lw_name: &str,
+    lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
+) -> Option<String> {
+    let (ns, rel) = split_blade_ns_and_rel(lw_name);
+    let pascal = kebab_to_pascal_path(&rel);
+    if !pascal.is_empty() {
+        let ns_fqn = pascal.replace('/', "\\");
+        for prefix in ["App\\Livewire", "App\\Http\\Livewire"] {
+            let fqn = format!("{prefix}\\{ns_fqn}");
+            if let Some(found) =
+                manifests_opt.and_then(|m| m.resolve_php_fqn(&fqn, lookup.known_files))
+            {
+                return Some(found);
+            }
+        }
+        for exact in [
+            format!("app/Livewire/{pascal}.php"),
+            format!("app/Http/Livewire/{pascal}.php"),
+        ] {
+            if let Some(found) = lookup.resolve_exact_or_ci(&exact) {
+                return Some(found);
+            }
+        }
+        if let Some(found) = lookup
+            .resolve_suffix(&format!("Livewire/{pascal}.php"), Some(PHP_EXTS))
+            .or_else(|| {
+                lookup.resolve_suffix(&format!("Http/Livewire/{pascal}.php"), Some(PHP_EXTS))
+            })
+        {
+            return Some(found);
+        }
+    }
+    resolve_blade_template_candidates(&rel, ns.as_deref(), "livewire", lookup)
 }
 
 // =========================================================================
@@ -5003,6 +5593,122 @@ class PayController {
         assert!(
             deps.iter().any(|d| d.target == "Foundation" && !d.resolved),
             "{deps:?}"
+        );
+    }
+
+    #[test]
+    fn blade_templates_and_php_view_calls_resolve_views_components_and_livewire() {
+        let files = known(&[
+            "resources/views/layouts/app.blade.php",
+            "resources/views/partials/header.blade.php",
+            "resources/views/components/forms/text-input.blade.php",
+            "app/View/Components/ModalDialog.php",
+            "app/Livewire/OrderSummary.php",
+            "resources/views/orders/show.blade.php",
+            "app/Http/Controllers/OrderController.php",
+        ]);
+        let blade = r#"
+@extends('layouts.app')
+@include('partials.header')
+<x-forms.text-input name="email" />
+<x-modal-dialog />
+<livewire:order-summary />
+"#;
+        let blade_deps = extract_file_deps("resources/views/orders/show.blade.php", blade, &files);
+        for expected in [
+            "resources/views/layouts/app.blade.php",
+            "resources/views/partials/header.blade.php",
+            "resources/views/components/forms/text-input.blade.php",
+            "app/View/Components/ModalDialog.php",
+            "app/Livewire/OrderSummary.php",
+        ] {
+            assert!(
+                blade_deps
+                    .iter()
+                    .any(|d| d.target == expected && d.resolved && d.exists),
+                "expected resolved blade dependency on {expected}, got: {blade_deps:?}"
+            );
+        }
+
+        let ctrl = r#"<?php
+namespace App\Http\Controllers;
+class OrderController {
+    public function show() {
+        return view('orders.show');
+    }
+}
+"#;
+        let ctrl_deps = extract_file_deps("app/Http/Controllers/OrderController.php", ctrl, &files);
+        assert!(
+            ctrl_deps
+                .iter()
+                .any(|d| d.target == "resources/views/orders/show.blade.php" && d.resolved),
+            "PHP view() helper should resolve target blade template: {ctrl_deps:?}"
+        );
+    }
+
+    #[test]
+    fn intra_file_deps_include_self_symbol_edges_only_when_enabled() {
+        let files = known(&["src/billing.ts", "src/UserService.php"]);
+        let ts_src = r#"
+export class Billing {
+    private total: number = 0;
+    calculate(amount: number): number {
+        this.total = helper(amount);
+        return this.formatTotal();
+    }
+    formatTotal(): number {
+        return this.total;
+    }
+}
+function helper(v: number): number { return v * 2; }
+"#;
+        let cross_only = extract_file_deps("src/billing.ts", ts_src, &files);
+        assert!(
+            !cross_only.iter().any(|d| d.target == "src/billing.ts"),
+            "default extract_file_deps must stay strictly cross-file: {cross_only:?}"
+        );
+
+        let with_intra = extract_file_deps_with_intra("src/billing.ts", ts_src, &files);
+        let self_calls: Vec<&DepMemberRef> = with_intra
+            .iter()
+            .filter(|d| d.target == "src/billing.ts")
+            .flat_map(|d| d.member_refs.iter())
+            .collect();
+        assert!(
+            self_calls
+                .iter()
+                .any(|m| m.name == "helper" && m.access == "call"),
+            "expected intra-file call to helper(): {self_calls:?}"
+        );
+        assert!(
+            self_calls
+                .iter()
+                .any(|m| m.name == "formatTotal" && m.parent.as_deref() == Some("Billing")),
+            "expected intra-file method call via this.formatTotal(): {self_calls:?}"
+        );
+
+        let php_src = r#"<?php
+class UserService {
+    private array $items = [];
+    public function add(string $item): void {
+        $this->items[] = $item;
+        $this->notify();
+    }
+    private function notify(): void {}
+}
+"#;
+        let php_intra = extract_file_deps_with_intra("src/UserService.php", php_src, &files);
+        let php_self_refs: Vec<&DepMemberRef> = php_intra
+            .iter()
+            .filter(|d| d.target == "src/UserService.php")
+            .flat_map(|d| d.member_refs.iter())
+            .collect();
+        assert!(
+            php_self_refs
+                .iter()
+                .any(|m| m.name == "notify" && m.parent.as_deref() == Some("UserService")),
+            "expected PHP $this->notify() intra-file edge: {php_self_refs:?}"
         );
     }
 }

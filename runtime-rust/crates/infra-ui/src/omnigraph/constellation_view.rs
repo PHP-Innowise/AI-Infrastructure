@@ -1067,8 +1067,118 @@ pub(super) fn render_inspector() {
                 extras.join("")
             ));
         }
+        let arch_card = build_arch_inspector_html(&graph, &selected_id);
+        if !arch_card.is_empty() {
+            html.push_str(&arch_card);
+        }
     }
     body.set_inner_html(&html);
+}
+
+pub(super) fn build_arch_inspector_html(graph: &V, selected_id: &str) -> String {
+    if selected_id.is_empty() || !graph.is_object() {
+        return String::new();
+    }
+    let mut target_files: BTreeSet<String> = BTreeSet::new();
+    for f in m::array(&graph["files"]) {
+        let fid = file_node_id(&f);
+        let path = first_omni_field(&f, &["path", "file_path", "name", "label"]);
+        if fid == selected_id || path == selected_id {
+            if !path.is_empty() {
+                target_files.insert(path);
+            } else {
+                target_files.insert(fid);
+            }
+        }
+    }
+    for s in m::array(&graph["symbols"]) {
+        if symbol_node_id(&s) == selected_id || s["fqn"].as_str() == Some(selected_id) {
+            let fp = symbol_file_path(&s);
+            if !fp.is_empty() {
+                target_files.insert(fp);
+            }
+        }
+    }
+    for a in m::array(&graph["atoms"]) {
+        if atom_id(&a) == selected_id {
+            for f in m::array(&a["files"]) {
+                if let Some(p) = f.as_str().filter(|s| !s.is_empty()) {
+                    target_files.insert(p.to_owned());
+                }
+            }
+        }
+    }
+    if target_files.is_empty() {
+        target_files.insert(selected_id.to_owned());
+    }
+
+    let mut items = Vec::new();
+    for bm in m::array(&graph["blast_markers"]) {
+        let p = first_omni_field(&bm, &["path", "file_path"]);
+        if target_files.contains(&p) {
+            let bf = bm["blast_files"].as_u64().unwrap_or(0);
+            let bt = bm["blast_tests"].as_u64().unwrap_or(0);
+            let risk = first_omni_field(&bm, &["risk"]);
+            let in_cycle = bm["in_cycle"].as_bool().unwrap_or(false);
+            let cycle_txt = if in_cycle { " · in cycle" } else { "" };
+            items.push(format!(
+                "<p class=\"omni-arch-blast-summary\"><strong>Blast ({}):</strong> {bf} files, {bt} tests{cycle_txt}</p>",
+                esc(&risk),
+            ));
+        }
+    }
+    let mut viol_list = Vec::new();
+    for v in m::array(&graph["architecture_violations"]) {
+        let from = first_omni_field(&v, &["from"]);
+        let to = first_omni_field(&v, &["to"]);
+        if target_files.contains(&from) || target_files.contains(&to) {
+            let kind = first_omni_field(&v, &["kind"]);
+            let msg = first_omni_field(&v, &["message"]);
+            viol_list.push(format!(
+                "<li data-violation-kind=\"{}\"><strong>{}:</strong> {} ({} → {})</li>",
+                esc(&kind),
+                esc(&kind),
+                esc(&msg),
+                esc(&from),
+                esc(&to),
+            ));
+        }
+    }
+    if !viol_list.is_empty() {
+        items.push(format!(
+            "<ul class=\"omni-arch-violation-list\">{}</ul>",
+            viol_list.join("")
+        ));
+    }
+    let mut sem_list = Vec::new();
+    for se in m::array(&graph["ir_semantic_edges"]) {
+        let fp = first_omni_field(&se, &["file_path", "source_file", "source"]);
+        if target_files.contains(&fp) {
+            let rel = first_omni_field(&se, &["relation", "kind"]);
+            let tgt = first_omni_field(&se, &["target"]);
+            if !rel.is_empty() && !tgt.is_empty() {
+                sem_list.push(format!(
+                    "<li><code>{}</code> → <code>{}</code></li>",
+                    esc(&rel),
+                    esc(&tgt)
+                ));
+            }
+        }
+    }
+    if !sem_list.is_empty() {
+        items.push(format!(
+            "<ul class=\"omni-arch-semantic-list\">{}</ul>",
+            sem_list.into_iter().take(12).collect::<Vec<_>>().join("")
+        ));
+    }
+    if items.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"omni-inspector-card omni-arch-inspector\"><h4>Code Graph &amp; Architecture</h4>{}</div>",
+            items.join("")
+        )
+    }
 }
 
 pub(super) fn render_pulse() {
@@ -1239,24 +1349,93 @@ pub(super) fn build_omni_dense_scene_meta(
 
     let resolve_alias =
         |raw: &str| -> String { aliases.get(raw).cloned().unwrap_or_else(|| raw.to_owned()) };
-    let mut edge_meta_by_pair: HashMap<(String, String), (String, String)> = HashMap::new();
-    for key in ["edges", "links"] {
-        for edge in m::array(&graph[key]) {
-            let raw_from = first_omni_field(&edge, &["from", "source"]);
-            let raw_to = first_omni_field(&edge, &["to", "target"]);
-            if raw_from.is_empty() || raw_to.is_empty() {
-                continue;
+
+    let mut viol_counts: HashMap<String, usize> = HashMap::new();
+    let mut cycle_files: HashSet<String> = HashSet::new();
+    let mut violated_pairs: HashSet<(String, String)> = HashSet::new();
+    for v in m::array(&graph["architecture_violations"]) {
+        let kind = first_omni_field(&v, &["kind"]);
+        let from = first_omni_field(&v, &["from"]);
+        let to = first_omni_field(&v, &["to"]);
+        if !from.is_empty() {
+            *viol_counts.entry(from.clone()).or_default() += 1;
+            if kind == "cycle" {
+                cycle_files.insert(from.clone());
             }
-            let from = resolve_alias(&raw_from);
-            let to = resolve_alias(&raw_to);
-            let kind = first_omni_field(&edge, &["kind", "type", "edge_kind"]);
-            let relation = first_omni_field(&edge, &["relation", "rel", "kind", "type"]);
-            edge_meta_by_pair
-                .entry((from, to))
-                .or_insert((kind, relation));
+        }
+        if !to.is_empty() && to != from {
+            *viol_counts.entry(to.clone()).or_default() += 1;
+            if kind == "cycle" {
+                cycle_files.insert(to.clone());
+            }
+        }
+        if !from.is_empty() && !to.is_empty() {
+            violated_pairs.insert((from, to));
+        }
+    }
+    let mut blast_by_file: HashMap<String, (u64, u64, usize, bool, String)> = HashMap::new();
+    for bm in m::array(&graph["blast_markers"]) {
+        let path = first_omni_field(&bm, &["path", "file_path"]);
+        if path.is_empty() {
+            continue;
+        }
+        let bf = bm["blast_files"].as_u64().unwrap_or(0);
+        let bt = bm["blast_tests"].as_u64().unwrap_or(0);
+        let vc = bm["violation_count"].as_u64().unwrap_or(0) as usize;
+        let in_cycle = bm["in_cycle"].as_bool().unwrap_or(false);
+        let risk = first_omni_field(&bm, &["risk"]);
+        if vc > 0 {
+            viol_counts
+                .entry(path.clone())
+                .and_modify(|prev| *prev = (*prev).max(vc))
+                .or_insert(vc);
+        }
+        if in_cycle {
+            cycle_files.insert(path.clone());
+        }
+        blast_by_file.insert(path, (bf, bt, vc, in_cycle, risk));
+    }
+    let mut semantic_counts: HashMap<String, usize> = HashMap::new();
+    for se in m::array(&graph["ir_semantic_edges"]) {
+        let fp = first_omni_field(&se, &["file_path", "source_file", "source"]);
+        if !fp.is_empty() {
+            *semantic_counts.entry(fp).or_default() += 1;
         }
     }
 
+    let mut edge_meta_by_pair: HashMap<(String, String), (String, String)> = HashMap::new();
+    for key in [
+        "edges",
+        "symbol_edges",
+        "ir_edges",
+        "ir_semantic_edges",
+        "links",
+    ] {
+        for edge in m::array(&graph[key]) {
+            let raw_from = first_omni_field(&edge, &["from", "source"]);
+            let raw_to = first_omni_field(&edge, &["to", "target"]);
+            let kind = first_omni_field(&edge, &["kind", "type", "edge_kind"]);
+            let relation = first_omni_field(&edge, &["relation", "rel", "kind", "type"]);
+            if !raw_from.is_empty() && !raw_to.is_empty() {
+                let from = resolve_alias(&raw_from);
+                let to = resolve_alias(&raw_to);
+                edge_meta_by_pair
+                    .entry((from, to))
+                    .or_insert((kind.clone(), relation.clone()));
+            }
+            let sf = first_omni_field(&edge, &["source_file"]);
+            let tf = first_omni_field(&edge, &["target_file"]);
+            if !sf.is_empty() && !tf.is_empty() {
+                let from = resolve_alias(&sf);
+                let to = resolve_alias(&tf);
+                edge_meta_by_pair
+                    .entry((from, to))
+                    .or_insert((kind, relation));
+            }
+        }
+    }
+
+    let mut file_by_node_id: HashMap<String, String> = HashMap::new();
     let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
     for (i, (id, ..)) in node_rects.iter().enumerate() {
         let title = node_titles.get(i).cloned().unwrap_or_else(|| id.clone());
@@ -1287,6 +1466,35 @@ pub(super) fn build_omni_dense_scene_meta(
                 },
             }
         });
+        let fp = info.file_path.clone();
+        if !fp.is_empty() {
+            file_by_node_id.insert(id.clone(), fp.clone());
+        }
+        let v_count = viol_counts.get(&fp).copied().unwrap_or(0);
+        let in_cycle = cycle_files.contains(&fp);
+        let (bf, bt, risk) = blast_by_file
+            .get(&fp)
+            .map(|(f, t, _, _, r)| (*f, *t, r.clone()))
+            .unwrap_or_default();
+        let sem_count = semantic_counts.get(&fp).copied().unwrap_or(0);
+        let blast_tag = if in_cycle {
+            "cycle".to_owned()
+        } else if v_count > 0 {
+            format!("{v_count} viol")
+        } else if bf > 0 {
+            format!("blast {bf}f")
+        } else {
+            String::new()
+        };
+        let badge_text = if v_count > 0 && bf > 0 {
+            format!("!{v_count} · {bf}f")
+        } else if v_count > 0 {
+            format!("!{v_count}")
+        } else if bf > 0 {
+            format!("{bf}f")
+        } else {
+            String::new()
+        };
         meta.nodes.insert(
             i,
             graph_viewport::canvas2d::DenseNodeMeta {
@@ -1300,8 +1508,17 @@ pub(super) fn build_omni_dense_scene_meta(
                     "branch": info.branch,
                     "file_path": info.file_path,
                     "symbol_fqn": info.symbol_fqn,
+                    "violation_count": v_count,
+                    "blast_files": bf,
+                    "blast_tests": bt,
+                    "risk": risk,
+                    "in_cycle": in_cycle,
+                    "semantic_edge_count": sem_count,
                 }),
                 symbol_kind: info.kind,
+                in_cycle,
+                blast_tag,
+                badge_text,
                 tooltip: title,
                 file_line: info.file_path,
                 ..Default::default()
@@ -1313,6 +1530,13 @@ pub(super) fn build_omni_dense_scene_meta(
             .get(&(from.clone(), to.clone()))
             .cloned()
             .unwrap_or_default();
+        let from_file = file_by_node_id
+            .get(from.as_str())
+            .map_or(from.as_str(), String::as_str);
+        let to_file = file_by_node_id
+            .get(to.as_str())
+            .map_or(to.as_str(), String::as_str);
+        let arch_violation = violated_pairs.contains(&(from_file.to_owned(), to_file.to_owned()));
         let summary = if kind.is_empty() {
             format!("{from} -> {to}")
         } else {
@@ -1327,6 +1551,7 @@ pub(super) fn build_omni_dense_scene_meta(
                     "to": to,
                     "kind": kind,
                     "relation": relation,
+                    "arch_violation": arch_violation,
                 }),
                 from_index: node_index_by_id.get(from.as_str()).copied(),
                 to_index: node_index_by_id.get(to.as_str()).copied(),

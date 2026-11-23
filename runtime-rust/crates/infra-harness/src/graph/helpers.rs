@@ -19,7 +19,8 @@ pub(super) const REVISIONS: usize = 3;
 pub(super) const MAX_THIN_TREE_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const WATCHER_DEBOUNCE: Duration = Duration::from_millis(150);
 pub(super) const WATCHER_MAX_DELAY: Duration = Duration::from_millis(600);
-pub(super) const MAX_WATCHER_BATCH: usize = 512;
+pub(super) const MAX_INCREMENTAL_BATCH: usize = 2048;
+pub(super) const MAX_WATCHER_COLLECT: usize = 16384;
 pub(super) const NATIVE_READY_MESSAGE: &str =
     "Code graph & dependency map ready (native tree-sitter SQLite IR).";
 /// What a build is doing before the tool runs.

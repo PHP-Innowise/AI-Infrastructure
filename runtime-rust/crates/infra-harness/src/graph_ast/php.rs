@@ -447,7 +447,14 @@ fn walk_php(
                     || lhs.kind() == "nullsafe_member_access_expression"
                     || lhs.kind() == "scoped_property_access_expression"
                 {
-                    emit_php_member_access(ctx, lhs, true, this_props, var_types);
+                    emit_php_member_access(
+                        ctx,
+                        lhs,
+                        true,
+                        cur_class.as_deref(),
+                        this_props,
+                        var_types,
+                    );
                     walk_php(
                         ctx,
                         rhs,
@@ -470,7 +477,7 @@ fn walk_php(
                         | "scoped_property_access_expression"
                 )
             {
-                emit_php_member_access(ctx, lhs, true, this_props, var_types);
+                emit_php_member_access(ctx, lhs, true, cur_class.as_deref(), this_props, var_types);
                 if let Some(rhs) = node.child_by_field_name("right") {
                     walk_php(
                         ctx,
@@ -534,6 +541,12 @@ fn walk_php(
                     cur_class.clone(),
                     line,
                 );
+                if scope_txt.eq_ignore_ascii_case("View")
+                    && mem_txt.eq_ignore_ascii_case("make")
+                    && let Some(view_name) = str_args.first()
+                {
+                    push_blade_view_import(ctx, view_name, line, evidence);
+                }
                 let short_scope = scope_txt
                     .rsplit('\\')
                     .next()
@@ -577,7 +590,12 @@ fn walk_php(
                     cur_class.clone(),
                     line,
                 );
-                if let Some(owner_ty) = resolve_php_receiver_type(obj_txt, this_props, var_types) {
+                if let Some(owner_ty) = resolve_php_receiver_type_with_self(
+                    obj_txt,
+                    cur_class.as_deref(),
+                    this_props,
+                    var_types,
+                ) {
                     let short = owner_ty.rsplit('\\').next().unwrap_or(&owner_ty).to_owned();
                     ctx.push_ref(AstRef {
                         target_name: owner_ty,
@@ -604,6 +622,13 @@ fn walk_php(
                 let str_args = args_node
                     .map(|a| all_string_arg_texts(a, ctx.source))
                     .unwrap_or_default();
+                if fn_name
+                    .trim_start_matches('\\')
+                    .eq_ignore_ascii_case("view")
+                    && let Some(view_name) = str_args.first()
+                {
+                    push_blade_view_import(ctx, view_name, line, evidence);
+                }
                 emit_semantic_from_call(
                     ctx,
                     None,
@@ -632,7 +657,14 @@ fn walk_php(
         | "nullsafe_member_access_expression"
         | "scoped_property_access_expression"
         | "class_constant_access_expression" => {
-            emit_php_member_access(ctx, node, false, this_props, var_types);
+            emit_php_member_access(
+                ctx,
+                node,
+                false,
+                cur_class.as_deref(),
+                this_props,
+                var_types,
+            );
         }
         "binary_expression" => {
             let txt = ctx.text(node);
@@ -1079,12 +1111,16 @@ fn infer_php_expr_type(
     }
 }
 
-fn resolve_php_receiver_type(
+fn resolve_php_receiver_type_with_self(
     recv: &str,
+    cur_class: Option<&str>,
     this_props: &BTreeMap<String, String>,
     var_types: &BTreeMap<String, String>,
 ) -> Option<String> {
     let trimmed = recv.trim();
+    if trimmed == "$this" {
+        return cur_class.map(str::to_owned);
+    }
     if let Some(prop) = trimmed
         .strip_prefix("$this->")
         .or_else(|| trimmed.strip_prefix("$this?->"))
@@ -1101,6 +1137,7 @@ fn emit_php_member_access(
     ctx: &mut ExtractCtx<'_>,
     node: Node<'_>,
     is_write: bool,
+    cur_class: Option<&str>,
     this_props: &BTreeMap<String, String>,
     var_types: &BTreeMap<String, String>,
 ) {
@@ -1126,7 +1163,7 @@ fn emit_php_member_access(
                     access: if is_write { "write" } else { "static_read" }.to_owned(),
                     member_kind: Some("property".to_owned()),
                     owner_type: Some(short_scope),
-                    enclosing_symbol: None,
+                    enclosing_symbol: cur_class.map(str::to_owned),
                     is_static: true,
                     line,
                     evidence: clip_str(evidence, 160),
@@ -1145,7 +1182,7 @@ fn emit_php_member_access(
                         access: "type".to_owned(),
                         member_kind: None,
                         owner_type: None,
-                        enclosing_symbol: None,
+                        enclosing_symbol: cur_class.map(str::to_owned),
                         is_static: true,
                         line,
                         evidence: clip_str(evidence, 160),
@@ -1163,7 +1200,7 @@ fn emit_php_member_access(
                         access: "const".to_owned(),
                         member_kind: Some("const".to_owned()),
                         owner_type: Some(short_scope),
-                        enclosing_symbol: None,
+                        enclosing_symbol: cur_class.map(str::to_owned),
                         is_static: true,
                         line,
                         evidence: clip_str(evidence, 160),
@@ -1183,7 +1220,9 @@ fn emit_php_member_access(
                 } else {
                     format!("${mem_raw}")
                 };
-                if let Some(owner_ty) = resolve_php_receiver_type(obj_txt, this_props, var_types) {
+                if let Some(owner_ty) =
+                    resolve_php_receiver_type_with_self(obj_txt, cur_class, this_props, var_types)
+                {
                     let short = owner_ty.rsplit('\\').next().unwrap_or(&owner_ty).to_owned();
                     ctx.push_ref(AstRef {
                         target_name: owner_ty,
@@ -1192,7 +1231,7 @@ fn emit_php_member_access(
                         access: if is_write { "write" } else { "read" }.to_owned(),
                         member_kind: Some("property".to_owned()),
                         owner_type: Some(short),
-                        enclosing_symbol: None,
+                        enclosing_symbol: cur_class.map(str::to_owned),
                         is_static: false,
                         line,
                         evidence: clip_str(evidence, 160),
@@ -1201,6 +1240,528 @@ fn emit_php_member_access(
             }
         }
         _ => {}
+    }
+}
+
+// =========================================================================
+// 1b. Blade Template Extraction (`.blade.php`)
+// =========================================================================
+
+fn push_blade_view_import(ctx: &mut ExtractCtx<'_>, raw_view: &str, line: u32, evidence: &str) {
+    let view = raw_view.trim();
+    if view.is_empty() || view.len() > 160 || view.contains(['\n', '\r', ' ', '$', '{', '}']) {
+        return;
+    }
+    let leaf = view
+        .rsplit(['.', '/', ':'])
+        .next()
+        .unwrap_or(view)
+        .to_owned();
+    ctx.push_import(AstImport {
+        path: format!("blade-view:{view}"),
+        symbols: if leaf.is_empty() {
+            Vec::new()
+        } else {
+            vec![leaf]
+        },
+        alias: None,
+        is_wildcard: false,
+        is_reexport: false,
+        reexport_visibility: None,
+        kind: "include".to_owned(),
+        line,
+        evidence: clip_str(evidence, 160),
+    });
+}
+
+fn kebab_to_studly(raw: &str) -> String {
+    let mut out = String::new();
+    for seg in raw.split(['-', '_']) {
+        if seg.is_empty() {
+            continue;
+        }
+        let mut chars = seg.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
+fn mask_blade_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(start) = rest.find("{{--") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        let end = after.find("--}}").map(|i| i + 4).unwrap_or(after.len());
+        let comment = &rest[start..start + 4 + end];
+        for ch in comment.chars() {
+            out.push(if ch == '\n' { '\n' } else { ' ' });
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+struct BladeRegexes {
+    view_dir: regex::Regex,
+    view_cond_dir: regex::Regex,
+    view_first_dir: regex::Regex,
+    inject_dir: regex::Regex,
+    use_dir: regex::Regex,
+    livewire_dir: regex::Regex,
+    livewire_class_dir: regex::Regex,
+    x_tag: regex::Regex,
+    livewire_tag: regex::Regex,
+    php_block: regex::Regex,
+    route_call: regex::Regex,
+    url_call: regex::Regex,
+    action_call: regex::Regex,
+    static_call: regex::Regex,
+    class_const: regex::Regex,
+    ident: regex::Regex,
+}
+
+fn blade_regexes() -> &'static BladeRegexes {
+    use regex::Regex;
+    static RE: std::sync::OnceLock<BladeRegexes> = std::sync::OnceLock::new();
+    RE.get_or_init(|| BladeRegexes {
+        view_dir: Regex::new(
+            r#"(?m)@(extends|include|includeIf|component|each)\s*\(\s*['"]([^'"]+)['"]"#,
+        )
+        .expect("blade view_dir"),
+        view_cond_dir: Regex::new(
+            r#"(?m)@(?:includeWhen|includeUnless)\s*\([^,]+,\s*['"]([^'"]+)['"]"#,
+        )
+        .expect("blade view_cond_dir"),
+        view_first_dir: Regex::new(r#"(?m)@includeFirst\s*\(\s*\[([^\]]+)\]"#)
+            .expect("blade view_first_dir"),
+        inject_dir: Regex::new(
+            r#"(?m)@inject\s*\(\s*['"][^'"]+['"]\s*,\s*['"]([^'"]+)['"]"#,
+        )
+        .expect("blade inject_dir"),
+        use_dir: Regex::new(
+            r#"(?m)@use\s*\(\s*['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?\s*\)"#,
+        )
+        .expect("blade use_dir"),
+        livewire_dir: Regex::new(r#"(?m)@livewire\s*\(\s*['"]([A-Za-z0-9_.:-]+)['"]"#)
+            .expect("blade livewire_dir"),
+        livewire_class_dir: Regex::new(
+            r#"(?m)@livewire\s*\(\s*\\?([A-Za-z_][A-Za-z0-9_\\]+)::class"#,
+        )
+        .expect("blade livewire_class_dir"),
+        x_tag: Regex::new(r#"<x-([A-Za-z0-9_.:-]+)(?:[\s/>]|$)"#).expect("blade x_tag"),
+        livewire_tag: Regex::new(r#"<livewire:([A-Za-z0-9_.-]+)(?:[\s/>]|$)"#)
+            .expect("blade livewire_tag"),
+        php_block: Regex::new(r#"(?s)@php\b\s*(?:\r?\n)?(.*?)@endphp\b"#)
+            .expect("blade php_block"),
+        route_call: Regex::new(r#"\broute\s*\(\s*['"]([A-Za-z0-9_.:/-]+)['"]"#)
+            .expect("blade route_call"),
+        url_call: Regex::new(r#"\burl\s*\(\s*['"](/[^'"]*)['"]"#).expect("blade url_call"),
+        action_call: Regex::new(
+            r#"\baction\s*\(\s*\[\s*\\?([A-Za-z_][A-Za-z0-9_\\]+)::class\s*,\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"#,
+        )
+        .expect("blade action_call"),
+        static_call: Regex::new(
+            r#"\\?([A-Z][A-Za-z0-9_\\]+)::([A-Za-z_][A-Za-z0-9_]*)\s*\("#,
+        )
+        .expect("blade static_call"),
+        class_const: Regex::new(r#"\\?([A-Z][A-Za-z0-9_\\]+)::class\b"#)
+            .expect("blade class_const"),
+        ident: Regex::new(r#"\b[A-Za-z_][A-Za-z0-9_]{1,95}\b"#).expect("blade ident"),
+    })
+}
+
+fn line_at_byte(src: &str, byte_offset: usize) -> u32 {
+    let clamped = byte_offset.min(src.len());
+    (src[..clamped].bytes().filter(|&b| b == b'\n').count() + 1) as u32
+}
+
+fn is_escaped_blade_directive(src: &str, at_offset: usize) -> bool {
+    at_offset > 0 && src.as_bytes().get(at_offset - 1) == Some(&b'@')
+}
+
+pub(super) fn extract_blade(ctx: &mut ExtractCtx<'_>, root: Node<'_>) {
+    extract_php(ctx, root);
+    let masked = mask_blade_comments(ctx.source);
+    let re = blade_regexes();
+
+    for cap in re.view_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        push_blade_view_import(ctx, &cap[2], line, m.as_str());
+    }
+    for cap in re.view_cond_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        push_blade_view_import(ctx, &cap[1], line, m.as_str());
+    }
+    for cap in re.view_first_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        for piece in cap[1].split(',') {
+            let trimmed = piece.trim().trim_matches(|c| c == '\'' || c == '"');
+            push_blade_view_import(ctx, trimmed, line, m.as_str());
+        }
+    }
+    for cap in re.inject_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        let fqn = cap[1].trim().trim_start_matches('\\').to_owned();
+        let short = fqn.rsplit('\\').next().unwrap_or(&fqn).to_owned();
+        ctx.push_import(AstImport {
+            path: fqn.clone(),
+            symbols: vec![short],
+            alias: None,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "import".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+        ctx.push_ref(AstRef {
+            target_name: fqn,
+            member: None,
+            context: "field".to_owned(),
+            access: "type".to_owned(),
+            member_kind: None,
+            owner_type: None,
+            enclosing_symbol: None,
+            is_static: false,
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.use_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        let fqn = cap[1].trim().trim_start_matches('\\').to_owned();
+        let short = fqn.rsplit('\\').next().unwrap_or(&fqn).to_owned();
+        let alias = cap.get(2).map(|a| a.as_str().trim().to_owned());
+        ctx.push_import(AstImport {
+            path: fqn,
+            symbols: vec![short],
+            alias,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "import".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.livewire_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        let comp = cap[1].trim();
+        let studly = kebab_to_studly(comp.rsplit(['.', ':']).next().unwrap_or(comp));
+        ctx.push_import(AstImport {
+            path: format!("blade-livewire:{comp}"),
+            symbols: if studly.is_empty() {
+                Vec::new()
+            } else {
+                vec![studly]
+            },
+            alias: None,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "include".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.livewire_class_dir.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        if is_escaped_blade_directive(&masked, m.start()) {
+            continue;
+        }
+        let line = line_at_byte(&masked, m.start());
+        let fqn = cap[1].trim().trim_start_matches('\\').to_owned();
+        let short = fqn.rsplit('\\').next().unwrap_or(&fqn).to_owned();
+        ctx.push_import(AstImport {
+            path: fqn.clone(),
+            symbols: vec![short],
+            alias: None,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "import".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+        ctx.push_ref(AstRef {
+            target_name: fqn,
+            member: None,
+            context: "parameter_type".to_owned(),
+            access: "type".to_owned(),
+            member_kind: None,
+            owner_type: None,
+            enclosing_symbol: None,
+            is_static: true,
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.x_tag.captures_iter(&masked) {
+        let tag = cap[1].trim();
+        if tag.eq_ignore_ascii_case("slot")
+            || tag.to_ascii_lowercase().starts_with("slot:")
+            || tag.is_empty()
+        {
+            continue;
+        }
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let leaf = tag
+            .rsplit("::")
+            .next()
+            .unwrap_or(tag)
+            .rsplit('.')
+            .next()
+            .unwrap_or(tag);
+        let studly = kebab_to_studly(leaf);
+        ctx.push_import(AstImport {
+            path: format!("blade-component:{tag}"),
+            symbols: if studly.is_empty() {
+                Vec::new()
+            } else {
+                vec![studly]
+            },
+            alias: None,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "include".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.livewire_tag.captures_iter(&masked) {
+        let comp = cap[1].trim();
+        if comp.is_empty() {
+            continue;
+        }
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let leaf = comp.rsplit('.').next().unwrap_or(comp);
+        let studly = kebab_to_studly(leaf);
+        ctx.push_import(AstImport {
+            path: format!("blade-livewire:{comp}"),
+            symbols: if studly.is_empty() {
+                Vec::new()
+            } else {
+                vec![studly]
+            },
+            alias: None,
+            is_wildcard: false,
+            is_reexport: false,
+            reexport_visibility: None,
+            kind: "include".to_owned(),
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.route_call.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let route_name = cap[1].trim();
+        if !route_name.is_empty() {
+            let target = if route_name.starts_with('/') {
+                normalize_route_contract(Some("ANY"), route_name, true)
+                    .unwrap_or_else(|| format!("route:ANY {route_name}"))
+            } else {
+                format!("route:NAME {route_name}")
+            };
+            ctx.push_semantic("calls_route", target, None, line, m.as_str());
+        }
+    }
+    for cap in re.url_call.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        if let Some(target) = normalize_route_contract(Some("ANY"), &cap[1], true) {
+            ctx.push_semantic("calls_route", target, None, line, m.as_str());
+        }
+    }
+    for cap in re.action_call.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let ctrl = cap[1].trim().trim_start_matches('\\').to_owned();
+        let method = cap[2].trim().to_owned();
+        let short = ctrl.rsplit('\\').next().unwrap_or(&ctrl).to_owned();
+        ctx.push_ref(AstRef {
+            target_name: ctrl,
+            member: Some(method),
+            context: "call".to_owned(),
+            access: "call".to_owned(),
+            member_kind: Some("method".to_owned()),
+            owner_type: Some(short),
+            enclosing_symbol: None,
+            is_static: false,
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.static_call.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let cls = cap[1].trim().trim_start_matches('\\').to_owned();
+        let method = cap[2].trim().to_owned();
+        let short = cls.rsplit('\\').next().unwrap_or(&cls).to_owned();
+        ctx.push_ref(AstRef {
+            target_name: cls,
+            member: Some(method),
+            context: "call".to_owned(),
+            access: "call".to_owned(),
+            member_kind: Some("method".to_owned()),
+            owner_type: Some(short),
+            enclosing_symbol: None,
+            is_static: true,
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.class_const.captures_iter(&masked) {
+        let m = cap.get(0).unwrap();
+        let line = line_at_byte(&masked, m.start());
+        let cls = cap[1].trim().trim_start_matches('\\').to_owned();
+        ctx.push_ref(AstRef {
+            target_name: cls,
+            member: None,
+            context: "parameter_type".to_owned(),
+            access: "type".to_owned(),
+            member_kind: None,
+            owner_type: None,
+            enclosing_symbol: None,
+            is_static: true,
+            line,
+            evidence: clip_str(m.as_str(), 160),
+        });
+    }
+    for cap in re.php_block.captures_iter(&masked) {
+        let inner_m = cap.get(1).unwrap();
+        let body = inner_m.as_str();
+        if body.trim().is_empty() {
+            continue;
+        }
+        let base_line = line_at_byte(&masked, inner_m.start());
+        let wrapped = format!("<?php\n{body}\n");
+        if let Some(sub) = parse_file_ir("__blade_inline__.php", &wrapped) {
+            let line_shift = base_line.saturating_sub(2);
+            for mut decl in sub.declarations {
+                decl.start_line = decl.start_line.saturating_add(line_shift);
+                decl.end_line = decl.end_line.saturating_add(line_shift);
+                ctx.push_decl(
+                    &decl.entity.kind,
+                    &decl.entity.name,
+                    decl.entity.parent.filter(|p| p != "__blade_inline__.php"),
+                    decl.start_line,
+                    decl.end_line,
+                    decl.visibility,
+                    decl.modifiers,
+                    decl.signature,
+                    decl.params_signature,
+                    decl.body_fingerprint,
+                );
+            }
+            for mut imp in sub.imports {
+                imp.line = imp.line.saturating_add(line_shift);
+                ctx.push_import(imp);
+            }
+            for mut r in sub.calls_and_refs {
+                r.line = r.line.saturating_add(line_shift);
+                ctx.push_ref(r);
+            }
+            for sem in sub.semantic_edges {
+                ctx.push_semantic(
+                    &sem.kind,
+                    sem.target,
+                    sem.source_symbol,
+                    sem.line.saturating_add(line_shift),
+                    &sem.evidence,
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn collect_blade_identifiers(source: &str, out: &mut BTreeSet<String>) {
+    let masked = mask_blade_comments(source);
+    let re = blade_regexes();
+    for cap in re.view_dir.captures_iter(&masked) {
+        for m in re.ident.find_iter(&cap[2]) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.view_cond_dir.captures_iter(&masked) {
+        for m in re.ident.find_iter(&cap[1]) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.x_tag.captures_iter(&masked) {
+        let tag = cap[1].trim();
+        let studly = kebab_to_studly(tag.rsplit(['.', ':']).next().unwrap_or(tag));
+        if !studly.is_empty() {
+            out.insert(studly);
+        }
+        for m in re.ident.find_iter(tag) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.livewire_tag.captures_iter(&masked) {
+        let comp = cap[1].trim();
+        let studly = kebab_to_studly(comp.rsplit('.').next().unwrap_or(comp));
+        if !studly.is_empty() {
+            out.insert(studly);
+        }
+        for m in re.ident.find_iter(comp) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.livewire_dir.captures_iter(&masked) {
+        let comp = cap[1].trim();
+        let studly = kebab_to_studly(comp.rsplit(['.', ':']).next().unwrap_or(comp));
+        if !studly.is_empty() {
+            out.insert(studly);
+        }
+    }
+    for cap in re.route_call.captures_iter(&masked) {
+        for m in re.ident.find_iter(&cap[1]) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.php_block.captures_iter(&masked) {
+        for m in re.ident.find_iter(&cap[1]) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
+    for cap in re.static_call.captures_iter(&masked) {
+        for m in re.ident.find_iter(&cap[1]) {
+            out.insert(m.as_str().to_owned());
+        }
+        out.insert(cap[2].to_owned());
     }
 }
 

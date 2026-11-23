@@ -13,7 +13,7 @@ impl Graphs {
             None => BuildBackend::NativeIr,
         })
     }
-    pub(super) fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
+    pub(crate) fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
         if let Some(existing) = lock(&self.ir_stores)?.get(project).cloned() {
             return Ok(existing);
         }
@@ -144,7 +144,7 @@ impl Graphs {
                         match rx.recv_timeout(wait) {
                             Ok(WatcherMsg::Paths(more)) => {
                                 for path in more {
-                                    if pending.len() >= MAX_WATCHER_BATCH {
+                                    if pending.len() >= MAX_WATCHER_COLLECT {
                                         break;
                                     }
                                     if let Some(rel) = crate::graph_ir::normalize_rel_path(
@@ -329,7 +329,7 @@ impl Graphs {
         bus_delta
     }
 
-    fn finalize_ir_update_delta(
+    pub(super) fn finalize_ir_update_delta(
         &self,
         project: &str,
         root: &Path,
@@ -353,7 +353,7 @@ impl Graphs {
             if crate::graph_ir::GraphIrStore::exists(&self.store.state, project) {
                 let ir = self.ir_store(project)?;
                 let delta =
-                    if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
+                    if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_INCREMENTAL_BATCH {
                         Some(ir.sync_workspace_with_delta(root)?)
                     } else {
                         Some(ir.update_paths_with_delta(root, rel_paths)?)
@@ -378,7 +378,7 @@ impl Graphs {
         if let Some(job) = lock(&self.jobs)?.get(project) {
             if let Ok(mut pending) = job.pending_paths.lock() {
                 for path in rel_paths {
-                    if pending.len() >= MAX_WATCHER_BATCH * 4 {
+                    if pending.len() >= MAX_WATCHER_COLLECT {
                         break;
                     }
                     if !pending.contains(path) {
@@ -400,7 +400,7 @@ impl Graphs {
         let started = Instant::now();
         let ir = self.ir_store(project)?;
         let (delta, is_sync_delta) =
-            if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
+            if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_INCREMENTAL_BATCH {
                 (Some(ir.sync_workspace_with_delta(root)?), true)
             } else {
                 (Some(ir.update_paths_with_delta(root, rel_paths)?), false)
@@ -444,36 +444,45 @@ impl Graphs {
             && let Some(prev_index) = self.maps.latest_live_ir_index(project)
             && let Some(ir_delta) = ir.export_ir_delta_for_files(delta)?
         {
-            prev_index.update_files(root, ir_delta).map(Arc::new)
+            let shared_delta = Arc::new(ir_delta.clone());
+            prev_index
+                .update_files(root, ir_delta)
+                .map(|idx| (Arc::new(idx), shared_delta))
         } else {
             None
         };
-        let (index, nodes, edges, pending_live_json) = if let Some(idx) = incremental_index {
-            let (nodes, edges) = idx.node_link_counts();
-            (idx, nodes, edges, None)
-        } else {
-            let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
-            let shared_nodes = Arc::new(ir_nodes);
-            let shared_links = Arc::new(ir_links);
-            let idx = Arc::new(crate::graph_map::Index::from_ir_parts(
-                root,
-                Some(ir.db_path().to_path_buf()),
-                Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
-                (*shared_nodes).clone(),
-                (*shared_links).clone(),
-            )?);
-            (
-                idx,
-                nodes,
-                edges,
-                Some(PendingLiveJson::Elements {
+        let (index, nodes, edges, pending_live_json) =
+            if let Some((idx, shared_delta)) = incremental_index {
+                let (nodes, edges) = idx.node_link_counts();
+                (
+                    idx,
                     nodes,
                     edges,
-                    ir_nodes: shared_nodes,
-                    ir_links: shared_links,
-                }),
-            )
-        };
+                    Some(PendingLiveJson::Deltas(vec![shared_delta])),
+                )
+            } else {
+                let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
+                let shared_nodes = Arc::new(ir_nodes);
+                let shared_links = Arc::new(ir_links);
+                let idx = Arc::new(crate::graph_map::Index::from_ir_parts(
+                    root,
+                    Some(ir.db_path().to_path_buf()),
+                    Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+                    (*shared_nodes).clone(),
+                    (*shared_links).clone(),
+                )?);
+                (
+                    idx,
+                    nodes,
+                    edges,
+                    Some(PendingLiveJson::Elements {
+                        nodes,
+                        edges,
+                        ir_nodes: shared_nodes,
+                        ir_links: shared_links,
+                    }),
+                )
+            };
         let rev = self.publish_native_index(project, write_epoch, index);
         let fresh_print = self.print(project, root, true);
         let elapsed = tenth(started.elapsed().as_secs_f64());
@@ -503,15 +512,29 @@ impl Graphs {
             }
         })?;
         self.schedule_live_json_write(project, root.to_path_buf(), pending_live_json);
-        self.emit_status_event(
-            project,
-            "ready",
-            "incremental_update",
-            rev,
-            Some(nodes),
-            Some(edges),
-            Some(NATIVE_READY_MESSAGE.to_owned()),
-        );
+        if let Some(ref d) = delta {
+            self.emit_status_event_with_delta(
+                project,
+                "ready",
+                "incremental_update",
+                rev,
+                Some(nodes),
+                Some(edges),
+                Some(NATIVE_READY_MESSAGE.to_owned()),
+                d,
+                is_sync_delta,
+            );
+        } else {
+            self.emit_status_event(
+                project,
+                "ready",
+                "incremental_update",
+                rev,
+                Some(nodes),
+                Some(edges),
+                Some(NATIVE_READY_MESSAGE.to_owned()),
+            );
+        }
         Ok(Some(Self::enrich_bus_delta(
             Some(&ir),
             rel_paths,
