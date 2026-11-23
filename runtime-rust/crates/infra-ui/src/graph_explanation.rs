@@ -191,8 +191,16 @@ fn find_explainable_hit(
     }
     let (hit_kind, hit_index) = if let Some((cx, cy)) = position {
         graph_viewport::canvas2d::hit_test_client(&canvas_id, cx as f64, cy as f64, 12.0)?
+    } else if let Some(dense_hit) = graph_map::focused_dense_hit_for_canvas(&canvas_id) {
+        dense_hit
     } else {
-        graph_map::focused_dense_hit_for_canvas(&canvas_id)?
+        let hit = canvas
+            .query_selector(
+                ".graph-map-node[data-selected='true'], .graph-map-node[tabindex='0'], .system-map-node[data-selected='true'], .omni-node[data-selected='true']",
+            )
+            .ok()
+            .flatten()?;
+        return Some(ExplainHitSource::Dom { hit, canvas_id });
     };
     let (kind, data) =
         graph_viewport::canvas2d::explain_target_for_hit(&canvas_id, hit_kind, hit_index)?;
@@ -834,9 +842,17 @@ fn restore_focus_slot(slot: &RefCell<Option<ReturnFocusTarget>>) {
     }
 }
 
-fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
-    let source = find_explainable_hit(target, position)?;
-    let menu = dom::get(MENU)?.dyn_into::<HtmlElement>().ok()?;
+struct PreparedExplain {
+    selection: V,
+    meta: V,
+    dom_ctx: Element,
+    hit_opt: Option<Element>,
+    canvas_id: String,
+    link: bool,
+    is_commit_graph: bool,
+}
+
+fn prepare_selection_for_source(source: ExplainHitSource) -> Option<PreparedExplain> {
     let (dom_ctx, canvas_id, hit_opt, data, dense_kind) = match source {
         ExplainHitSource::Dom { hit, canvas_id } => {
             let data = parse_hit_payload(&hit)?;
@@ -1106,15 +1122,37 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
     if let Some(sys) = system_explain.as_ref() {
         selection["system_services"] = sys["services"].clone();
     }
+    let meta = json!({
+        "canvas_id": canvas_id,
+        "scope": scope_opt.as_ref().map(GraphTargetScope::to_json).unwrap_or(V::Null),
+        "system_explain": system_explain.unwrap_or(V::Null),
+    });
+    Some(PreparedExplain {
+        selection,
+        meta,
+        dom_ctx,
+        hit_opt,
+        canvas_id,
+        link,
+        is_commit_graph,
+    })
+}
+
+fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
+    let source = find_explainable_hit(target, position)?;
+    let menu = dom::get(MENU)?.dyn_into::<HtmlElement>().ok()?;
+    let prepared = prepare_selection_for_source(source)?;
+    let PreparedExplain {
+        selection,
+        meta,
+        dom_ctx,
+        hit_opt,
+        canvas_id,
+        link,
+        is_commit_graph,
+    } = prepared;
     m::set(SELECTION, selection);
-    m::set(
-        SELECTION_META,
-        json!({
-            "canvas_id": canvas_id,
-            "scope": scope_opt.as_ref().map(GraphTargetScope::to_json).unwrap_or(V::Null),
-            "system_explain": system_explain.unwrap_or(V::Null),
-        }),
-    );
+    m::set(SELECTION_META, meta);
     if let Some(dialog) = dom_ctx.closest("dialog[open]").ok().flatten() {
         dialog.append_child(&menu).ok()?;
     } else if let Some(body) = dom::document().body() {
@@ -1149,6 +1187,53 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
         dom::focus(MENU);
     }
     Some(())
+}
+
+/// Immediately opens the Explain dialog for the currently selected/focused node on `canvas_id`.
+pub(crate) fn explain_selected_on_canvas(canvas_id: &str) -> bool {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return false;
+    };
+    dismiss_menu();
+    let prepared = find_explainable_hit(&canvas, None)
+        .and_then(prepare_selection_for_source)
+        .or_else(|| {
+            let (view, _, _) = resolve_surface_view_and_scope(canvas_id);
+            let focus = &view["focus"];
+            if !focus.is_object() {
+                return None;
+            }
+            let key = focus["path"]
+                .as_str()
+                .or_else(|| focus["id"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            let label = focus["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(key);
+            prepare_selection_for_source(ExplainHitSource::Canvas2d {
+                canvas: canvas.clone(),
+                canvas_id: canvas_id.to_owned(),
+                kind: "node".to_owned(),
+                data: json!({
+                    "path": key,
+                    "id": focus["id"].as_str().unwrap_or(key),
+                    "name": label,
+                }),
+            })
+        });
+    let Some(prepared) = prepared else {
+        return false;
+    };
+    let saved = dom::document()
+        .active_element()
+        .and_then(|el| capture_return_focus(&el, Some(canvas_id)))
+        .or_else(|| capture_return_focus(&canvas, Some(canvas_id)));
+    DIALOG_RETURN_FOCUS.with(|slot| *slot.borrow_mut() = saved);
+    spawn_local(explain(prepared.selection, prepared.meta));
+    true
 }
 
 fn dismiss_menu_internal(restore_focus: bool) {

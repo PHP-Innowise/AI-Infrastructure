@@ -688,18 +688,67 @@ pub fn render_preview(preview: &V) {
     }
 }
 
+pub(crate) fn provider_display_name(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" | "" => "Claude".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "cursor" => "Cursor".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => "Claude".to_owned(),
+            }
+        }
+    }
+}
+
+/// Placeholder and helper copy for `#skillcache-compiler-model` / `#skillcache-compiler-hint`.
+/// Compilation always runs via Claude (the only shell-less provider), so non-Claude
+/// session providers explicitly clarify why Claude remains the compiler.
+pub(crate) fn compiler_copy(
+    session_provider: &str,
+    configured_compiler: Option<&str>,
+) -> (String, String) {
+    let compiler_raw = configured_compiler
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
+    let compiler_name = provider_display_name(compiler_raw);
+    let session_trimmed = session_provider.trim();
+    if compiler_raw.eq_ignore_ascii_case("claude")
+        && !session_trimmed.is_empty()
+        && !session_trimmed.eq_ignore_ascii_case("claude")
+    {
+        let session_name = provider_display_name(session_trimmed);
+        return (
+            "Claude's default model (compiler)".to_owned(),
+            format!(
+                "Always compiled by Claude (the only shell-less compiler), even for {session_name} sessions."
+            ),
+        );
+    }
+    (
+        format!("{compiler_name}'s default model"),
+        format!("A capsule is compiled by {compiler_name}, started without a shell."),
+    )
+}
+
 /// The chip, the panel's note and whether the option can be changed now.
 pub fn controls() {
     let allowed = workflow_eligible();
     let mode = dom::value("skillcache-mode");
+    let session_provider = dom::value("provider");
+    let (selected, boot) = m::read(|s| (s.selected.clone(), s.boot.clone()));
+    let configured_compiler = configured_compiler_provider(&selected, &session_state(), &boot);
+    let (placeholder, hint) = compiler_copy(&session_provider, configured_compiler.as_deref());
     let shown = if allowed { mode.as_str() } else { "off" };
     dom::text("option-skillcache-value", mode_label(shown));
     dom::disabled("skillcache-mode", !allowed);
     dom::disabled("skillcache-compiler-model", !allowed || mode == "off");
-    dom::text(
-        "skillcache-note",
-        &note(&mode, &dom::value("provider"), allowed),
-    );
+    dom::attr("skillcache-compiler-model", "placeholder", &placeholder);
+    dom::text("skillcache-compiler-hint", &hint);
+    dom::text("skillcache-note", &note(&mode, &session_provider, allowed));
     if preflight_request().is_none() {
         dom::hidden("skillcache-preview", true);
     }
@@ -1246,5 +1295,22 @@ mod tests {
         set_session_error("s1", "");
         assert_eq!(session_error_for(&m::data("skillcache-error"), "s1"), "");
         m::take("skillcache-error");
+
+        let (claude_ph, claude_hint) = compiler_copy("claude", None);
+        assert_eq!(claude_ph, "Claude's default model");
+        assert!(claude_hint.contains("compiled by Claude"));
+
+        let (codex_ph, codex_hint) = compiler_copy("codex", Some("claude"));
+        assert_eq!(codex_ph, "Claude's default model (compiler)");
+        assert!(codex_hint.contains("Codex sessions"));
+        assert!(codex_hint.contains("Always compiled by Claude"));
+
+        let (cursor_ph, cursor_hint) = compiler_copy("cursor", None);
+        assert_eq!(cursor_ph, "Claude's default model (compiler)");
+        assert!(cursor_hint.contains("Cursor sessions"));
+
+        let (custom_ph, custom_hint) = compiler_copy("codex", Some("codex"));
+        assert_eq!(custom_ph, "Codex's default model");
+        assert!(custom_hint.contains("compiled by Codex"));
     }
 }

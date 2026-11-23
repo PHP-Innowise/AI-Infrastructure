@@ -10320,4 +10320,42 @@ fn progressive_lod_reads_zoom_and_live_modal_camera_scale_and_sse_updates_graph_
     assert_eq!(m::data("graph")["ir_revision"], json!(99));
     assert_eq!(m::data("graph")["graph"]["nodes"], json!(84));
     assert_eq!(m::data("graph-sse-delta-meta")["prev_nodes"], json!(84));
+
+    // 5. Modal toolbar Explain button tracks focus & dense hit state cleanly.
+    assert_eq!(
+        surfaces::modal_explain_button_state(None, &V::Null, false),
+        (
+            false,
+            "Explain",
+            "Select a node first (or right-click any node or link)",
+        )
+    );
+    assert_eq!(
+        surfaces::modal_explain_button_state(
+            Some(&json!({"focus": {"path": "src/auth", "folder": true}})),
+            &V::Null,
+            false,
+        )
+        .1,
+        "Explain folder"
+    );
+    assert_eq!(
+        surfaces::modal_explain_button_state(
+            Some(&json!({"focus": {"path": "src/auth.rs", "symbol": false}})),
+            &V::Null,
+            false,
+        )
+        .1,
+        "Explain file"
+    );
+    assert_eq!(
+        surfaces::modal_explain_button_state(
+            Some(&json!({"focus": {"path": "src/auth.rs#L10:verify", "symbol": true}})),
+            &V::Null,
+            false,
+        )
+        .1,
+        "Explain symbol"
+    );
+    assert!(surfaces::modal_explain_button_state(None, &V::Null, true).0);
 }

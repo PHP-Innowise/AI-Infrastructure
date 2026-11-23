@@ -3107,6 +3107,7 @@ pub(super) fn blank() {
     dom::hidden("graph-map-agent-field", true);
     m::take("graph-map-attachment");
     dom::text("graph-map-summary", "");
+    surfaces::sync_modal_explain_button(None, &V::Null);
 }
 pub(super) fn sync_modal_service_switcher(scope: &GraphTargetScope) {
     let is_sys = scope.is_system();

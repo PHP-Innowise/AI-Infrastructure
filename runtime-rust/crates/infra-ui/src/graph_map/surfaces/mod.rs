@@ -224,10 +224,11 @@ pub(crate) use interactions::{handle_system_change, handle_system_click, handle_
 #[allow(unused_imports)]
 pub use modal_lifecycle::{append_system_task_draft, event};
 #[allow(unused_imports)]
-pub(super) use modal_lifecycle::{
+pub(in crate::graph_map) use modal_lifecycle::{
     apply_click_action, apply_modal_lens_switch, attach_map_context_to_system_task, choose,
-    clear_lens_submodes, load, parent, place, reconcile_view_state, render, set_surface_attrs,
-    switch_surface_to_service_file, ClickOutcome,
+    clear_lens_submodes, load, modal_explain_button_state, parent, place, reconcile_view_state,
+    render, set_surface_attrs, switch_surface_to_service_file, sync_modal_explain_button,
+    ClickOutcome,
 };
 #[allow(unused_imports)]
 pub(super) use state_urls::{

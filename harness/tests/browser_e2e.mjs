@@ -1647,6 +1647,25 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     5_000,
   );
 
+  // Clicking a node enables the toolbar #graph-map-explain button, and clicking it opens #graph-explanation.
+  await driver.clickAt(pinTargetsAfterReset[0].cx, pinTargetsAfterReset[0].cy);
+  await driver.waitFor(() => {
+    const btn = document.getElementById('graph-map-explain');
+    return Boolean(btn && !btn.disabled && (btn.textContent || '').startsWith('Explain'));
+  }, 'toolbar #graph-map-explain enables when a node is selected', 5_000);
+  await driver.click('#graph-map-explain');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('graph-explanation');
+    const subj = document.getElementById('graph-explanation-subject');
+    return Boolean(dlg && dlg.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+  }, 'toolbar #graph-map-explain opens #graph-explanation with subject', 8_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(
+    () => !document.getElementById('graph-explanation')?.hasAttribute('open') && document.getElementById('graph-map')?.hasAttribute('open'),
+    'Escape closes toolbar-opened #graph-explanation',
+    5_000,
+  );
+
   // Cmd/Ctrl+K palette opens visibly ABOVE <dialog open> #graph-map in top layer
   await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
   await driver.waitFor(() => {
@@ -5412,6 +5431,35 @@ async function suite12SkillCache(driver, opts) {
     return document.getElementById('option-skillcache-value')?.textContent === 'Auto'
       && note.includes('$skill') && note.includes('`/command` runs natively');
   }, 'Auto says how a Claude session runs a capsule and keeps /command native', 5_000);
+
+  // Switching provider to Codex clarifies that the compiler remains Claude without a shell.
+  await driver.callFn(() => {
+    const prov = document.getElementById('provider');
+    if (prov && Array.from(prov.options).some((o) => o.value === 'codex')) {
+      prov.value = 'codex';
+      prov.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await driver.waitFor(() => {
+    const prov = document.getElementById('provider');
+    if (!prov || prov.value !== 'codex') return true;
+    const hint = document.getElementById('skillcache-compiler-hint')?.textContent || '';
+    const ph = document.getElementById('skillcache-compiler-model')?.getAttribute('placeholder') || '';
+    return hint.includes('Codex sessions') && ph.includes('compiler');
+  }, 'SkillCache compiler hint/placeholder clarify Codex sessions still compile via Claude', 5_000);
+  await driver.callFn(() => {
+    const prov = document.getElementById('provider');
+    if (prov && prov.value !== 'claude') {
+      prov.value = 'claude';
+      prov.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await driver.waitFor(
+    () => document.getElementById('skillcache-compiler-model')?.getAttribute('placeholder') === "Claude's default model",
+    'Restoring Claude session provider restores default compiler placeholder',
+    5_000,
+  );
+
   await setMode('observe');
   await driver.click('#option-skillcache');
   await driver.waitFor(() => document.getElementById('panel-skillcache')?.hidden === true, '#panel-skillcache closes', 4_000);
