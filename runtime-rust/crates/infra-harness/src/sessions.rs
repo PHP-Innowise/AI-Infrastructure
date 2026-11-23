@@ -3414,95 +3414,97 @@ impl Sessions {
     /// stored session does not yet have: the mode, and for a new session the
     /// provider, the session's mode and its permissions.
     async fn skillcache_preview(&self, project_id: &str, body: &Value) -> Result<Value> {
-        let composer = &body["skillcache"];
-        let prompt = body["prompt"].as_str().unwrap_or("").trim().to_string();
-        let mut session = match body["session_id"].as_str().filter(|sid| !sid.is_empty()) {
-            Some(sid) => self.store.get(sid)?,
-            None => {
-                let project = self.store.project(project_id)?;
-                json!({
-                    "id": "",
-                    "project_id": project_id,
-                    "project_path": project["path"],
-                    "workflow": "native",
-                    "agents_enabled": false,
-                    "agent_count": 3,
-                })
+        Box::pin(async move {
+            let composer = &body["skillcache"];
+            let prompt = body["prompt"].as_str().unwrap_or("").trim().to_string();
+            let mut session = match body["session_id"].as_str().filter(|sid| !sid.is_empty()) {
+                Some(sid) => self.store.get(sid)?,
+                None => {
+                    let project = self.store.project(project_id)?;
+                    json!({
+                        "id": "",
+                        "project_id": project_id,
+                        "project_path": project["path"],
+                        "workflow": "native",
+                        "agents_enabled": false,
+                        "agent_count": 3,
+                    })
+                }
+            };
+            if session["project_id"] != project_id {
+                return Err(HarnessError::invalid(
+                    "Session does not belong to the requested project.",
+                ));
             }
-        };
-        if session["project_id"] != project_id {
-            return Err(HarnessError::invalid(
-                "Session does not belong to the requested project.",
-            ));
-        }
-        for (field, key) in [
-            ("provider", "provider"),
-            ("session_mode", "mode"),
-            ("permissions", "permissions"),
-        ] {
-            if let Some(value) = composer[field].as_str() {
-                session[key] = value.into();
-            }
-        }
-        if composer.is_object() {
-            let mut merged = session["skillcache"]
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            let mut has_skillcache_field = false;
-            for key in [
-                "mode",
-                "compiler",
-                "compile_after_observe",
-                "skill",
-                "eval_arm",
-                "trace_generation",
-                "capsule_id",
-                "tool_chain",
-                "direct_dispatch",
-                "thin_formatter",
-                "edition",
+            for (field, key) in [
+                ("provider", "provider"),
+                ("session_mode", "mode"),
+                ("permissions", "permissions"),
             ] {
-                if let Some(value) = composer.get(key)
-                    && !value.is_null()
-                {
-                    merged.insert(key.into(), value.clone());
-                    has_skillcache_field = true;
+                if let Some(value) = composer[field].as_str() {
+                    session[key] = value.into();
                 }
             }
-            if has_skillcache_field {
-                if !merged.contains_key("mode") {
-                    merged.insert(
-                        "mode".into(),
-                        crate::skillcache::settings::mode(&session).into(),
-                    );
+            if composer.is_object() {
+                let mut merged = session["skillcache"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut has_skillcache_field = false;
+                for key in [
+                    "mode",
+                    "compiler",
+                    "compile_after_observe",
+                    "skill",
+                    "eval_arm",
+                    "trace_generation",
+                    "capsule_id",
+                    "tool_chain",
+                    "direct_dispatch",
+                    "thin_formatter",
+                    "edition",
+                ] {
+                    if let Some(value) = composer.get(key)
+                        && !value.is_null()
+                    {
+                        merged.insert(key.into(), value.clone());
+                        has_skillcache_field = true;
+                    }
                 }
-                session["skillcache"] =
-                    crate::skillcache::settings::validate(&Value::Object(merged))?;
-                crate::skillcache::settings::admit_with_eval(
-                    &session,
-                    crate::skillcache::settings::eval_enabled(&self.store),
-                )?;
+                if has_skillcache_field {
+                    if !merged.contains_key("mode") {
+                        merged.insert(
+                            "mode".into(),
+                            crate::skillcache::settings::mode(&session).into(),
+                        );
+                    }
+                    session["skillcache"] =
+                        crate::skillcache::settings::validate(&Value::Object(merged))?;
+                    crate::skillcache::settings::admit_with_eval(
+                        &session,
+                        crate::skillcache::settings::eval_enabled(&self.store),
+                    )?;
+                }
             }
-        }
-        if !crate::skillcache::settings::warm(&session) || prompt.is_empty() {
-            return Ok(json!({
-                "mode": crate::skillcache::settings::mode(&session),
-                "decision": "off",
-            }));
-        }
-        let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
-        let mut route = self.commands()?.route(&session, &prompt).await?;
-        self.commands()?
-            .apply_skill_hint(&session, &mut route)
-            .await?;
-        Ok(crate::skillcache::warm::preview(
-            &self.skillcache_runtime(),
-            &session,
-            &route,
-            &prompt,
-            &workspace,
-        ))
+            if !crate::skillcache::settings::warm(&session) || prompt.is_empty() {
+                return Ok(json!({
+                    "mode": crate::skillcache::settings::mode(&session),
+                    "decision": "off",
+                }));
+            }
+            let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+            let commands = self.commands()?;
+            let mut route = Box::pin(commands.route(&session, &prompt)).await?;
+            Box::pin(commands.apply_skill_hint(&session, &mut route)).await?;
+            Ok(crate::skillcache::warm::preview(
+                &self.skillcache_runtime(),
+                &session,
+                &route,
+                &prompt,
+                &workspace,
+            ))
+        })
+        .await
     }
     /// Finalizes the trace recorder before post-turn workspace capture so
     /// ineligible turns skip hashing the workspace.
