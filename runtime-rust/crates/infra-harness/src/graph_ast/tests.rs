@@ -563,18 +563,54 @@ fn route_contracts_normalize_params_and_wildcard_verbs_across_frameworks() {
         Some("route:* /v1/items/{param}")
     );
     let ts = r#"
-export async function loadOrder(id: string) {
-    return fetch(`/api/orders/${id}/items?full=true`);
+export async function loadOrder(id: string, a: string, b: string) {
+    const a1 = fetch(`/api/orders/${id}/items?full=true`);
+    const a2 = fetch(`${BASE}/orders/${id}`);
+    const a3 = fetch(`/api/prefix-${id}/${a + b}?mode=${id ? 'x' : 'y'}`);
+    return [a1, a2, a3];
 }
 "#;
     let ts_ir = parse_file_ir("web/client.ts", ts).expect("ts ir");
-    assert!(
-        ts_ir
-            .semantic_edges
-            .iter()
-            .any(|e| e.kind == "calls_route" && e.target == "route:GET /api/orders/{param}/items"),
-        "{:?}",
-        ts_ir.semantic_edges
+    for expected in [
+        "route:GET /api/orders/{param}/items",
+        "route:GET /orders/{param}",
+        "route:GET /api/prefix-{param}/{param}",
+    ] {
+        assert!(
+            ts_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "calls_route" && e.target == expected),
+            "missing `{expected}` in {:?}",
+            ts_ir.semantic_edges
+        );
+    }
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${BASE}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(None, "prefix-${id}", false).as_deref(),
+        Some("route:* /prefix-{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(None, "${a + b}", false).as_deref(),
+        Some("route:* /{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(
+            Some("post"),
+            "https://${cond ? 'a/b' : 'c'}/api/prefix-${orderId}/${a + b}?q=${x ? 1 : 0}",
+            true
+        )
+        .as_deref(),
+        Some("route:POST /api/prefix-{param}/{param}")
+    );
+    // Bare template expression without `/` and prose whitespace outside `${...}` must stay rejected.
+    assert_eq!(normalize_route_contract(Some("get"), "${url}", true), None);
+    assert_eq!(
+        normalize_route_contract(Some("get"), "/api/orders with space", true),
+        None
     );
 }
 

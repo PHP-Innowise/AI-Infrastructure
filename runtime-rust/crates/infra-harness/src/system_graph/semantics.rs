@@ -276,30 +276,12 @@ struct ServiceSemanticSignals {
 }
 
 fn normalize_route_path(raw: &str) -> Option<(String, String)> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path_part = if let Some(rest) = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-    {
-        let (_, path) = rest.split_once('/')?;
-        format!("/{path}")
-    } else if trimmed.starts_with('/') {
-        trimmed.to_owned()
-    } else {
-        format!("/{trimmed}")
-    };
-    let without_query = path_part
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('/');
+    let contract = crate::graph_ast::normalize_route_contract(None, raw, false)?;
+    let without_query = contract.strip_prefix("route:* ")?.trim_end_matches('/');
     if without_query.is_empty()
         || without_query == "/"
         || matches!(
-            without_query.to_ascii_lowercase().as_str(),
+            without_query,
             "/health" | "/healthz" | "/ready" | "/metrics" | "/favicon.ico"
         )
         || [
@@ -310,29 +292,8 @@ fn normalize_route_path(raw: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let norm_segments = without_query
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|seg| {
-            if (seg.starts_with('{') && seg.ends_with('}'))
-                || (seg.starts_with("${") && seg.ends_with('}'))
-                || (seg.starts_with('<') && seg.ends_with('>'))
-                || (seg.starts_with(':') && seg.len() > 1)
-            {
-                "{*}".to_owned()
-            } else {
-                seg.to_ascii_lowercase()
-            }
-        })
-        .collect::<Vec<_>>();
-    if norm_segments.is_empty() {
-        return None;
-    }
-    Some((
-        format!("/{}", norm_segments.join("/")),
-        without_query.to_owned(),
-    ))
+    let norm = without_query.replace("{param}", "{*}");
+    Some((norm, without_query.to_owned()))
 }
 
 fn routes_match(exposed_norm: &str, called_norm: &str) -> bool {

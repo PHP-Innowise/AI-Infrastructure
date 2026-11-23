@@ -334,7 +334,10 @@ pub(crate) fn on_ir_paths_updated(
     let rows: Vec<(String, String, String)> = {
         let Ok(mut stmt) = db.prepare(
             "SELECT id, project_path, sdd FROM sessions
-             WHERE project_id = ?1 AND sdd IS NOT NULL AND sdd != ''
+             WHERE project_id = ?1
+               AND sdd IS NOT NULL
+               AND sdd != ''
+               AND status NOT IN ('completed', 'cancelled')
              ORDER BY updated_at DESC LIMIT 32",
         ) else {
             return 0;
@@ -420,20 +423,82 @@ struct CheckedClaimLine {
 
 fn is_claim_file_token(token: &str) -> bool {
     const EXTS: &[&str] = &[
-        ".rs", ".php", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".md", ".json", ".toml",
-        ".yaml", ".yml", ".sql", ".sh",
+        ".rs", ".php", ".ts", ".tsx", ".mts", ".cjs", ".mjs", ".js", ".jsx", ".py", ".go", ".java",
+        ".kt", ".kts", ".cs", ".rb", ".swift", ".scala", ".sc", ".phtml", ".inc", ".md", ".json",
+        ".toml", ".yaml", ".yml", ".sql", ".sh",
+    ];
+    const EXACT_BASENAMES: &[&str] = &[
+        "Dockerfile",
+        "Containerfile",
+        "Makefile",
+        "Gemfile",
+        "Rakefile",
+        "Procfile",
     ];
     let trimmed = token.trim().trim_start_matches("./");
-    !trimmed.is_empty()
-        && trimmed.contains('/')
-        && !trimmed.starts_with('/')
-        && !trimmed.contains("://")
-        && !trimmed.contains('\\')
-        && !trimmed.contains("..")
-        && !trimmed
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains("://")
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.split('/').any(str::is_empty)
+        || trimmed
             .chars()
             .any(|c| c.is_whitespace() || "*?[]{}<>\"'$()".contains(c))
-        && EXTS.iter().any(|ext| trimmed.ends_with(ext))
+    {
+        return false;
+    }
+    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    EXACT_BASENAMES.contains(&basename)
+        || EXTS
+            .iter()
+            .any(|ext| trimmed.ends_with(ext) && basename.len() > ext.len())
+}
+
+fn is_valid_claim_ident_segment(part: &str) -> bool {
+    let mut bytes = part.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn is_ignored_bare_claim_word(token: &str) -> bool {
+    if token.len() >= 2
+        && token.starts_with(['T', 't'])
+        && token[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    if matches!(
+        token,
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    ) {
+        return true;
+    }
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "true"
+            | "false"
+            | "null"
+            | "none"
+            | "nil"
+            | "undefined"
+            | "void"
+            | "nan"
+            | "ok"
+            | "yes"
+            | "no"
+            | "todo"
+            | "wip"
+            | "fixme"
+            | "id"
+            | "any"
+            | "unknown"
+            | "never"
+    )
 }
 
 fn is_claim_symbol_token(token: &str) -> bool {
@@ -445,13 +510,54 @@ fn is_claim_symbol_token(token: &str) -> bool {
         return false;
     }
     // Qualified symbol reference (`Owner::member`, `ns\Class::method`) with valid identifier segments.
-    trimmed.contains("::")
-        && trimmed.split("::").all(|part| {
+    if trimmed.contains("::") {
+        return trimmed.split("::").all(|part| {
             let p = part.trim_start_matches('\\');
             !p.is_empty()
                 && p.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'\\'))
-        })
+        });
+    }
+    // Dot-qualified member reference (`Owner.member`, `pkg.Type.method`) after ruling out filenames.
+    if trimmed.contains('.') {
+        let mut parts = trimmed.split('.');
+        let first = parts.next();
+        let second = parts.next();
+        return first.is_some_and(is_valid_claim_ident_segment)
+            && second.is_some_and(is_valid_claim_ident_segment)
+            && parts.all(is_valid_claim_ident_segment);
+    }
+    trimmed.len() >= 2
+        && is_valid_claim_ident_segment(trimmed)
+        && !is_ignored_bare_claim_word(trimmed)
+}
+
+fn resolve_claimed_file_on_disk(
+    root: &Path,
+    doc_path: &str,
+    rel: &str,
+) -> Option<(String, std::path::PathBuf)> {
+    let is_regular_non_symlink = |candidate: &Path| {
+        infra_core::fs::admit_descendant(root, candidate).is_ok()
+            && std::fs::symlink_metadata(candidate)
+                .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+    };
+    let direct = root.join(rel);
+    if is_regular_non_symlink(&direct) {
+        return Some((rel.to_owned(), direct));
+    }
+    if !rel.contains('/')
+        && let Some(parent) = Path::new(doc_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+    {
+        let sibling_rel = format!("{}/{rel}", parent.to_string_lossy().replace('\\', "/"));
+        let sibling = root.join(&sibling_rel);
+        if is_regular_non_symlink(&sibling) {
+            return Some((sibling_rel, sibling));
+        }
+    }
+    None
 }
 
 fn extract_checked_claims(files: &[Value]) -> Vec<CheckedClaimLine> {
@@ -518,17 +624,16 @@ fn workspace_ir_claim_stamp(
     }
     let mut unique_files = BTreeSet::new();
     for line in claims {
-        unique_files.extend(line.files.iter().cloned());
+        for rel in &line.files {
+            unique_files.insert((line.doc_path.clone(), rel.clone()));
+        }
     }
     let file_stamps: Vec<String> = unique_files
         .into_iter()
-        .map(|rel| {
+        .map(|(doc_path, rel)| {
             let meta = root
-                .and_then(|r| {
-                    let p = r.join(&rel);
-                    infra_core::fs::admit_descendant(r, &p).ok()?;
-                    std::fs::symlink_metadata(&p).ok()
-                })
+                .and_then(|r| resolve_claimed_file_on_disk(r, &doc_path, &rel))
+                .and_then(|(_, p)| std::fs::symlink_metadata(&p).ok())
                 .filter(|m| !m.file_type().is_symlink() && m.is_file());
             match meta {
                 Some(m) => {
@@ -537,9 +642,9 @@ fn workspace_ir_claim_stamp(
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map_or(0, |d| d.as_nanos());
-                    format!("{rel}:1:{}:{mtime_ns}", m.len())
+                    format!("{doc_path}::{rel}:1:{}:{mtime_ns}", m.len())
                 }
-                None => format!("{rel}:0"),
+                None => format!("{doc_path}::{rel}:0"),
             }
         })
         .collect();
@@ -586,15 +691,22 @@ fn verify_checked_claims(
     for claim in claims {
         let mut verified_files: Vec<(String, bool)> = Vec::new();
         for rel in &claim.files {
-            let on_disk = root.is_some_and(|r| {
-                let candidate = r.join(rel);
-                infra_core::fs::admit_descendant(r, &candidate).is_ok()
-                    && std::fs::symlink_metadata(&candidate)
-                        .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
-            });
-            let in_ir = check_file_in_ir(rel);
+            let resolved_disk =
+                root.and_then(|r| resolve_claimed_file_on_disk(r, &claim.doc_path, rel));
+            let on_disk = resolved_disk.is_some();
+            let resolved_rel = resolved_disk
+                .as_ref()
+                .map(|(norm_rel, _)| norm_rel.as_str())
+                .unwrap_or(rel.as_str());
+            let in_ir =
+                check_file_in_ir(rel) || (resolved_rel != rel && check_file_in_ir(resolved_rel));
             if on_disk || in_ir {
-                verified_files.push((rel.clone(), in_ir));
+                let effective_rel = if check_file_in_ir(rel) || resolved_disk.is_none() {
+                    rel.clone()
+                } else {
+                    resolved_rel.to_owned()
+                };
+                verified_files.push((effective_rel, in_ir));
             } else {
                 violations.push(Violation {
                     code: "SDD_CLAIMED_FILE_MISSING".into(),
@@ -670,7 +782,8 @@ fn verify_checked_claims(
             {
                 let (owner, member) = sym
                     .rsplit_once("::")
-                    .map(|(o, m)| (o.rsplit('\\').next().unwrap_or(o), m))
+                    .or_else(|| sym.rsplit_once('.'))
+                    .map(|(o, m)| (o.rsplit(['\\', '.']).next().unwrap_or(o), m))
                     .unwrap_or(("", sym.as_str()));
                 let found_on_disk = disk_targets.iter().any(|rel| {
                     infra_core::fs::read_regular(&r.join(rel))
@@ -1201,7 +1314,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
-                 VALUES(?1,'SDD Bus',?2,?3,'claude','plan','sdd',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+                 VALUES(?1,'SDD Bus',?2,?3,'claude','plan','sdd',0,'running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
                 rusqlite::params![
                     sid,
                     pid,
@@ -1243,5 +1356,209 @@ mod tests {
             }
         }
         assert!(saw_stale, "expected sdd_staleness SSE event");
+    }
+
+    #[test]
+    fn claim_token_parsers_support_root_files_multi_lang_exts_dot_and_bare_symbols() {
+        for file_tok in [
+            "Cargo.toml",
+            "README.md",
+            "Dockerfile",
+            "Makefile",
+            "src/App.java",
+            "src/Main.kt",
+            "Order.cs",
+            "lib/worker.rb",
+            "Sources/App.swift",
+            "src/mod.mts",
+            "config.cjs",
+            "spec.md",
+        ] {
+            assert!(
+                is_claim_file_token(file_tok),
+                "expected file token: {file_tok}"
+            );
+            assert!(
+                !is_claim_symbol_token(file_tok),
+                "file token must not classify as symbol: {file_tok}"
+            );
+        }
+        assert!(!is_claim_file_token(".rs"));
+        assert!(!is_claim_file_token("src/.rs"));
+        assert!(!is_claim_file_token("../escape.rs"));
+
+        for sym_tok in [
+            "TokenService::issue",
+            r"App\Auth\Guard::check",
+            "UserService.create",
+            "pkg.AuthService.verify",
+            "TokenService",
+            "create_token",
+            "handler",
+        ] {
+            assert!(
+                is_claim_symbol_token(sym_tok),
+                "expected symbol token: {sym_tok}"
+            );
+        }
+
+        for non_sym in [
+            "T001", "t42", "FR-001", "GET", "POST", "true", "null", "id", ".rs",
+        ] {
+            assert!(
+                !is_claim_symbol_token(non_sym),
+                "unexpected symbol match: {non_sym}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_checked_claims_checks_root_filenames_new_exts_dot_and_bare_symbols_with_ir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM rust:1.80\n").unwrap();
+        std::fs::write(
+            root.join("app.mts"),
+            "export class UserService {\n  create() { return true; }\n}\nexport function create_token() { return 'ok'; }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/App.java"), "class App { void run() {} }\n").unwrap();
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state, "sdd-claims-ext").unwrap();
+        ir.sync_workspace(&root).unwrap();
+        drop(ir);
+
+        let files = vec![
+            json!({"path": "specs/001-ext/spec.md", "available": true, "text": "# Spec\n- FR-001: Multi-lang\n"}),
+            json!({"path": "specs/001-ext/plan.md", "available": true, "text": "# Plan\nCovers FR-001\n"}),
+            json!({
+                "path": "specs/001-ext/tasks.md",
+                "available": true,
+                "text": "- [x] T001 Containerized with `Dockerfile`, `app.mts`, `src/App.java`, `UserService.create`, and `create_token` (`T001`, `true`, `GET`)\n"
+            }),
+            json!({"path": "specs/001-ext/progress.md", "available": true, "text": "- [x] T001 Done\n"}),
+        ];
+        let valid = validate_dataflow_diagnostics_in(
+            Some(&root),
+            Some((&state, "sdd-claims-ext")),
+            &files,
+            "review",
+            3,
+        );
+        assert!(
+            valid.is_empty(),
+            "expected valid multi-lang claims: {valid:?}"
+        );
+
+        let bogus_files = vec![
+            json!({"path": "specs/001-ext/spec.md", "available": true, "text": "# Spec\n- FR-001: Multi-lang\n"}),
+            json!({"path": "specs/001-ext/plan.md", "available": true, "text": "# Plan\nCovers FR-001\n"}),
+            json!({
+                "path": "specs/001-ext/tasks.md",
+                "available": true,
+                "text": "- [x] T001 Missing `Order.cs` and `UserService.nonexistent` and `GhostHelper` in `app.mts`\n"
+            }),
+            json!({"path": "specs/001-ext/progress.md", "available": true, "text": "- [x] T001 Done\n"}),
+        ];
+        let violations = validate_dataflow_diagnostics_in(
+            Some(&root),
+            Some((&state, "sdd-claims-ext")),
+            &bogus_files,
+            "review",
+            3,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.code == "SDD_CLAIMED_FILE_MISSING" && v.message.contains("Order.cs"))
+        );
+        assert!(violations.iter().any(|v| {
+            v.code == "SDD_CLAIMED_SYMBOL_MISSING" && v.message.contains("UserService.nonexistent")
+        }));
+        assert!(violations.iter().any(|v| {
+            v.code == "SDD_CLAIMED_SYMBOL_MISSING" && v.message.contains("GhostHelper")
+        }));
+    }
+
+    #[test]
+    fn on_ir_paths_updated_ignores_completed_and_cancelled_sessions_without_crowding_out_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("specs/003-active")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(root.join("src/auth.rs"), "pub struct TokenService;\n").unwrap();
+        std::fs::write(
+            root.join("specs/003-active/spec.md"),
+            "# Spec\n- FR-001: Active\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("specs/003-active/plan.md"), "# Plan\nFR-001\n").unwrap();
+        std::fs::write(
+            root.join("specs/003-active/tasks.md"),
+            "- [x] T001 Claim `TokenService` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/003-active/progress.md"),
+            "- [x] T001 Done\n",
+        )
+        .unwrap();
+
+        let store = crate::store::SessionStore::open(&state).unwrap();
+        let proj = store.register(&root).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&state, &pid).unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let conn = store.connection().unwrap();
+        // Insert an older active session plus 40 newer completed/cancelled sessions so LIMIT 32
+        // only preserves the active one if completed/cancelled rows are filtered out in SQL.
+        conn.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
+             VALUES(?1,'Active SDD',?2,?3,'claude','plan','sdd',0,'waiting','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+            rusqlite::params![
+                store::id(),
+                pid,
+                root.to_string_lossy().as_ref(),
+                json!({"feature": "003-active", "phase": "review"}).to_string(),
+            ],
+        )
+        .unwrap();
+        for idx in 0..40 {
+            let status = if idx % 2 == 0 {
+                "completed"
+            } else {
+                "cancelled"
+            };
+            conn.execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
+                 VALUES(?1,'Archived SDD',?2,?3,'claude','plan','sdd',0,?4,'2026-02-01T00:00:00Z',?5,?6)",
+                rusqlite::params![
+                    store::id(),
+                    pid,
+                    root.to_string_lossy().as_ref(),
+                    status,
+                    format!("2026-02-01T00:{:02}:00Z", idx % 60),
+                    json!({"feature": "003-active", "phase": "review"}).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        std::fs::write(root.join("src/auth.rs"), "pub struct ReplacedService;\n").unwrap();
+        let delta = ir
+            .update_paths_with_delta(&root, &["src/auth.rs".to_owned()])
+            .unwrap();
+        assert_eq!(
+            on_ir_paths_updated(&store, &pid, &root, &delta),
+            1,
+            "only active/waiting session must be evaluated and emit"
+        );
     }
 }

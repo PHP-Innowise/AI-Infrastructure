@@ -1402,3 +1402,87 @@ pub(super) fn apply_graph_focus(
     }
     Ok(())
 }
+
+fn light_file_stamp(path: &Path) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i128);
+    Some((meta.len(), ns))
+}
+
+fn push_light_stamp_bytes(buf: &mut Vec<u8>, stamp: Option<(u64, i128)>) {
+    match stamp {
+        Some((len, ns)) => {
+            buf.push(1);
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(&ns.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+impl Graphs {
+    /// Computes lightweight DB/file/setting stamps for `project` without calling `status()` or loading `Index`.
+    /// Returns `(ir_revision, ir_write_epoch, meta_and_flags_xxh3)`.
+    pub(crate) fn lightweight_service_stamp(
+        &self,
+        project: &str,
+        target_spec: Option<&str>,
+    ) -> (u64, u64, u128) {
+        let ir_revision = self.ir_revision_of(project);
+        let ir_write_epoch = self
+            .get_ir_store_readonly(project)
+            .map_or(0, |ir| ir.current_write_epoch());
+        let home = folder(&self.store.state, project);
+        let db_stamp = light_file_stamp(&home.join("graph_ir.sqlite3"));
+        let sys_ir_stamp = light_file_stamp(
+            &self
+                .store
+                .state
+                .join("system-ir")
+                .join(format!("{project}.sqlite")),
+        );
+        let live_stamp = light_file_stamp(&live(&self.store.state, project));
+        let setting_bytes = self
+            .setting(project)
+            .ok()
+            .and_then(|v| serde_json::to_vec(&v).ok())
+            .unwrap_or_default();
+        let setting_hash = xxhash_rust::xxh3::xxh3_128(&setting_bytes);
+        let job_active = self
+            .jobs
+            .lock()
+            .ok()
+            .is_some_and(|jobs| jobs.contains_key(project));
+        let explicit_nonwork = target_spec
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty() && t != "work" && t != "uncommitted");
+        let (revision_stamp, revision_active) = if explicit_nonwork {
+            (
+                light_file_stamp(&home.join("revisions")),
+                self.revisions
+                    .lock()
+                    .ok()
+                    .is_some_and(|revs| revs.contains_key(project)),
+            )
+        } else {
+            (None, false)
+        };
+        let mut buf = Vec::with_capacity(112);
+        push_light_stamp_bytes(&mut buf, db_stamp);
+        push_light_stamp_bytes(&mut buf, sys_ir_stamp);
+        push_light_stamp_bytes(&mut buf, live_stamp);
+        buf.extend_from_slice(&setting_hash.to_le_bytes());
+        buf.push(u8::from(job_active));
+        push_light_stamp_bytes(&mut buf, revision_stamp);
+        buf.push(u8::from(revision_active));
+        (
+            ir_revision,
+            ir_write_epoch,
+            xxhash_rust::xxh3::xxh3_128(&buf),
+        )
+    }
+}

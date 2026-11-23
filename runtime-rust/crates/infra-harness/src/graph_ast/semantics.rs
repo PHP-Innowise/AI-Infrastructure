@@ -771,30 +771,139 @@ pub(super) fn extract_di_targets(
     targets
 }
 
+/// Collapses brace-balanced JS/TS template interpolations (`${...}`) to `placeholder`.
+/// Rejects empty (`${}`) or unclosed interpolations and any whitespace outside `${...}`.
+/// Returns `(collapsed, leading_template_slash)` where `leading_template_slash` is `true`
+/// when `raw` starts with `${...}` immediately followed by `/`.
+fn collapse_route_template_interpolations(raw: &str, placeholder: &str) -> Option<(String, bool)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut idx = 0usize;
+    let mut leading_template_slash = false;
+
+    while idx < bytes.len() {
+        if bytes[idx] == b'$' && idx + 1 < bytes.len() && bytes[idx + 1] == b'{' {
+            let expr_start = idx + 2;
+            let mut cursor = expr_start;
+            let mut depth = 1usize;
+            let mut quote_stack: Vec<u8> = Vec::new();
+            let mut escaped = false;
+            while cursor < bytes.len() && depth > 0 {
+                let b = bytes[cursor];
+                if let Some(&q) = quote_stack.last() {
+                    if escaped {
+                        escaped = false;
+                    } else if b == b'\\' {
+                        escaped = true;
+                    } else if q == b'`'
+                        && b == b'$'
+                        && cursor + 1 < bytes.len()
+                        && bytes[cursor + 1] == b'{'
+                    {
+                        depth += 1;
+                        cursor += 1;
+                    } else if b == q {
+                        quote_stack.pop();
+                    }
+                    cursor += 1;
+                    continue;
+                }
+                match b {
+                    b'\'' | b'"' | b'`' => quote_stack.push(b),
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            if depth != 0 || trimmed[expr_start..cursor - 1].trim().is_empty() {
+                return None;
+            }
+            if idx == 0 && bytes.get(cursor) == Some(&b'/') {
+                leading_template_slash = true;
+            }
+            out.push_str(placeholder);
+            idx = cursor;
+            continue;
+        }
+        let ch = trimmed[idx..].chars().next()?;
+        if ch.is_whitespace() {
+            return None;
+        }
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+
+    Some((out, leading_template_slash))
+}
+
+fn find_closing_delim(chars: &[char], open_idx: usize, close: char) -> Option<usize> {
+    let mut i = open_idx + 1;
+    while i < chars.len() {
+        if chars[i] == close {
+            return (i > open_idx + 1).then_some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Normalizes a single URL path segment (whole-segment or inline placeholders) to `placeholder`.
+fn normalize_route_segment(seg: &str, placeholder: &str) -> String {
+    if seg == placeholder || (seg.starts_with(':') && seg.len() > 1) {
+        return placeholder.to_owned();
+    }
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::with_capacity(seg.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let close = match chars[i] {
+            '{' => Some('}'),
+            '<' => Some('>'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(close_ch) = close
+            && let Some(end) = find_closing_delim(&chars, i, close_ch)
+        {
+            out.push_str(placeholder);
+            i = end + 1;
+            continue;
+        }
+        out.push(chars[i].to_ascii_lowercase());
+        i += 1;
+    }
+    out
+}
+
 /// Normalizes a route specification and optional HTTP verb into canonical `route:<VERB|*> /norm/{param}`.
 pub(crate) fn normalize_route_contract(
     verb: Option<&str>,
     raw_path: &str,
     require_leading_slash_or_http: bool,
 ) -> Option<String> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
-        return None;
-    }
-    let path_part = if let Some(rest) = trimmed
+    let (collapsed, leading_template_slash) =
+        collapse_route_template_interpolations(raw_path, "{param}")?;
+    let path_part = if let Some(rest) = collapsed
         .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
+        .or_else(|| collapsed.strip_prefix("https://"))
     {
         match rest.find('/') {
             Some(slash) => &rest[slash..],
             None => "/",
         }
-    } else if trimmed.starts_with('/') {
-        trimmed
+    } else if leading_template_slash {
+        collapsed.strip_prefix("{param}").unwrap_or(&collapsed)
+    } else if collapsed.starts_with('/') {
+        collapsed.as_str()
     } else if require_leading_slash_or_http {
         return None;
     } else {
-        trimmed
+        collapsed.as_str()
     };
     let without_query = path_part.split(['?', '#']).next().unwrap_or(path_part);
     let mut norm_segments = Vec::new();
@@ -802,16 +911,7 @@ pub(crate) fn normalize_route_contract(
         if seg.is_empty() {
             continue;
         }
-        let is_param = (seg.starts_with('{') && seg.ends_with('}') && seg.len() > 2)
-            || (seg.starts_with("${") && seg.ends_with('}') && seg.len() > 3)
-            || (seg.starts_with('<') && seg.ends_with('>') && seg.len() > 2)
-            || (seg.starts_with('[') && seg.ends_with(']') && seg.len() > 2)
-            || (seg.starts_with(':') && seg.len() > 1);
-        if is_param {
-            norm_segments.push("{param}".to_owned());
-        } else {
-            norm_segments.push(seg.to_ascii_lowercase());
-        }
+        norm_segments.push(normalize_route_segment(seg, "{param}"));
     }
     let norm_path = if norm_segments.is_empty() {
         "/".to_owned()
