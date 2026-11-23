@@ -1,7 +1,14 @@
 //! Required native domain ports; the application composes concrete Rust services.
 use crate::{HarnessError, Result, store::SessionStore};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 pub enum Payload {
     Json(Value),
     Bytes {
@@ -121,12 +128,186 @@ pub trait Domain: Send + Sync {
         false
     }
 }
+const MAX_CONCURRENT_FILE_CONTEXT: usize = 8;
+const MAX_PREFLIGHT_MEMO: usize = 128;
+const MAX_KNOWLEDGE_SYNC_STAMPS: usize = 128;
+const KNOWLEDGE_RACY_NS: i128 = 2_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PreflightMemoKey {
+    project_id: String,
+    request_sha: String,
+    ir_revision: u64,
+    omnigraph_epoch: u64,
+    knowledge_epoch: u64,
+    knowledge_stamp: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct KnowledgeSyncStampKey {
+    project_id: String,
+    bank: String,
+    session_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KnowledgeDiskStamp {
+    Absent,
+    Racy,
+    Settled(String),
+}
+
+#[derive(Default)]
+struct ServicesRuntimeCache {
+    seq: u64,
+    omnigraph_epochs: HashMap<String, u64>,
+    knowledge_epochs: HashMap<String, u64>,
+    preflight_memo: HashMap<PreflightMemoKey, (Value, u64)>,
+    knowledge_sync_stamps: HashMap<KnowledgeSyncStampKey, ((String, u64), u64)>,
+}
+
+impl ServicesRuntimeCache {
+    fn epochs_for(&self, project_id: &str) -> (u64, u64) {
+        (
+            self.omnigraph_epochs.get(project_id).copied().unwrap_or(0),
+            self.knowledge_epochs.get(project_id).copied().unwrap_or(0),
+        )
+    }
+
+    fn bump_omnigraph(&mut self, project_id: &str) {
+        if !project_id.trim().is_empty() {
+            *self
+                .omnigraph_epochs
+                .entry(project_id.trim().to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    fn bump_knowledge(&mut self, project_id: &str) {
+        if !project_id.trim().is_empty() {
+            *self
+                .knowledge_epochs
+                .entry(project_id.trim().to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    fn get_preflight(&mut self, key: &PreflightMemoKey) -> Option<Value> {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        let entry = self.preflight_memo.get_mut(key)?;
+        entry.1 = use_seq;
+        Some(entry.0.clone())
+    }
+
+    fn insert_preflight(&mut self, key: PreflightMemoKey, value: Value) {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        if self.preflight_memo.len() >= MAX_PREFLIGHT_MEMO
+            && !self.preflight_memo.contains_key(&key)
+            && let Some(evict) = self
+                .preflight_memo
+                .iter()
+                .min_by_key(|(_, (_, s))| *s)
+                .map(|(k, _)| k.clone())
+        {
+            self.preflight_memo.remove(&evict);
+        }
+        self.preflight_memo.insert(key, (value, use_seq));
+    }
+}
+
+fn time_ns(t: SystemTime) -> Option<i128> {
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+
+fn knowledge_revision_stamp(project_root: Option<&Path>) -> KnowledgeDiskStamp {
+    const MAX_FILES: usize = 4096;
+    let Some(root) = project_root.filter(|p| p.is_dir()) else {
+        return KnowledgeDiskStamp::Absent;
+    };
+    let roots = [root.join("memory-bank"), root.join("project-brain")];
+    if roots.iter().all(|dir| !dir.exists()) {
+        return KnowledgeDiskStamp::Absent;
+    }
+    let mut entries_out = Vec::new();
+    let mut max_mtime_ns: i128 = 0;
+    for base in &roots {
+        if !base.exists() {
+            continue;
+        }
+        let Ok(base_meta) = std::fs::symlink_metadata(base) else {
+            return KnowledgeDiskStamp::Racy;
+        };
+        if base_meta.file_type().is_symlink() || !base_meta.is_dir() {
+            return KnowledgeDiskStamp::Racy;
+        }
+        if let Some(t) = base_meta.modified().ok().and_then(time_ns) {
+            max_mtime_ns = max_mtime_ns.max(t);
+        }
+        let mut queue = std::collections::VecDeque::from([base.clone()]);
+        while let Some(dir) = queue.pop_front() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                return KnowledgeDiskStamp::Racy;
+            };
+            let mut children: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+            children.sort_by_key(|e| e.file_name());
+            for child in children {
+                let name = child.file_name();
+                let name_s = name.to_string_lossy();
+                if matches!(name_s.as_ref(), ".git" | "local")
+                    || name_s.ends_with(".sqlite3-wal")
+                    || name_s.ends_with(".sqlite3-shm")
+                {
+                    continue;
+                }
+                let p = child.path();
+                let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                    return KnowledgeDiskStamp::Racy;
+                };
+                if meta.file_type().is_symlink() {
+                    return KnowledgeDiskStamp::Racy;
+                }
+                if meta.is_dir() {
+                    if let Some(t) = meta.modified().ok().and_then(time_ns) {
+                        max_mtime_ns = max_mtime_ns.max(t);
+                    }
+                    queue.push_back(p);
+                } else if meta.is_file() {
+                    let Some(t) = meta.modified().ok().and_then(time_ns) else {
+                        return KnowledgeDiskStamp::Racy;
+                    };
+                    max_mtime_ns = max_mtime_ns.max(t);
+                    let rel = p
+                        .strip_prefix(root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|| name_s.into_owned());
+                    entries_out.push(format!("{rel}:{}:{t}", meta.len()));
+                    if entries_out.len() >= MAX_FILES {
+                        return KnowledgeDiskStamp::Racy;
+                    }
+                }
+            }
+        }
+    }
+    let now_ns = time_ns(SystemTime::now()).unwrap_or(0);
+    if max_mtime_ns <= 0 || now_ns <= KNOWLEDGE_RACY_NS || max_mtime_ns > now_ns - KNOWLEDGE_RACY_NS
+    {
+        return KnowledgeDiskStamp::Racy;
+    }
+    KnowledgeDiskStamp::Settled(crate::store::sha(entries_out.join("\n").as_bytes()))
+}
+
 pub struct NativeServices {
     pub store: SessionStore,
     pub domains: BTreeMap<String, Arc<dyn Domain>>,
     pub bootstrap: Arc<dyn Fn() -> Result<Value> + Send + Sync>,
     pub overrides: BTreeMap<String, Arc<dyn Domain>>,
     pub closer: Arc<dyn Fn() -> CloseFuture<'static> + Send + Sync>,
+    runtime_cache: Arc<Mutex<ServicesRuntimeCache>>,
 }
 /// The most `knowledge.sync_collect` pages one sync reads.
 const SYNC_PAGES: usize = 64;
@@ -243,6 +424,40 @@ impl NativeServices {
         {
             return;
         }
+        let project_root = self
+            .store
+            .project(project_id)
+            .ok()
+            .and_then(|p| p["path"].as_str().map(PathBuf::from));
+        let disk_stamp = knowledge_revision_stamp(project_root.as_deref());
+        let bank_norm = bank.map(str::trim).unwrap_or("").to_owned();
+        let session_norm = session_id.map(str::trim).unwrap_or("").to_owned();
+        let sync_key = KnowledgeSyncStampKey {
+            project_id: project_id.to_owned(),
+            bank: bank_norm,
+            session_id: session_norm,
+        };
+        let settled_token = match &disk_stamp {
+            KnowledgeDiskStamp::Settled(stamp) => self.runtime_cache.lock().ok().map(|guard| {
+                let (_, knowledge_epoch) = guard.epochs_for(project_id);
+                (stamp.clone(), knowledge_epoch)
+            }),
+            KnowledgeDiskStamp::Absent | KnowledgeDiskStamp::Racy => None,
+        };
+        if let Some(ref token) = settled_token
+            && let Ok(mut guard) = self.runtime_cache.lock()
+            && guard
+                .knowledge_sync_stamps
+                .get(&sync_key)
+                .is_some_and(|(prev, _)| prev == token)
+        {
+            guard.seq = guard.seq.saturating_add(1);
+            let s = guard.seq;
+            if let Some(entry) = guard.knowledge_sync_stamps.get_mut(&sync_key) {
+                entry.1 = s;
+            }
+            return;
+        }
         let mut collect_body = json!({"project_id": project_id});
         if let Some(b) = bank.map(str::trim).filter(|s| !s.is_empty()) {
             collect_body["bank"] = json!(b);
@@ -255,12 +470,31 @@ impl NativeServices {
         else {
             return;
         };
-        let _ = omnigraph
+        let sync_res = omnigraph
             .execute(
                 "omnigraph.sync_items",
                 json!({"params":{},"query":{},"body":{"project_id":project_id,"items":collected["items"],"prune_layers":collected["prune_layers"]}}),
             )
             .await;
+        if sync_res.is_ok()
+            && let Some(token) = settled_token
+            && let Ok(mut guard) = self.runtime_cache.lock()
+        {
+            guard.seq = guard.seq.saturating_add(1);
+            let s = guard.seq;
+            if guard.knowledge_sync_stamps.len() >= MAX_KNOWLEDGE_SYNC_STAMPS
+                && !guard.knowledge_sync_stamps.contains_key(&sync_key)
+                && let Some(evict) = guard
+                    .knowledge_sync_stamps
+                    .iter()
+                    .min_by_key(|(_, (_, last))| *last)
+                    .map(|(k, _)| k.clone())
+            {
+                guard.knowledge_sync_stamps.remove(&evict);
+            }
+            guard.knowledge_sync_stamps.insert(sync_key, (token, s));
+            guard.bump_omnigraph(project_id);
+        }
     }
     async fn attach_waiting_permission_counts(&self, sessions: &mut [Value]) {
         let counts = self.waiting_permission_counts().await;
@@ -737,7 +971,6 @@ impl NativeServices {
         }
     }
     async fn handle_memory_links(&self, operation: &str, request: &Value) -> Result<Payload> {
-        const MAX_CONCURRENT_FILE_CONTEXT: usize = 8;
         let knowledge = self
             .domains
             .get("knowledge")
@@ -754,88 +987,78 @@ impl NativeServices {
             .unwrap_or_else(|| request["params"]["project_id"].clone());
         if operation == "knowledge.memory_links_batch" {
             if let Some(items) = links["items"].as_array_mut() {
-                let omnigraph = self.domains.get("omnigraph").cloned();
-                if items.len() <= 1 || tokio::runtime::Handle::try_current().is_err() {
-                    for item in items {
-                        let path = item["path"].clone();
-                        let res =
-                            fetch_omnigraph_enrichment(omnigraph.clone(), project_id.clone(), path)
-                                .await;
-                        apply_omnigraph_enrichment(item, res);
-                    }
-                } else {
-                    let mut set: tokio::task::JoinSet<(usize, OmnigraphEnrichment)> =
-                        tokio::task::JoinSet::new();
-                    let mut next_idx = 0usize;
-                    while next_idx < items.len() && set.len() < MAX_CONCURRENT_FILE_CONTEXT {
-                        let idx = next_idx;
-                        next_idx += 1;
-                        let og = omnigraph.clone();
-                        let pid = project_id.clone();
-                        let path = items[idx]["path"].clone();
-                        set.spawn(
-                            async move { (idx, fetch_omnigraph_enrichment(og, pid, path).await) },
-                        );
-                    }
-                    while let Some(joined) = set.join_next().await {
-                        if let Ok((idx, enrichment)) = joined {
-                            apply_omnigraph_enrichment(&mut items[idx], enrichment);
-                        }
-                        if next_idx < items.len() {
-                            let idx = next_idx;
-                            next_idx += 1;
-                            let og = omnigraph.clone();
-                            let pid = project_id.clone();
-                            let path = items[idx]["path"].clone();
-                            set.spawn(async move {
-                                (idx, fetch_omnigraph_enrichment(og, pid, path).await)
-                            });
-                        }
-                    }
-                }
+                self.enrich_items_concurrently(&project_id, items).await;
             }
         } else {
-            self.enrich_memory_links_item(&project_id, &mut links).await;
+            self.enrich_items_concurrently(&project_id, std::slice::from_mut(&mut links))
+                .await;
         }
         Ok(Payload::Json(links))
     }
     async fn handle_preflight(&self, request: &Value) -> Result<Payload> {
-        let knowledge = self
-            .domains
-            .get("knowledge")
-            .ok_or_else(|| HarnessError::unavailable("Required native service is unavailable."))?;
-        let Payload::Json(mut preflight) = knowledge
-            .execute("knowledge.preflight", request.clone())
-            .await?
-        else {
-            return Err(HarnessError::unavailable("Unexpected preflight payload."));
-        };
-        let project_id = preflight
-            .get("project_id")
-            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .unwrap_or_else(|| request["params"]["project_id"].clone());
-        let mut contradictions = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        if let Some(files) = preflight["files"].as_array_mut() {
-            for item in files {
-                self.enrich_memory_links_item(&project_id, item).await;
-                collect_unique_contradictions(item, &mut contradictions, &mut seen);
+        let pid_str = request["params"]["project_id"]
+            .as_str()
+            .or_else(|| request["query"]["project_id"].as_str())
+            .or_else(|| request["body"]["project_id"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let memo_key = self.build_preflight_memo_key(&pid_str, request);
+        let mut preflight = if let Some(ref key) = memo_key
+            && let Ok(mut guard) = self.runtime_cache.lock()
+            && let Some(cached) = guard.get_preflight(key)
+        {
+            cached
+        } else {
+            let knowledge = self.domains.get("knowledge").ok_or_else(|| {
+                HarnessError::unavailable("Required native service is unavailable.")
+            })?;
+            let Payload::Json(mut computed) = knowledge
+                .execute("knowledge.preflight", request.clone())
+                .await?
+            else {
+                return Err(HarnessError::unavailable("Unexpected preflight payload."));
+            };
+            let project_id = computed
+                .get("project_id")
+                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                .cloned()
+                .unwrap_or_else(|| request["params"]["project_id"].clone());
+            let mut contradictions = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            if let Some(files) = computed["files"].as_array_mut() {
+                self.enrich_items_concurrently(&project_id, files).await;
+                for item in files {
+                    collect_unique_contradictions(item, &mut contradictions, &mut seen);
+                }
             }
-        }
-        if preflight.is_object() {
-            preflight["contradiction_warnings"] = Value::Array(contradictions);
-            // What SkillCache would decide for this message, when the
-            // composer says the session asks for warm turns. A preview that
-            // cannot be made is left out; it never fails the preflight.
-            if !request["body"]["skillcache"].is_null()
-                && let Some(sessions) = self.domains.get("sessions")
-                && let Ok(Payload::Json(preview)) = sessions
-                    .execute("sessions.skillcache_preview", request.clone())
-                    .await
+            if computed.is_object() {
+                computed["contradiction_warnings"] = Value::Array(contradictions);
+            }
+            let has_omnigraph_error = computed["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| item.get("omnigraph_error").is_some_and(|v| !v.is_null()));
+            if let Some(key) = memo_key
+                && computed.is_object()
+                && computed["ok"].as_bool().unwrap_or(true)
+                && !has_omnigraph_error
+                && let Ok(mut guard) = self.runtime_cache.lock()
             {
-                preflight["skillcache"] = preview;
+                guard.insert_preflight(key, computed.clone());
             }
+            computed
+        };
+        if preflight.is_object()
+            && !request["body"]["skillcache"].is_null()
+            && let Some(sessions) = self.domains.get("sessions")
+            && let Ok(Payload::Json(preview)) = sessions
+                .execute("sessions.skillcache_preview", request.clone())
+                .await
+        {
+            // What SkillCache would decide for this message, evaluated dynamically outside base memo.
+            preflight["skillcache"] = preview;
         }
         Ok(Payload::Json(preflight))
     }
@@ -878,11 +1101,14 @@ impl NativeServices {
             }
             if !enriched_via_preflight {
                 let mut seen = std::collections::BTreeSet::new();
-                for path in &paths {
-                    let mut item = json!({ "path": path, "contradiction_warnings": [] });
-                    self.enrich_memory_links_item(&json!(project_id), &mut item)
-                        .await;
-                    collect_unique_contradictions(&item, &mut contradiction_warnings, &mut seen);
+                let mut items: Vec<Value> = paths
+                    .iter()
+                    .map(|path| json!({ "path": path, "contradiction_warnings": [] }))
+                    .collect();
+                self.enrich_items_concurrently(&json!(project_id), &mut items)
+                    .await;
+                for item in &items {
+                    collect_unique_contradictions(item, &mut contradiction_warnings, &mut seen);
                 }
             }
         }
@@ -951,14 +1177,87 @@ impl NativeServices {
             _ => Vec::new(),
         }
     }
-    async fn enrich_memory_links_item(&self, project_id: &Value, links: &mut Value) {
-        let res = fetch_omnigraph_enrichment(
-            self.domains.get("omnigraph").cloned(),
-            project_id.clone(),
-            links["path"].clone(),
-        )
-        .await;
-        apply_omnigraph_enrichment(links, res);
+    async fn enrich_items_concurrently(&self, project_id: &Value, items: &mut [Value]) {
+        let omnigraph = self.domains.get("omnigraph").cloned();
+        if items.len() <= 1 || tokio::runtime::Handle::try_current().is_err() {
+            for item in items {
+                let path = item["path"].clone();
+                let res =
+                    fetch_omnigraph_enrichment(omnigraph.clone(), project_id.clone(), path).await;
+                apply_omnigraph_enrichment(item, res);
+            }
+            return;
+        }
+        let mut set: tokio::task::JoinSet<(usize, OmnigraphEnrichment)> =
+            tokio::task::JoinSet::new();
+        let mut next_idx = 0usize;
+        while next_idx < items.len() && set.len() < MAX_CONCURRENT_FILE_CONTEXT {
+            let idx = next_idx;
+            next_idx += 1;
+            let og = omnigraph.clone();
+            let pid = project_id.clone();
+            let path = items[idx]["path"].clone();
+            set.spawn(async move { (idx, fetch_omnigraph_enrichment(og, pid, path).await) });
+        }
+        while let Some(joined) = set.join_next().await {
+            if let Ok((idx, enrichment)) = joined {
+                apply_omnigraph_enrichment(&mut items[idx], enrichment);
+            }
+            if next_idx < items.len() {
+                let idx = next_idx;
+                next_idx += 1;
+                let og = omnigraph.clone();
+                let pid = project_id.clone();
+                let path = items[idx]["path"].clone();
+                set.spawn(async move { (idx, fetch_omnigraph_enrichment(og, pid, path).await) });
+            }
+        }
+    }
+    fn build_preflight_memo_key(
+        &self,
+        project_id: &str,
+        request: &Value,
+    ) -> Option<PreflightMemoKey> {
+        if project_id.is_empty() {
+            return None;
+        }
+        let project_root = self
+            .store
+            .project(project_id)
+            .ok()
+            .and_then(|p| p["path"].as_str().map(PathBuf::from));
+        let knowledge_stamp = match knowledge_revision_stamp(project_root.as_deref()) {
+            KnowledgeDiskStamp::Racy => return None,
+            KnowledgeDiskStamp::Absent => "absent".to_owned(),
+            KnowledgeDiskStamp::Settled(digest) => digest,
+        };
+        let mut req_norm = request.clone();
+        if let Some(body) = req_norm.get_mut("body").and_then(Value::as_object_mut) {
+            body.remove("skillcache");
+        }
+        let request_sha = infra_core::domain::json::canonical(&req_norm)
+            .ok()
+            .map(|c| crate::store::sha(c.as_bytes()))?;
+        let ir_revision =
+            crate::graph_ir::GraphIrStore::open_readonly_cached(&self.store.state, project_id)
+                .ok()
+                .flatten()
+                .map(|ir| ir.current_write_epoch())
+                .unwrap_or(0);
+        let (omnigraph_epoch, knowledge_epoch) = self
+            .runtime_cache
+            .lock()
+            .ok()
+            .map(|guard| guard.epochs_for(project_id))
+            .unwrap_or((0, 0));
+        Some(PreflightMemoKey {
+            project_id: project_id.to_owned(),
+            request_sha,
+            ir_revision,
+            omnigraph_epoch,
+            knowledge_epoch,
+            knowledge_stamp,
+        })
     }
     pub fn new(
         store: SessionStore,
@@ -999,6 +1298,7 @@ impl NativeServices {
             bootstrap,
             overrides,
             closer,
+            runtime_cache: Arc::new(Mutex::new(ServicesRuntimeCache::default())),
         })
     }
 }
@@ -1493,6 +1793,26 @@ impl Services for NativeServices {
             if let Payload::Json(ref val) = payload
                 && val["ok"] == true
             {
+                let mut_pid = self.resolve_project_id(&[
+                    val.get("project_id"),
+                    params.get("project_id"),
+                    query.get("project_id"),
+                    body.get("project_id"),
+                ]);
+                if operation.starts_with("omnigraph.")
+                    && !matches!(operation, "omnigraph.status" | "omnigraph.file_context")
+                    && let Some(ref pid) = mut_pid
+                    && let Ok(mut guard) = self.runtime_cache.lock()
+                {
+                    guard.bump_omnigraph(pid);
+                } else if (operation == "knowledge.run"
+                    || operation.starts_with("brain.")
+                    || operation.starts_with("memory."))
+                    && let Some(ref pid) = mut_pid
+                    && let Ok(mut guard) = self.runtime_cache.lock()
+                {
+                    guard.bump_knowledge(pid);
+                }
                 if operation == "omnigraph.promote" {
                     let project_id = body["project_id"]
                         .as_str()
@@ -3134,6 +3454,267 @@ mod tests {
         assert_eq!(items.len(), 4);
         assert_eq!(items[0]["omnigraph_atoms"][0]["id"], "atom:src/a.rs");
         assert_eq!(items[3]["omnigraph_atoms"][0]["id"], "atom:src/d.rs");
+        services.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_preflight_fans_out_concurrently_and_memoizes_by_revision() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct PreflightDomain {
+            preflight_calls: Arc<AtomicUsize>,
+            preview_calls: Arc<AtomicUsize>,
+            in_flight: Arc<AtomicUsize>,
+            max_in_flight: Arc<AtomicUsize>,
+        }
+        impl Domain for PreflightDomain {
+            fn execute<'a>(&'a self, op: &'a str, req: Value) -> Reply<'a> {
+                let preflight_calls = Arc::clone(&self.preflight_calls);
+                let preview_calls = Arc::clone(&self.preview_calls);
+                let in_flight = Arc::clone(&self.in_flight);
+                let max_in_flight = Arc::clone(&self.max_in_flight);
+                Box::pin(async move {
+                    match op {
+                        "knowledge.preflight" => {
+                            preflight_calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(Payload::Json(json!({
+                                "ok": true,
+                                "project_id": req["params"]["project_id"],
+                                "files": [
+                                    {"path": "src/a.rs"},
+                                    {"path": "src/b.rs"},
+                                    {"path": "src/c.rs"},
+                                    {"path": "src/d.rs"}
+                                ]
+                            })))
+                        }
+                        "omnigraph.file_context" => {
+                            let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(cur, Ordering::SeqCst);
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                            let path = req["query"]["path"].as_str().unwrap_or("");
+                            Ok(Payload::Json(json!({
+                                "ok": true,
+                                "atoms": [{"id": format!("atom:{path}")}],
+                                "contradictions": []
+                            })))
+                        }
+                        "sessions.skillcache_preview" => {
+                            preview_calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(Payload::Json(
+                                json!({"warm": true, "mode": req["body"]["skillcache"]}),
+                            ))
+                        }
+                        _ => Ok(Payload::Json(json!({"ok": true}))),
+                    }
+                })
+            }
+        }
+        struct OkStub;
+        impl Domain for OkStub {
+            fn execute<'a>(&'a self, _op: &'a str, _req: Value) -> Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(
+            proj.join("Cargo.toml"),
+            "[package]\nname = \"memo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(proj.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        let reg = store.register(&proj).unwrap();
+        let pid = reg["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&store.state, &pid).unwrap();
+        ir.sync_workspace(&proj).unwrap();
+
+        let preflight_calls = Arc::new(AtomicUsize::new(0));
+        let preview_calls = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let dom = Arc::new(PreflightDomain {
+            preflight_calls: Arc::clone(&preflight_calls),
+            preview_calls: Arc::clone(&preview_calls),
+            in_flight,
+            max_in_flight: Arc::clone(&max_in_flight),
+        });
+        let ok_stub: Arc<dyn Domain> = Arc::new(OkStub);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "results",
+            "delivery",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "harness",
+            "graph",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "system_graph",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&ok_stub)))
+        .collect();
+        domains.insert("knowledge".into(), dom.clone());
+        domains.insert("omnigraph".into(), dom.clone());
+        domains.insert("sessions".into(), dom.clone());
+
+        let services = NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+
+        let req1 = json!({
+            "params": {"project_id": pid},
+            "query": {},
+            "body": {"prompt": "check a.rs", "paths": ["src/a.rs"], "skillcache": {"mode": "warm"}}
+        });
+        let Payload::Json(res1) = services.request("knowledge.preflight", req1).await.unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "handle_preflight must fan out omnigraph.file_context concurrently"
+        );
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(preview_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(res1["skillcache"]["warm"], true);
+
+        // Repeat with different skillcache payload -> base preflight hits memo, skillcache preview still runs.
+        let req2 = json!({
+            "params": {"project_id": pid},
+            "query": {},
+            "body": {"prompt": "check a.rs", "paths": ["src/a.rs"], "skillcache": {"mode": "strict"}}
+        });
+        let Payload::Json(res2) = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(preview_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(res2["skillcache"]["mode"]["mode"], "strict");
+
+        // Advance IR revision -> invalidates preflight memo cleanly.
+        std::fs::write(proj.join("src/a.rs"), "pub fn a() -> i32 { 2 }\n").unwrap();
+        ir.sync_workspace(&proj).unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 2);
+
+        // Advance omnigraph epoch via omnigraph.sync_knowledge -> invalidates preflight memo cleanly.
+        let _ = services
+            .request(
+                "omnigraph.sync_knowledge",
+                json!({"params": {"project_id": pid}, "query": {}, "body": {"project_id": pid}}),
+            )
+            .await
+            .unwrap();
+        let _ = services.request("knowledge.preflight", req2).await.unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 3);
+        services.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn best_effort_sync_knowledge_short_circuits_when_settled_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let proj = dir.path().join("proj-sync");
+        let bank_dir = proj.join("memory-bank");
+        std::fs::create_dir_all(&bank_dir).unwrap();
+        let mem_file = bank_dir.join("MEM-20260101-demo.md");
+        std::fs::write(&mem_file, "# Demo\nSettled chunk.\n").unwrap();
+        let settled_time = SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&mem_file)
+            .unwrap()
+            .set_modified(settled_time)
+            .unwrap();
+        std::fs::File::options()
+            .read(true)
+            .open(&bank_dir)
+            .unwrap()
+            .set_modified(settled_time)
+            .unwrap();
+        let reg = store.register(&proj).unwrap();
+        let pid = reg["id"].as_str().unwrap().to_owned();
+
+        let rec = Arc::new(RecordingDomain::default());
+        let services = build_services_with_recording(store, rec.clone(), false);
+
+        services.best_effort_sync_knowledge(&pid, None, None).await;
+        let ops_after_first: Vec<String> = rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert_eq!(
+            ops_after_first
+                .iter()
+                .filter(|op| op.as_str() == "knowledge.sync_collect")
+                .count(),
+            1
+        );
+
+        // Unchanged settled revision stamp short-circuits without calling knowledge.sync_collect or omnigraph.sync_items.
+        services.best_effort_sync_knowledge(&pid, None, None).await;
+        let ops_after_second: Vec<String> = rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert_eq!(
+            ops_after_second
+                .iter()
+                .filter(|op| op.as_str() == "knowledge.sync_collect")
+                .count(),
+            1
+        );
+
+        // Recent modification inside KNOWLEDGE_RACY_NS invalidates and refuses short-circuit.
+        std::fs::write(&mem_file, "# Demo\nFresh edit.\n").unwrap();
+        services.best_effort_sync_knowledge(&pid, None, None).await;
+        let ops_after_edit: Vec<String> = rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert_eq!(
+            ops_after_edit
+                .iter()
+                .filter(|op| op.as_str() == "knowledge.sync_collect")
+                .count(),
+            2
+        );
         services.close().await.unwrap();
     }
 }

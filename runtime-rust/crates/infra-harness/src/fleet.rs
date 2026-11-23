@@ -34,6 +34,37 @@ pub trait Blackboard: Send + Sync {
     fn dispatch_complete(&self, task: &str, lens: &str, message: &str) -> Result<()>;
     fn progress(&self, task: &str, message: &str) -> Result<()>;
 }
+fn collect_fleet_health(store: &SessionStore, state: &Value, c: &Config) -> (usize, Vec<String>) {
+    let summary =
+        crate::clash::summarize_workflow_health(store, "fleet", &c.provider, c.model.as_deref());
+    let requested = c.concurrency.max(1);
+    let effective = summary.recommended_fleet_concurrency(requested);
+    let mut warnings = Vec::new();
+    for existing in state["health_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !warnings.iter().any(|w| w == existing) {
+            warnings.push(existing.to_owned());
+        }
+    }
+    for w in &summary.warnings {
+        if !warnings.contains(w) {
+            warnings.push(w.clone());
+        }
+    }
+    if effective < requested {
+        let msg = format!(
+            "Throttled Fleet concurrency pre-launch from {requested} to {effective} based on smoothed workflow health."
+        );
+        if !warnings.contains(&msg) {
+            warnings.push(msg);
+        }
+    }
+    (effective, warnings)
+}
 #[derive(Clone)]
 pub struct Fleet {
     pub store: SessionStore,
@@ -472,8 +503,12 @@ impl Fleet {
                     }
                     if !c.dry_run
                         && let Some(pre) = state.get("precheck").filter(|v| !v.is_null())
-                        && let Some(record) =
-                            crate::clash::run_precheck_sandboxed(&c.project, pre).await
+                        && let Some(record) = crate::clash::run_precheck_sandboxed_in_store(
+                            &self.store,
+                            &c.project,
+                            pre,
+                        )
+                        .await
                     {
                         let (mut st, _, _, r) = self.snapshot(thread)?;
                         st["deterministic_precheck"] = record;
@@ -483,6 +518,23 @@ impl Fleet {
                 }
                 "review" => {
                     emit(json!({"kind":"fleet_stage","stage":"review","status":"running"}))?;
+                    let (effective_concurrency, pre_warnings) =
+                        collect_fleet_health(&self.store, &state, c);
+                    let current_eff = state.get("effective_concurrency").and_then(Value::as_u64);
+                    let desired_eff = Some(effective_concurrency as u64);
+                    if current_eff != desired_eff || !pre_warnings.is_empty() {
+                        let (mut st, _, _, r) = self.snapshot(thread)?;
+                        st["effective_concurrency"] = json!(effective_concurrency);
+                        crate::clash::merge_health_warnings(&mut st, &pre_warnings);
+                        self.transition(thread, r, &st, "review")?;
+                        if !pre_warnings.is_empty() {
+                            emit(json!({
+                                "kind": "fleet_health",
+                                "effective_concurrency": effective_concurrency,
+                                "warnings": pre_warnings
+                            }))?;
+                        }
+                    }
                     let pre_note = match state
                         .get("deterministic_precheck")
                         .filter(|v| v.is_object())
@@ -505,7 +557,7 @@ impl Fleet {
                         }
                         None => String::new(),
                     };
-                    let semaphore = Arc::new(tokio::sync::Semaphore::new(c.concurrency));
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
                     let mut running = tokio::task::JoinSet::new();
                     for (tid, input) in self.tasks(thread)? {
                         let permit =
@@ -621,14 +673,12 @@ impl Fleet {
                     emit(json!({"kind":"fleet_stage","stage":"gate","status":"waiting"}))?;
                 }
                 "gate" => {
-                    let warnings = crate::clash::workflow_health_warnings(
-                        &self.store,
-                        "fleet",
-                        &c.provider,
-                        c.model.as_deref(),
-                    );
+                    let (default_eff, warnings) = collect_fleet_health(&self.store, &state, c);
+                    let eff = state["effective_concurrency"]
+                        .as_u64()
+                        .unwrap_or(default_eff as u64);
                     return Ok(
-                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"effective_concurrency":eff,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
                     );
                 }
                 "record" => {
@@ -665,14 +715,12 @@ impl Fleet {
                     self.transition(thread, rev, &state, "done")?;
                 }
                 "done" => {
-                    let warnings = crate::clash::workflow_health_warnings(
-                        &self.store,
-                        "fleet",
-                        &c.provider,
-                        c.model.as_deref(),
-                    );
+                    let (default_eff, warnings) = collect_fleet_health(&self.store, &state, c);
+                    let eff = state["effective_concurrency"]
+                        .as_u64()
+                        .unwrap_or(default_eff as u64);
                     return Ok(
-                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"effective_concurrency":eff,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
                     );
                 }
                 _ => return Err(HarnessError::invalid("Invalid native Fleet stage.")),
@@ -1050,5 +1098,82 @@ mod tests {
         assert_eq!(gated["status"], "awaiting_approval");
         assert_eq!(gated["findings"].as_array().unwrap().len(), 2);
         assert_eq!(gated["schema_errors"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn fleet_prelaunch_smoothed_health_throttles_concurrency_and_emits_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let ws = dir.path().join("project");
+        std::fs::create_dir_all(&ws).unwrap();
+        for i in 0..4 {
+            crate::clash::record_workflow_health(
+                &store,
+                "fleet",
+                "codex",
+                None,
+                &format!("prior-{i}"),
+                "schema_error",
+                true,
+                true,
+                Some(0.05),
+                1.0,
+            );
+        }
+        let fleet = Fleet {
+            store,
+            blackboard: Arc::new(NoopBlackboard),
+        };
+        let cfg = Config {
+            project: ws,
+            provider: "codex".into(),
+            executable: PathBuf::from("codex"),
+            lenses: vec!["security-reviewer".into(), "architect".into()],
+            model: None,
+            effort: None,
+            budget: None,
+            seconds: 60,
+            concurrency: 4,
+            dry_run: true,
+            reports: dir.path().join("reports"),
+            adapter: None,
+            runner_lock: None,
+        };
+        let thread = "fleet-throttle-1";
+        fleet
+            .initialize(thread, "task-throttle", "Throttle check", &cfg, None, None)
+            .unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let events_sink = events.clone();
+        let gated = fleet
+            .drive(
+                thread,
+                &cfg,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(move |ev| {
+                    events_sink.lock().unwrap().push(ev);
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gated["status"], "awaiting_approval");
+        assert_eq!(gated["effective_concurrency"], 1);
+        let warnings = gated["health_warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w
+                .as_str()
+                .unwrap_or("")
+                .contains("Throttled Fleet concurrency")),
+            "{warnings:?}"
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "fleet_health" && e["effective_concurrency"] == 1),
+            "fleet_health event must be emitted pre-launch"
+        );
     }
 }
