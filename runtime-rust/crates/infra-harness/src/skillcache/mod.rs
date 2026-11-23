@@ -24,7 +24,7 @@ use compile::{EnqueueCompileFn, Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -309,6 +309,18 @@ pub(crate) fn staleness_in_state(
     capsule: &Value,
     workspace: &Path,
 ) -> Option<String> {
+    staleness_for_warm_candidate(state, capsule, workspace, None)
+}
+
+/// Evaluates capsule staleness in `workspace`, optionally resolving a matched
+/// tool-mirror `SKILL.md` path (`.claude`/`.agents`/`.cursor`) when the capsule's
+/// original mirror path is absent in a sibling worktree.
+pub(crate) fn staleness_for_warm_candidate(
+    state: Option<&Path>,
+    capsule: &Value,
+    workspace: &Path,
+    matched_skill_path: Option<&str>,
+) -> Option<String> {
     if capsule["schema_version"].as_u64() != Some(infra_skillcache::SCHEMA_VERSION) {
         return Some("The capsule was written in another schema version.".into());
     }
@@ -321,10 +333,16 @@ pub(crate) fn staleness_in_state(
         .flatten()
     {
         let name = skill["name"].as_str().unwrap_or("");
-        let Some(folder) = skill["path"]
-            .as_str()
-            .and_then(|path| trace::skill_file(workspace, path))
-            .and_then(|file| file.parent().map(Path::to_path_buf))
+        let resolved_file = skill["path"].as_str().and_then(|path| {
+            trace::skill_file(workspace, path).or_else(|| {
+                matched_skill_path.and_then(|mp| {
+                    let a = db::canonical_mirror_skill(path)?;
+                    let b = db::canonical_mirror_skill(mp)?;
+                    (a == b).then(|| trace::skill_file(workspace, mp)).flatten()
+                })
+            })
+        });
+        let Some(folder) = resolved_file.and_then(|file| file.parent().map(Path::to_path_buf))
         else {
             return Some(format!("The skill `{name}` cannot be located."));
         };
@@ -497,15 +515,18 @@ pub(crate) fn staleness_in_state(
 
 #[derive(Clone)]
 struct CachedPackageMeta {
-    stats: Vec<(String, u64, u128)>,
+    stats: Vec<(String, u64, u128, u64)>,
     digest: String,
     read_only: bool,
+    last_used_tick: u64,
 }
 
 #[derive(Default)]
 struct PackageMetaCache {
     entries: HashMap<PathBuf, CachedPackageMeta>,
-    order: VecDeque<PathBuf>,
+    tick: u64,
+    #[cfg(test)]
+    disk_loads: HashMap<PathBuf, usize>,
 }
 
 const MAX_PACKAGE_META_CACHE: usize = 256;
@@ -515,12 +536,25 @@ fn package_meta_cache() -> &'static Mutex<PackageMetaCache> {
     CACHE.get_or_init(|| Mutex::new(PackageMetaCache::default()))
 }
 
+fn metadata_inode(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
 fn stat_package_tree(
     root: &Path,
     dir: &Path,
     depth: usize,
     now_ns: u128,
-    stats: &mut Vec<(String, u64, u128)>,
+    stats: &mut Vec<(String, u64, u128, u64)>,
     racy_safe: &mut bool,
 ) -> bool {
     if depth > 8 {
@@ -554,12 +588,43 @@ fn stat_package_tree(
             if mtime_ns == 0 || now_ns.saturating_sub(mtime_ns) < db::RACY_NS {
                 *racy_safe = false;
             }
-            stats.push((rel_str, meta.len(), mtime_ns));
+            stats.push((rel_str, meta.len(), mtime_ns, metadata_inode(&meta)));
         } else {
             return false;
         }
     }
     true
+}
+
+fn insert_package_meta_cache(
+    canonical_warm: PathBuf,
+    stats: Vec<(String, u64, u128, u64)>,
+    digest: String,
+    read_only: bool,
+) {
+    if let Ok(mut guard) = package_meta_cache().lock() {
+        if !guard.entries.contains_key(&canonical_warm)
+            && guard.entries.len() >= MAX_PACKAGE_META_CACHE
+            && let Some(evicted) = guard
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used_tick)
+                .map(|(k, _)| k.clone())
+        {
+            guard.entries.remove(&evicted);
+        }
+        guard.tick = guard.tick.saturating_add(1);
+        let tick = guard.tick;
+        guard.entries.insert(
+            canonical_warm,
+            CachedPackageMeta {
+                stats,
+                digest,
+                read_only,
+                last_used_tick: tick,
+            },
+        );
+    }
 }
 
 fn cached_package_meta(
@@ -575,42 +640,63 @@ fn cached_package_meta(
     if stat_ok {
         stats.sort();
         if racy_safe
-            && let Ok(guard) = package_meta_cache().lock()
-            && let Some(cached) = guard.entries.get(&canonical_warm)
-            && cached.stats == stats
+            && let Ok(mut guard) = package_meta_cache().lock()
+            && guard
+                .entries
+                .get(&canonical_warm)
+                .is_some_and(|cached| cached.stats == stats)
         {
+            guard.tick = guard.tick.saturating_add(1);
+            let tick = guard.tick;
+            let cached = guard
+                .entries
+                .get_mut(&canonical_warm)
+                .expect("checked present");
+            cached.last_used_tick = tick;
             return Ok((cached.digest.clone(), cached.read_only));
         }
+    }
+    #[cfg(test)]
+    if let Ok(mut guard) = package_meta_cache().lock() {
+        *guard.disk_loads.entry(canonical_warm.clone()).or_insert(0) += 1;
     }
     let loaded = package::load(warm)?;
     let read_only = loaded.capsule.form == infra_skillcache::Form::Textual
         || loaded.capsule.programs.iter().all(|p| p.read_only);
     let digest = loaded.package_sha256;
-    if stat_ok
-        && racy_safe
-        && let Ok(mut guard) = package_meta_cache().lock()
-    {
-        if !guard.entries.contains_key(&canonical_warm) {
-            if guard.entries.len() >= MAX_PACKAGE_META_CACHE
-                && let Some(evicted) = guard.order.pop_front()
-            {
-                guard.entries.remove(&evicted);
-            }
-            guard.order.push_back(canonical_warm.clone());
-        }
-        guard.entries.insert(
-            canonical_warm,
-            CachedPackageMeta {
-                stats,
-                digest: digest.clone(),
-                read_only,
-            },
-        );
+    if stat_ok && racy_safe {
+        insert_package_meta_cache(canonical_warm, stats, digest.clone(), read_only);
     }
     Ok((digest, read_only))
 }
 
-pub(super) fn cached_package_digest(
+/// Seeds `package_meta_cache` when a caller has already loaded and verified `warm`
+/// and every file in `warm` has settled past `RACY_NS`.
+pub(crate) fn cache_package_meta_if_settled(warm: &Path, digest: &str, read_only: bool) {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    let now_ns = db::current_unix_ns();
+    let mut stats = Vec::new();
+    let mut racy_safe = true;
+    let stat_ok = std::fs::symlink_metadata(warm)
+        .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+        && stat_package_tree(warm, warm, 0, now_ns, &mut stats, &mut racy_safe);
+    if stat_ok && racy_safe {
+        stats.sort();
+        insert_package_meta_cache(canonical_warm, stats, digest.to_owned(), read_only);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn package_meta_disk_loads(warm: &Path) -> usize {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    package_meta_cache()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.disk_loads.get(&canonical_warm).copied())
+        .unwrap_or(0)
+}
+
+pub(crate) fn cached_package_digest(
     warm: &Path,
 ) -> std::result::Result<String, infra_core::RuntimeError> {
     cached_package_meta(warm).map(|(digest, _)| digest)
@@ -759,6 +845,100 @@ fn trigger_background_requalify(db: &rusqlite::Connection) {
     drain_pending_requalifies(&rt, &wq);
 }
 
+fn unpinned_trace_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(db::TRACE_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Enforces `db::CAPSULES_PER_PROJECT` LRU eviction on `project_id` and collects
+/// unpinned traces and snapshot directories on disk.
+pub(crate) fn gc_project_and_snapshots(store: &SessionStore, project_id: &str) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    let _ = db::enforce_project_capsule_cap(&db, project_id, db::CAPSULES_PER_PROJECT);
+    let _ = db::prune_unpinned_traces(&db, &unpinned_trace_cutoff());
+    let kept = db::trace_generations(&db).ok();
+    drop(db);
+    if let Some(kept) = kept {
+        snapshot::collect(&store.state, &kept);
+    }
+}
+
+/// Sweeps orphaned capsule/qualification directories and unpinned traces/snapshots.
+pub(crate) fn collect_storage(store: &SessionStore) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    let _ = db::prune_unpinned_traces(&db, &unpinned_trace_cutoff());
+    let known_capsules: Option<BTreeSet<String>> = db
+        .prepare("SELECT capsule_id FROM skillcache_capsules")
+        .ok()
+        .and_then(|mut q| {
+            q.query_map([], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.flatten().collect())
+        });
+    let kept = db::trace_generations(&db).ok();
+    drop(db);
+    if let Some(known) = known_capsules {
+        let capsules_root = store.state.join("skillcache/capsules");
+        for proj_entry in std::fs::read_dir(&capsules_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let proj_path = proj_entry.path();
+            if std::fs::symlink_metadata(&proj_path)
+                .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+            {
+                for cap_entry in std::fs::read_dir(&proj_path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let cap_path = cap_entry.path();
+                    if let Some(name) = cap_entry.file_name().to_str()
+                        && !name.starts_with('.')
+                        && !known.contains(name)
+                        && std::fs::symlink_metadata(&cap_path)
+                            .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+                    {
+                        package::release(&cap_path);
+                        let _ = std::fs::remove_dir_all(&cap_path);
+                    }
+                }
+                if std::fs::read_dir(&proj_path)
+                    .ok()
+                    .is_some_and(|mut d| d.next().is_none())
+                {
+                    let _ = std::fs::remove_dir(&proj_path);
+                }
+            }
+        }
+        let qual_root = store.state.join("skillcache/qualification");
+        for cap_entry in std::fs::read_dir(&qual_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let cap_path = cap_entry.path();
+            if let Some(name) = cap_entry.file_name().to_str()
+                && !name.starts_with('.')
+                && !known.contains(name)
+                && std::fs::symlink_metadata(&cap_path)
+                    .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+            {
+                package::release(&cap_path);
+                let _ = std::fs::remove_dir_all(&cap_path);
+            }
+        }
+    }
+    if let Some(kept) = kept {
+        snapshot::collect(&store.state, &kept);
+    }
+}
+
 impl SkillCacheDomain {
     pub fn new(
         store: SessionStore,
@@ -783,6 +963,7 @@ impl SkillCacheDomain {
             work,
             requalifying,
         };
+        collect_storage(&domain.runtime.store);
         register_requalify_hook(&domain.runtime, &domain.work);
         drain_pending_requalifies(&domain.runtime, &domain.work);
         domain
@@ -1081,6 +1262,7 @@ impl SkillCacheDomain {
             "retired",
             Some(reason),
         )?;
+        collect_storage(&self.runtime.store);
         self.runtime.publish(
             project_id,
             "retired",
@@ -1156,7 +1338,8 @@ impl SkillCacheDomain {
         db::delete_capsule(&db, capsule_id)?;
         // The trace goes with the last capsule that was compiled from it.
         let shared: i64 = db.query_row(
-            "SELECT COUNT(*) FROM skillcache_capsules WHERE source_generation=?1",
+            "SELECT COUNT(*) FROM skillcache_capsules
+             WHERE source_generation=?1 AND status NOT IN ('failed','retired')",
             [&generation],
             |row| row.get(0),
         )?;
@@ -2985,5 +3168,118 @@ mod tests {
         assert_eq!(amort["deopt_count"], 1);
         assert!((amort["saving_per_reuse_usd"].as_f64().unwrap() - 0.10).abs() < 1e-9);
         assert_eq!(amort["breakeven_reuses"], 2);
+    }
+
+    #[test]
+    fn collect_storage_sweeps_orphans_and_retire_unpins_expired_snapshots() {
+        let scratch = test_support::scratch();
+        let state = scratch.path().join("state");
+        let workspace = scratch.path().join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::open(&state).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude"}),
+                "gc",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+
+        let orphan_art = state
+            .join("skillcache/capsules")
+            .join(&project_id)
+            .join("orphan-cap/1");
+        let orphan_qual = state.join("skillcache/qualification/orphan-cap/1");
+        std::fs::create_dir_all(&orphan_art).unwrap();
+        std::fs::create_dir_all(&orphan_qual).unwrap();
+        std::fs::write(orphan_art.join("capsule.json"), b"{}").unwrap();
+
+        let snap_ret = state.join("skillcache/snapshots/gen-retire-snap");
+        std::fs::create_dir_all(&snap_ret).unwrap();
+        std::fs::write(snap_ret.join("data.bin"), b"payload").unwrap();
+
+        {
+            let db = store.connection().unwrap();
+            let old_ts = (chrono::Utc::now() - chrono::Duration::days(db::TRACE_DAYS + 2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: "gen-retire-snap",
+                    session_id: &sid,
+                    provider: "claude",
+                    model: None,
+                    request: "r",
+                    skill_refs: &json!([]),
+                    steps: &json!([]),
+                    usage: &Value::Null,
+                    redaction: &json!({}),
+                },
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_traces SET created_at=?1 WHERE generation='gen-retire-snap'",
+                [&old_ts],
+            )
+            .unwrap();
+            let skill =
+                json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0"});
+            db::begin_capsule(
+                &db,
+                "cap-to-retire",
+                "cmp-r",
+                &project_id,
+                &sid,
+                "gen-retire-snap",
+                &skill,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-to-retire",
+                    mu_name: "pdf",
+                    mu_description: "d",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+        }
+
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let domain =
+            SkillCacheDomain::new(store.clone(), providers, Arc::new(AtomicBool::new(false)));
+        assert!(
+            !orphan_art.exists(),
+            "startup sweep must remove orphaned artifact dirs"
+        );
+        assert!(
+            !orphan_qual.exists(),
+            "startup sweep must remove orphaned qualification dirs"
+        );
+        assert!(snap_ret.exists(), "active capsule keeps its snapshot alive");
+
+        domain
+            .retire(&project_id, "cap-to-retire", &json!({}))
+            .unwrap();
+        assert!(
+            !snap_ret.exists(),
+            "retiring unpins expired trace & deletes snapshot"
+        );
     }
 }

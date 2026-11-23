@@ -12,7 +12,9 @@
 use crate::{
     HarnessError, Result,
     commands::ResolvedCommand,
-    skillcache::{compile::Runtime, db, settings, staleness_in_state, trace},
+    skillcache::{
+        compile::Runtime, db, settings, staleness_for_warm_candidate, staleness_in_state, trace,
+    },
     store::SessionStore,
 };
 use infra_host::{
@@ -416,12 +418,7 @@ fn is_read_only_capsule(capsule_row: &Value) -> bool {
 
 /// Among several active capsules of one skill, the one whose description
 /// matches the request best. Used only behind [`RETRIEVAL_BY_MU`] and tool-chain ranking.
-fn best_by_description(
-    store: &SessionStore,
-    project_id: &str,
-    ids: &[String],
-    request: &str,
-) -> Option<String> {
+fn best_by_description(store: &SessionStore, ids: &[String], request: &str) -> Option<String> {
     let words = request
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| word.chars().count() >= 3)
@@ -436,12 +433,12 @@ fn best_by_description(
     let mut query = db
         .prepare(
             "SELECT capsule_id FROM skillcache_capsules_fts
-             WHERE skillcache_capsules_fts MATCH ?1 AND project_id=?2
+             WHERE skillcache_capsules_fts MATCH ?1
              ORDER BY bm25(skillcache_capsules_fts)",
         )
         .ok()?;
     let ranked = query
-        .query_map(rusqlite::params![words.join(" OR "), project_id], |row| {
+        .query_map(rusqlite::params![words.join(" OR ")], |row| {
             row.get::<_, String>(0)
         })
         .ok()?
@@ -744,24 +741,70 @@ fn decide_toolchain_candidate(
     message: &str,
 ) -> std::result::Result<(Value, String), Decision> {
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let candidates = match runtime.store.connection().and_then(|db| match arm {
-        None => db::active_toolchain_capsules_for_project(&db, project_id, None),
-        Some("written_procedure" | "skillcache_no_replay") => {
-            db::active_toolchain_capsules_for_project(&db, project_id, arm)
+    let common_dir = db::canonical_git_common_dir(workspace);
+    let candidates = match runtime.store.connection().and_then(|db| {
+        let siblings = db::sibling_worktree_projects(&db, project_id, workspace)?;
+        match arm {
+            None => db::active_toolchain_capsules_for_worktrees(
+                &db,
+                project_id,
+                &siblings,
+                common_dir.as_deref(),
+                None,
+            ),
+            Some("written_procedure" | "skillcache_no_replay") => {
+                db::active_toolchain_capsules_for_worktrees(
+                    &db,
+                    project_id,
+                    &siblings,
+                    common_dir.as_deref(),
+                    arm,
+                )
+            }
+            Some("skillcache_agent" | "skillcache_executor") => {
+                let dedicated = db::active_toolchain_capsules_for_worktrees(
+                    &db,
+                    project_id,
+                    &siblings,
+                    common_dir.as_deref(),
+                    arm,
+                )?;
+                Ok(if dedicated.is_empty() {
+                    db::active_toolchain_capsules_for_worktrees(
+                        &db,
+                        project_id,
+                        &siblings,
+                        common_dir.as_deref(),
+                        None,
+                    )?
+                } else {
+                    dedicated
+                })
+            }
+            Some(_) => Ok(Vec::new()),
         }
-        Some("skillcache_agent" | "skillcache_executor") => {
-            let dedicated = db::active_toolchain_capsules_for_project(&db, project_id, arm)?;
-            Ok(if dedicated.is_empty() {
-                db::active_toolchain_capsules_for_project(&db, project_id, None)?
-            } else {
-                dedicated
-            })
-        }
-        Some(_) => Ok(Vec::new()),
     }) {
         Ok(rows) => rows,
         Err(error) => return Err(miss("unavailable", error.to_string())),
     };
+    let has_sibling = candidates.iter().any(|c| c["project_id"] != project_id);
+    let now_tree_sha = if has_sibling {
+        trace::workspace_tree_sha(workspace).ok()
+    } else {
+        None
+    };
+    let candidates: Vec<Value> = candidates
+        .into_iter()
+        .filter(|capsule| {
+            if capsule["project_id"] == project_id {
+                return true;
+            }
+            let cap_tree = capsule["tool_chain_tree_sha"].as_str().unwrap_or("");
+            !cap_tree.is_empty()
+                && now_tree_sha.as_deref() == Some(cap_tree)
+                && staleness_in_state(Some(&runtime.store.state), capsule, workspace).is_none()
+        })
+        .collect();
     let hint = settings::skill_hint(session);
     let matching: Vec<Value> = candidates
         .into_iter()
@@ -810,7 +853,17 @@ fn decide_toolchain_candidate(
         })
         .cloned()
         .collect();
-    let pool = if fresh.is_empty() { &eligible } else { &fresh };
+    let base_pool = if fresh.is_empty() { &eligible } else { &fresh };
+    let local_pool: Vec<Value> = base_pool
+        .iter()
+        .filter(|capsule| capsule["project_id"] == project_id)
+        .cloned()
+        .collect();
+    let pool = if local_pool.is_empty() {
+        base_pool
+    } else {
+        &local_pool
+    };
     let chosen = match pool.len() {
         1 => pool[0].clone(),
         _ => {
@@ -818,7 +871,7 @@ fn decide_toolchain_candidate(
                 .iter()
                 .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
                 .collect::<Vec<_>>();
-            if let Some(best_id) = best_by_description(&runtime.store, project_id, &ids, message)
+            if let Some(best_id) = best_by_description(&runtime.store, &ids, message)
                 && let Some(found) = pool
                     .iter()
                     .find(|capsule| capsule["capsule_id"] == best_id.as_str())
@@ -1240,50 +1293,74 @@ fn decide_for_inner(
             .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
             .map(|tree| tree.sha256)
             .unwrap_or_default();
-        let mut candidates = match runtime.store.connection().and_then(|db| match arm {
-            None => db::active_capsules_for_skill_or_mirror(
-                &db,
-                project_id,
-                &skill_path,
-                skill_name,
-                &skill_tree_sha,
-                None,
-            ),
-            Some("written_procedure" | "skillcache_no_replay") => {
-                db::active_capsules_for_skill_or_mirror(
+        let common_dir = db::canonical_git_common_dir(workspace);
+        let mut candidates = match runtime.store.connection().and_then(|db| {
+            let siblings = db::sibling_worktree_projects(&db, project_id, workspace)?;
+            match arm {
+                None => db::active_capsules_for_skill_or_mirror_in_worktrees(
                     &db,
                     project_id,
+                    &siblings,
+                    common_dir.as_deref(),
                     &skill_path,
                     skill_name,
                     &skill_tree_sha,
-                    arm,
-                )
-            }
-            Some("skillcache_agent" | "skillcache_executor") => {
-                let dedicated = db::active_capsules_for_skill_or_mirror(
-                    &db,
-                    project_id,
-                    &skill_path,
-                    skill_name,
-                    &skill_tree_sha,
-                    arm,
-                )?;
-                Ok(if dedicated.is_empty() {
-                    db::active_capsules_for_skill_or_mirror(
+                    None,
+                ),
+                Some("written_procedure" | "skillcache_no_replay") => {
+                    db::active_capsules_for_skill_or_mirror_in_worktrees(
                         &db,
                         project_id,
+                        &siblings,
+                        common_dir.as_deref(),
                         &skill_path,
                         skill_name,
                         &skill_tree_sha,
-                        None,
-                    )?
-                } else {
-                    dedicated
-                })
+                        arm,
+                    )
+                }
+                Some("skillcache_agent" | "skillcache_executor") => {
+                    let dedicated = db::active_capsules_for_skill_or_mirror_in_worktrees(
+                        &db,
+                        project_id,
+                        &siblings,
+                        common_dir.as_deref(),
+                        &skill_path,
+                        skill_name,
+                        &skill_tree_sha,
+                        arm,
+                    )?;
+                    Ok(if dedicated.is_empty() {
+                        db::active_capsules_for_skill_or_mirror_in_worktrees(
+                            &db,
+                            project_id,
+                            &siblings,
+                            common_dir.as_deref(),
+                            &skill_path,
+                            skill_name,
+                            &skill_tree_sha,
+                            None,
+                        )?
+                    } else {
+                        dedicated
+                    })
+                }
+                Some(_) => Ok(Vec::new()),
             }
-            Some(_) => Ok(Vec::new()),
         }) {
-            Ok(candidates) => candidates,
+            Ok(candidates) => candidates
+                .into_iter()
+                .filter(|cap| {
+                    cap["project_id"] == project_id
+                        || staleness_for_warm_candidate(
+                            Some(&runtime.store.state),
+                            cap,
+                            workspace,
+                            Some(&skill_path),
+                        )
+                        .is_none()
+                })
+                .collect::<Vec<_>>(),
             Err(error) => return miss("unavailable", error.to_string()),
         };
         if candidates.is_empty()
@@ -1339,7 +1416,17 @@ fn decide_for_inner(
         } else {
             eligible
         };
-        let chosen = match eligible.len() {
+        let local_eligible: Vec<Value> = eligible
+            .iter()
+            .filter(|capsule| capsule["project_id"] == project_id)
+            .cloned()
+            .collect();
+        let ranked_eligible = if local_eligible.is_empty() {
+            &eligible
+        } else {
+            &local_eligible
+        };
+        let chosen = match ranked_eligible.len() {
             0 if plan_only && had_provider_eligible => {
                 return miss(
                     "plan_mode",
@@ -1347,7 +1434,7 @@ fn decide_for_inner(
                 );
             }
             0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
-            1 => eligible[0].clone(),
+            1 => ranked_eligible[0].clone(),
             _ => {
                 let by_description = runtime
                     .store
@@ -1355,29 +1442,35 @@ fn decide_for_inner(
                     .ok()
                     .flatten()
                     .is_some_and(|value| value == true);
-                let ids = eligible
+                let ids = ranked_eligible
                     .iter()
                     .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
                     .collect::<Vec<_>>();
                 let best = by_description
-                    .then(|| best_by_description(&runtime.store, project_id, &ids, message))
+                    .then(|| best_by_description(&runtime.store, &ids, message))
                     .flatten();
                 match best.and_then(|id| {
-                    eligible
+                    ranked_eligible
                         .iter()
                         .find(|capsule| capsule["capsule_id"] == id.as_str())
                         .cloned()
                 }) {
                     Some(capsule) => capsule,
-                    None => best_by_health_and_recency(&runtime.store, &eligible),
+                    None => best_by_health_and_recency(&runtime.store, ranked_eligible),
                 }
             }
         };
         (chosen, skill_path)
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
-    if let Some(reason) = staleness_in_state(Some(&runtime.store.state), &chosen, workspace) {
-        if generation.is_some() {
+    let is_local_capsule = chosen["project_id"].as_str() == Some(project_id);
+    if let Some(reason) = staleness_for_warm_candidate(
+        Some(&runtime.store.state),
+        &chosen,
+        workspace,
+        (!skill_path.is_empty()).then_some(skill_path.as_str()),
+    ) {
+        if generation.is_some() && is_local_capsule {
             if let Ok(db) = runtime.store.connection() {
                 let _ = db::set_capsule_status(&db, &capsule_id, "stale", Some(&reason));
             }
@@ -5180,5 +5273,311 @@ mod tests {
         let _ = package::remove(&dir_ro);
         let _ = package::remove(&dir_rw);
         let _ = package::remove(&dir_txt);
+    }
+
+    #[test]
+    fn cross_worktree_toolchain_and_mirror_capsules_share_across_git_worktrees_and_isolate_on_drift()
+     {
+        let root = crate::skillcache::test_support::scratch();
+        let wt1 = root.path().join("wt1");
+        let wt2 = root.path().join("wt2");
+        let other = root.path().join("other");
+
+        let git = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} in {}", dir.display());
+        };
+        let skill_md =
+            "---\nname: pdf\ndescription: Extract PDF rows\n---\n# PDF\nRead invoices.\n";
+        for repo in [&wt1, &other] {
+            std::fs::create_dir_all(repo.join(".claude/skills/pdf")).unwrap();
+            std::fs::create_dir_all(repo.join(".agents/skills/pdf")).unwrap();
+            std::fs::write(repo.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+            std::fs::write(repo.join(".agents/skills/pdf/SKILL.md"), skill_md).unwrap();
+            std::fs::write(repo.join("app.php"), "<?php echo 1;\n").unwrap();
+            git(repo, &["init", "-q"]);
+            git(repo, &["add", "."]);
+            git(repo, &["commit", "-q", "-m", "base"]);
+        }
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+        // In wt2, keep ONLY `.agents/skills/pdf/SKILL.md` (mirror) to verify mirror sharing across worktrees.
+        let _ = std::fs::remove_dir_all(wt2.join(".claude"));
+        git(&wt2, &["add", "-A"]);
+        git(&wt2, &["commit", "-q", "-m", "mirror-only"]);
+        // Also align wt1 so workspace_tree_sha matches wt2 when testing clean ToolChain sharing.
+        let _ = std::fs::remove_dir_all(wt1.join(".claude"));
+        git(&wt1, &["add", "-A"]);
+        git(&wt1, &["commit", "-q", "-m", "mirror-only"]);
+        // Restore `.claude/skills/pdf` in wt1 as uncommitted/re-added? No: compile skill in wt1 on `.agents` vs `.claude`:
+        // Instead, put `.claude` on wt1 BEFORE removing it? Wait: if `.claude` differs, `workspace_tree_sha` differs!
+        // Keep identical files in wt1, wt2, and other, and test `.claude` in wt1 -> `.agents` in wt2 when both mirrors exist!
+        std::fs::create_dir_all(wt1.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt1.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "with-mirrors"]);
+        git(&wt2, &["merge", "-q", "--ff-only", "HEAD"]);
+        // Bring wt2 to the exact same tree as wt1 (`git checkout` wt1's branch tree).
+        let wt1_head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt1)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        git(&wt2, &["reset", "--hard", "-q", wt1_head.trim()]);
+        // Sync `other` repo to identical files.
+        std::fs::create_dir_all(other.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(other.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid3 = store.register(&other).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(pid1, pid2);
+
+        let tree_sha_ws = trace::workspace_tree_sha(&wt1).unwrap();
+        assert_eq!(tree_sha_ws, trace::workspace_tree_sha(&wt2).unwrap());
+        assert_eq!(tree_sha_ws, trace::workspace_tree_sha(&other).unwrap());
+        let skill_tree_sha =
+            infra_skillcache::fingerprint::tree_sha256(&wt1.join(".claude/skills/pdf"))
+                .unwrap()
+                .sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+
+        // Seed 1 ToolChain capsule and 1 Skill (mirror) capsule in `wt1` (`pid1`).
+        let tc_root = root.path().join("artifacts/wt-tc");
+        let tc_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-php", "description": "Inspect PHP app safely"},
+            "source": {"skills": [], "tool_chain": {"tree_sha256": tree_sha_ws}},
+        }))
+        .unwrap();
+        let tc_pkg = infra_skillcache::package::write_warm(
+            &tc_root.join("warm"),
+            &tc_cap,
+            Some(b"# Inspect\n1. Check app.php.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+
+        let sk_root = root.path().join("artifacts/wt-sk");
+        let sk_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "pdf-mirror", "description": "Extract PDF rows"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}]},
+        })).unwrap();
+        let sk_pkg = infra_skillcache::package::write_warm(
+            &sk_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract rows.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+
+        {
+            let db = store.connection().unwrap();
+            let common = db::canonical_git_common_dir(&wt1);
+            db::begin_capsule(
+                &db,
+                "cap-wt-tc",
+                "cmp-wt-tc",
+                &pid1,
+                "s1",
+                "g1",
+                &json!({"name": "tool-chain", "path": "", "tree_sha256": tree_sha_ws}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-wt-tc",
+                    mu_name: "inspect-php",
+                    mu_description: "Inspect PHP app safely",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: &tc_pkg,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: tc_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-wt-tc", "tool_chain", &tree_sha_ws).unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-wt-tc", common.as_deref()).unwrap();
+
+            db::begin_capsule(
+                &db, "cap-wt-sk", "cmp-wt-sk", &pid1, "s1", "g2",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}), None,
+            ).unwrap();
+            db::activate_capsule(&db, &db::Qualified {
+                capsule_id: "cap-wt-sk", mu_name: "pdf-mirror", mu_description: "Extract PDF rows",
+                form: "textual", capsule_sha256: "b", package_sha256: &sk_pkg,
+                skill_files: &json!({"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha, "taken_ns": "0", "files": []}]}),
+                env_fingerprint: &env_fp, engine_digest: "eng",
+                artifact_dir: sk_root.to_str().unwrap(), capabilities: &json!({"network": "none", "runtimes": []}),
+            }).unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-wt-sk", common.as_deref()).unwrap();
+        }
+
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let tc_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect php app".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let sk_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let sess_for = |pid: &str, id: &str| {
+            json!({
+                "id": id,
+                "project_id": pid,
+                "provider": "claude",
+                "mode": "edit",
+                "permissions": "auto",
+                "skillcache": {"mode": "warm_only", "tool_chain": true},
+            })
+        };
+
+        // 1. Sibling `wt2` (`pid2`) hits BOTH ToolChain and mirror Skill capsules from `wt1` (`pid1`).
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2"),
+            &tc_route,
+            "inspect php app",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-tc"),
+            other_dec => panic!(
+                "expected cross-worktree ToolChain hit, got {}",
+                reason(&other_dec)
+            ),
+        }
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2"),
+            &sk_route,
+            "$pdf extract",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-sk"),
+            other_dec => panic!(
+                "expected cross-worktree mirror hit, got {}",
+                reason(&other_dec)
+            ),
+        }
+
+        // 2. Unrelated repo `other` (`pid3`) with different `git_common_dir` MUST stay strictly isolated!
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid3, "s-other"),
+                &tc_route,
+                "inspect php app",
+                &other,
+                None
+            )),
+            "no_single_skill"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid3, "s-other"),
+                &sk_route,
+                "$pdf extract",
+                &other,
+                None
+            )),
+            "no_capsule"
+        );
+
+        // 3. When `wt2` modifies a workspace file (`workspace_tree_sha` differs) or skill (`skill_tree_sha` differs),
+        // `wt2` stays isolated (misses) while `wt1`'s capsule remains `"active"` (never marked stale by `wt2`).
+        std::fs::write(wt2.join("app.php"), "<?php echo 2;\n").unwrap();
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid2, "s-wt2-drift"),
+                &tc_route,
+                "inspect php app",
+                &wt2,
+                Some("g-drift")
+            )),
+            "no_single_skill"
+        );
+        std::fs::write(
+            wt2.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf\n---\nChanged\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid2, "s-wt2-sk-drift"),
+                &sk_route,
+                "$pdf extract",
+                &wt2,
+                Some("g-sk-drift")
+            )),
+            "no_capsule"
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            assert_eq!(
+                db::capsule(&db, "cap-wt-tc").unwrap().unwrap()["status"],
+                "active"
+            );
+            assert_eq!(
+                db::capsule(&db, "cap-wt-sk").unwrap().unwrap()["status"],
+                "active"
+            );
+        }
     }
 }

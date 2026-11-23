@@ -1499,6 +1499,7 @@ fn publish_capsule(
         build_dependency_manifest(&job.workspace, &stored_trace, candidate, ir_revision);
     enrich_manifest_from_graph_ir(&runtime.store.state, &job.project_id, &mut manifest);
     populate_manifest_path_hashes(&job.workspace, &mut manifest);
+    let canonical_common_dir = db::canonical_git_common_dir(&job.workspace);
     let portable_template = if candidate.capsule.kind == CapsuleKind::Skill
         && let Some(edition) = workspace_edition_for_project(
             &runtime.store,
@@ -1514,11 +1515,14 @@ fn publish_capsule(
             &template.files,
             template.markdown.as_deref().map(str::as_bytes),
         );
+        let semantic_sha =
+            primary_skill_semantic_sha(&job.workspace, &primary.path).unwrap_or_default();
         report.passed.then(|| {
             (
                 edition,
                 primary.name.clone(),
                 primary.tree_sha256.clone(),
+                semantic_sha,
                 template,
             )
         })
@@ -1560,11 +1564,21 @@ fn publish_capsule(
         candidate.capsule.kind.as_str(),
         candidate.capsule.tool_chain_sha256.as_deref().unwrap_or(""),
     )?;
+    db::set_capsule_git_common_dir(&db, &job.capsule_id, canonical_common_dir.as_deref())?;
     db::set_capsule_read_only(&db, &job.capsule_id, all_read_only)?;
     db::set_dependency_manifest(&db, &job.capsule_id, &manifest)?;
-    if let Some((edition, primary_name, primary_tree, template)) = portable_template {
-        let _ = db::upsert_template(&db, &edition, &primary_name, &primary_tree, &template);
+    if let Some((edition, primary_name, primary_tree, semantic_sha, template)) = portable_template {
+        let _ = db::upsert_template_with_semantic(
+            &db,
+            &edition,
+            &primary_name,
+            &primary_tree,
+            &semantic_sha,
+            &template,
+        );
     }
+    drop(db);
+    super::gc_project_and_snapshots(&runtime.store, &job.project_id);
     Ok(())
 }
 
@@ -2107,6 +2121,318 @@ fn candidate_from_template_row(
     ))
 }
 
+fn collapse_spaces_outside_backticks(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let chars: Vec<char> = line.trim().chars().collect();
+    let mut i = 0;
+    let mut tick_run: Option<usize> = None;
+    let mut pending_ws = false;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            if pending_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_ws = false;
+            let start = i;
+            while i < chars.len() && chars[i] == '`' {
+                i += 1;
+            }
+            let run = i - start;
+            for _ in 0..run {
+                out.push('`');
+            }
+            match tick_run {
+                None => tick_run = Some(run),
+                Some(open) if open == run => tick_run = None,
+                Some(_) => {}
+            }
+            continue;
+        }
+        if tick_run.is_some() {
+            out.push(chars[i]);
+        } else if chars[i] == ' ' || chars[i] == '\t' {
+            pending_ws = true;
+        } else {
+            if pending_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_ws = false;
+            out.push(chars[i]);
+        }
+        i += 1;
+    }
+    out
+}
+
+fn collapse_yaml_whitespace(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut pending_ws = false;
+    for ch in line.trim().chars() {
+        if let Some(q) = quote {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if q == '"' && ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            if pending_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_ws = false;
+            quote = Some(ch);
+            out.push(ch);
+        } else if ch == ' ' || ch == '\t' {
+            pending_ws = true;
+        } else {
+            if pending_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_ws = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn strip_html_comments_outside_backticks(line: &str, in_comment: &mut bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let mut tick_run: Option<usize> = None;
+    while i < line.len() {
+        if *in_comment {
+            if let Some(end_rel) = line[i..].find("-->") {
+                i += end_rel + 3;
+                *in_comment = false;
+                continue;
+            }
+            break;
+        }
+        let rest = &line[i..];
+        if rest.starts_with('`') {
+            let run = rest.bytes().take_while(|&b| b == b'`').count();
+            out.push_str(&rest[..run]);
+            i += run;
+            match tick_run {
+                None => tick_run = Some(run),
+                Some(open) if open == run => tick_run = None,
+                Some(_) => {}
+            }
+            continue;
+        }
+        if tick_run.is_none() && rest.starts_with("<!--") {
+            *in_comment = true;
+            i += 4;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn fence_opener(trimmed: &str) -> Option<(char, usize, String)> {
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let count = trimmed.chars().take_while(|&c| c == marker).count();
+    if count < 3 {
+        return None;
+    }
+    let info = trimmed[count..].trim();
+    if marker == '`' && info.contains('`') {
+        return None;
+    }
+    let lang = info
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some((marker, count, lang))
+}
+
+fn is_comment_only_for_lang(trimmed: &str, lang: &str) -> bool {
+    if trimmed.is_empty() {
+        return true;
+    }
+    match lang {
+        "sh" | "bash" | "zsh" | "shell" | "py" | "python" | "python3" | "yaml" | "yml" | "toml" => {
+            trimmed.starts_with('#') && !trimmed.starts_with("#!")
+        }
+        "php" => {
+            (trimmed.starts_with('#') && !trimmed.starts_with("#[")) || trimmed.starts_with("//")
+        }
+        "js" | "javascript" | "ts" | "typescript" => trimmed.starts_with("//"),
+        "sql" => trimmed.starts_with("--"),
+        _ => false,
+    }
+}
+
+fn canonicalize_markdown(text: &str) -> Vec<u8> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines_out = Vec::new();
+    let mut in_frontmatter = false;
+    let mut seen_non_empty = false;
+    let mut fence: Option<(char, usize, String)> = None;
+    let mut in_html_comment = false;
+
+    for raw in normalized.split('\n') {
+        let trimmed_raw = raw.trim();
+        if fence.is_none() && !seen_non_empty && !trimmed_raw.is_empty() && trimmed_raw == "---" {
+            seen_non_empty = true;
+            in_frontmatter = true;
+            lines_out.push("---".to_owned());
+            continue;
+        }
+        if in_frontmatter {
+            if trimmed_raw == "---" {
+                in_frontmatter = false;
+                lines_out.push("---".to_owned());
+                continue;
+            }
+            if trimmed_raw.is_empty() || trimmed_raw.starts_with('#') {
+                continue;
+            }
+            let cleaned = collapse_yaml_whitespace(raw);
+            if !cleaned.is_empty() {
+                lines_out.push(cleaned);
+            }
+            continue;
+        }
+        if let Some((marker, open_len, ref lang)) = fence {
+            let is_close =
+                trimmed_raw.chars().all(|c| c == marker) && trimmed_raw.chars().count() >= open_len;
+            if is_close {
+                fence = None;
+                lines_out.push(trimmed_raw.to_owned());
+                continue;
+            }
+            if is_comment_only_for_lang(trimmed_raw, lang) {
+                continue;
+            }
+            let trimmed_end = raw.trim_end();
+            if !trimmed_end.is_empty() {
+                lines_out.push(trimmed_end.to_owned());
+            }
+            continue;
+        }
+        let no_comment = strip_html_comments_outside_backticks(raw, &mut in_html_comment);
+        let trimmed = no_comment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        seen_non_empty = true;
+        if let Some((marker, open_len, lang)) = fence_opener(trimmed) {
+            fence = Some((marker, open_len, lang.clone()));
+            if lang.is_empty() {
+                lines_out.push(marker.to_string().repeat(open_len));
+            } else {
+                lines_out.push(format!("{}{}", marker.to_string().repeat(open_len), lang));
+            }
+            continue;
+        }
+        let cleaned = collapse_spaces_outside_backticks(&no_comment);
+        if !cleaned.is_empty() {
+            lines_out.push(cleaned);
+        }
+    }
+    lines_out.join("\n").into_bytes()
+}
+
+fn canonicalize_skill_file(rel_path: &str, bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let lower = rel_path.to_ascii_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdx") {
+        return canonicalize_markdown(text);
+    }
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = Vec::new();
+    for line in normalized.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment_only_for_lang(trimmed, ext) {
+            continue;
+        }
+        out.push(line.trim_end().to_owned());
+    }
+    out.join("\n").into_bytes()
+}
+
+fn collect_skill_semantic_entries(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
+    let mut entries = std::fs::read_dir(dir)
+        .ok()?
+        .collect::<std::io::Result<Vec<_>>>()
+        .ok()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if infra_core::fs::linked(&meta) {
+            return None;
+        }
+        if meta.is_dir() {
+            collect_skill_semantic_entries(root, &path, depth + 1, out)?;
+        } else if meta.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .ok()?
+                .components()
+                .map(|c| c.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()?
+                .join("/");
+            let raw = std::fs::read(&path).ok()?;
+            let normalized = canonicalize_skill_file(&rel, &raw);
+            out.insert(rel, normalized);
+            if out.len() > 4096 {
+                return None;
+            }
+        }
+    }
+    Some(())
+}
+
+/// Computes a normalized semantic digest for a skill folder, canonicalizing
+/// insignificant whitespace, blank lines, and comment formatting across `SKILL.md`
+/// and helper files while preserving every instruction, heading, flag, and code line.
+pub(crate) fn skill_semantic_sha(skill_dir: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(skill_dir).ok()?;
+    if infra_core::fs::linked(&meta) || !meta.is_dir() {
+        return None;
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    collect_skill_semantic_entries(skill_dir, skill_dir, 0, &mut entries)?;
+    if entries.is_empty() {
+        return None;
+    }
+    Some(fingerprint::digest_entries(
+        entries.iter().map(|(k, v)| (k.as_str(), v.as_slice())),
+    ))
+}
+
+fn primary_skill_semantic_sha(workspace: &Path, skill_path: &str) -> Option<String> {
+    let file = trace::skill_file(workspace, skill_path)?;
+    let dir = file.parent()?;
+    skill_semantic_sha(dir)
+}
+
 async fn try_qualify_template_for_job(
     runtime: &Arc<Runtime>,
     job: &Job,
@@ -2114,9 +2440,16 @@ async fn try_qualify_template_for_job(
     skill: &KnownSkill,
     observed_files: Arc<Vec<String>>,
 ) -> Result<bool> {
+    let semantic_sha = primary_skill_semantic_sha(&job.workspace, &skill.path).unwrap_or_default();
     let templates = {
         let db = runtime.store.connection()?;
-        db::find_templates(&db, edition, &skill.name, &skill.tree_sha256)?
+        db::find_templates_with_semantic(
+            &db,
+            edition,
+            &skill.name,
+            &skill.tree_sha256,
+            &semantic_sha,
+        )?
     };
     for template in templates {
         let Ok((candidate, form)) = candidate_from_template_row(&template, edition, skill) else {
@@ -2196,12 +2529,15 @@ fn resolve_edition_skill(
     workspace: &Path,
     skill_name: &str,
     expected_tree: &str,
-) -> Option<KnownSkill> {
-    for rel in [
+    expected_semantic: &str,
+) -> Option<(KnownSkill, bool)> {
+    let candidates = [
         format!(".claude/skills/{skill_name}/SKILL.md"),
         format!(".cursor/skills/{skill_name}/SKILL.md"),
         format!(".agents/skills/{skill_name}/SKILL.md"),
-    ] {
+    ];
+    let mut resolved = Vec::new();
+    for rel in candidates {
         let Some(file) = trace::skill_file(workspace, &rel) else {
             continue;
         };
@@ -2212,14 +2548,59 @@ fn resolve_edition_skill(
             continue;
         };
         if tree.sha256 == expected_tree {
-            return Some(KnownSkill {
-                name: skill_name.to_owned(),
-                path: rel,
-                tree_sha256: tree.sha256,
-            });
+            return Some((
+                KnownSkill {
+                    name: skill_name.to_owned(),
+                    path: rel,
+                    tree_sha256: tree.sha256,
+                },
+                true,
+            ));
+        }
+        resolved.push((rel, dir.to_path_buf(), tree.sha256));
+    }
+    if !expected_semantic.is_empty() {
+        for (rel, dir, tree_sha) in resolved {
+            if skill_semantic_sha(&dir).as_deref() == Some(expected_semantic) {
+                return Some((
+                    KnownSkill {
+                        name: skill_name.to_owned(),
+                        path: rel,
+                        tree_sha256: tree_sha,
+                    },
+                    false,
+                ));
+            }
         }
     }
     None
+}
+
+fn resolve_edition_template_candidates(
+    workspace: &Path,
+    templates: Vec<Value>,
+    textual_only: bool,
+) -> Vec<(Value, KnownSkill)> {
+    let mut resolved: Vec<(bool, Value, KnownSkill)> = Vec::new();
+    for tpl in templates {
+        if textual_only && tpl["form"] != "textual" {
+            continue;
+        }
+        let skill_name = tpl["skill_name"].as_str().unwrap_or("");
+        let tree_sha = tpl["skill_tree_sha256"].as_str().unwrap_or("");
+        let semantic_sha = tpl["skill_semantic_sha"].as_str().unwrap_or("");
+        if let Some((skill, exact)) =
+            resolve_edition_skill(workspace, skill_name, tree_sha, semantic_sha)
+        {
+            resolved.push((exact, tpl, skill));
+        }
+    }
+    // Stable partition so exact `skill_tree_sha256` matches always precede semantic matches.
+    resolved.sort_by_key(|a| std::cmp::Reverse(a.0));
+    resolved
+        .into_iter()
+        .map(|(_, tpl, skill)| (tpl, skill))
+        .collect()
 }
 
 /// Synchronously admits matching `Form::Textual` edition templates when already
@@ -2235,15 +2616,7 @@ pub(crate) fn admit_textual_templates_sync(
         db::edition_templates(&db, edition)?
     };
     let mut admitted = Vec::new();
-    for tpl in templates {
-        if tpl["form"] != "textual" {
-            continue;
-        }
-        let skill_name = tpl["skill_name"].as_str().unwrap_or("");
-        let tree_sha = tpl["skill_tree_sha256"].as_str().unwrap_or("");
-        let Some(skill) = resolve_edition_skill(workspace, skill_name, tree_sha) else {
-            continue;
-        };
+    for (tpl, skill) in resolve_edition_template_candidates(workspace, templates, true) {
         let already_active = {
             let db = runtime.store.connection()?;
             !db::active_capsules_for_skill_or_mirror(
@@ -2351,9 +2724,17 @@ pub async fn admit_template_for_project(
                 .and_then(|p| p["path"].as_str().map(PathBuf::from))
         })
         .unwrap_or_default();
+    let semantic_sha = primary_skill_semantic_sha(&workspace, &skill.path).unwrap_or_default();
     let has_templates = {
         let db = runtime.store.connection()?;
-        !db::find_templates(&db, edition, &skill.name, &skill.tree_sha256)?.is_empty()
+        !db::find_templates_with_semantic(
+            &db,
+            edition,
+            &skill.name,
+            &skill.tree_sha256,
+            &semantic_sha,
+        )?
+        .is_empty()
     };
     if !has_templates {
         return Ok(None);
@@ -2415,14 +2796,16 @@ pub async fn admit_edition_templates_for_project(
         db::edition_templates(&db, edition)?
     };
     let mut admitted = Vec::new();
-    for tpl in templates {
-        let skill_name = tpl["skill_name"].as_str().unwrap_or("");
-        let tree_sha = tpl["skill_tree_sha256"].as_str().unwrap_or("");
+    for (tpl, skill) in resolve_edition_template_candidates(workspace, templates, false) {
+        let skill_name = skill.name.as_str();
         let port_sha = tpl["portability_sha256"].as_str().unwrap_or("");
-        let Some(skill) = resolve_edition_skill(workspace, skill_name, tree_sha) else {
-            continue;
-        };
-        let attempt_key = template_attempt_key(project_id, edition, skill_name, tree_sha, port_sha);
+        let attempt_key = template_attempt_key(
+            project_id,
+            edition,
+            skill_name,
+            &skill.tree_sha256,
+            port_sha,
+        );
         if failed_template_admissions()
             .lock()
             .is_ok_and(|guard| guard.contains(&attempt_key))
@@ -2490,15 +2873,18 @@ pub(crate) async fn try_admit_template_on_miss(
         return Ok(None);
     };
     let skill_name = req["name"].as_str().unwrap_or("");
-    let Some(tree) = trace::skill_file(workspace, &skill_path)
+    let Some(skill_dir) = trace::skill_file(workspace, &skill_path)
         .and_then(|file| file.parent().map(Path::to_path_buf))
-        .and_then(|dir| fingerprint::tree_sha256(&dir).ok())
     else {
         return Ok(None);
     };
+    let Ok(tree) = fingerprint::tree_sha256(&skill_dir) else {
+        return Ok(None);
+    };
+    let semantic_sha = skill_semantic_sha(&skill_dir).unwrap_or_default();
     let templates = {
         let db = runtime.store.connection()?;
-        db::find_templates(&db, &edition, skill_name, &tree.sha256)?
+        db::find_templates_with_semantic(&db, &edition, skill_name, &tree.sha256, &semantic_sha)?
     };
     if templates.is_empty() {
         return Ok(None);
@@ -3021,5 +3407,109 @@ mod tests {
             "codex",
         );
         assert!(codex_total["components"].is_object());
+    }
+
+    #[tokio::test]
+    async fn skill_semantic_sha_and_normalized_template_matching_qualify_through_gates() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let d1 = scratch.path().join("s1");
+        let d2 = scratch.path().join("s2");
+        let d3 = scratch.path().join("s3");
+        for d in [&d1, &d2, &d3] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            d1.join("SKILL.md"),
+            "---\nname: php-lint\ndescription: Check PHP syntax\n---\n# PHP Lint\n\n1. Run `php -l` on https://example.com#docs.\n```sh\n#!/usr/bin/env sh\nphp -l app.php\n```\n",
+        ).unwrap();
+        std::fs::write(
+            d2.join("SKILL.md"),
+            "---\r\n# Adapted for project\r\nname:   php-lint\r\ndescription:  Check PHP syntax\r\n---\r\n\r\n<!-- Multi-line\r\ncomment -->\r\n# PHP Lint\r\n\r\n1.   Run  `php -l`   on https://example.com#docs.\r\n```sh\r\n#!/usr/bin/env sh\r\n# inline shell comment\r\nphp -l app.php\r\n```\r\n",
+        ).unwrap();
+        std::fs::write(
+            d3.join("SKILL.md"),
+            "---\nname: php-lint\ndescription: Check PHP syntax\n---\n# PHP Lint\n\n1. Run `phpstan` on https://example.com#docs.\n",
+        ).unwrap();
+
+        let h1 = skill_semantic_sha(&d1).unwrap();
+        let h2 = skill_semantic_sha(&d2).unwrap();
+        let h3 = skill_semantic_sha(&d3).unwrap();
+        assert_eq!(
+            h1, h2,
+            "insignificant whitespace/blank lines/comments must canonicalize identically"
+        );
+        assert_ne!(
+            h1, h3,
+            "semantic instruction change must alter skill_semantic_sha"
+        );
+        assert_ne!(
+            fingerprint::tree_sha256(&d1).unwrap().sha256,
+            fingerprint::tree_sha256(&d2).unwrap().sha256
+        );
+
+        // End-to-end normalized template admission in `admit_textual_templates_sync`:
+        let proj = scratch.path().join("laravel-app");
+        std::fs::create_dir_all(proj.join(".agents/skills/php-lint")).unwrap();
+        std::fs::write(
+            proj.join(".agents/skills/php-lint/SKILL.md"),
+            std::fs::read(d2.join("SKILL.md")).unwrap(),
+        )
+        .unwrap();
+        let target_tree = fingerprint::tree_sha256(&proj.join(".agents/skills/php-lint"))
+            .unwrap()
+            .sha256;
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project_id = store.register(&proj).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let tpl_skill = KnownSkill {
+            name: "php-lint".into(),
+            path: ".claude/skills/php-lint/SKILL.md".into(),
+            tree_sha256: fingerprint::tree_sha256(&d1).unwrap().sha256,
+        };
+        let answer = json!({
+            "form": "textual",
+            "capsule": {
+                "mu": {"name": "php-lint", "description": "Check PHP syntax"},
+                "source": {"skills": [{"name": "php-lint", "path": ".claude/skills/php-lint/SKILL.md"}]}
+            },
+            "markdown": "# PHP Lint\n\n1. Run `php -l` across source files.\n"
+        });
+        let cand = candidate::from_answer(&answer, std::slice::from_ref(&tpl_skill), Form::Textual)
+            .unwrap();
+        let tpl = candidate::as_portable_template(&cand, "Laravel");
+        {
+            let db = store.connection().unwrap();
+            db::upsert_template_with_semantic(
+                &db,
+                "Laravel",
+                "php-lint",
+                &tpl_skill.tree_sha256,
+                &h1,
+                &tpl,
+            )
+            .unwrap();
+        }
+        let rt = Runtime {
+            store: store.clone(),
+            providers: Arc::new(ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let admitted = admit_textual_templates_sync(&rt, &project_id, &proj, "Laravel").unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0]["status"], "active");
+        assert_eq!(admitted[0]["kind"], "template");
+        assert_eq!(admitted[0]["tree_sha256"], target_tree);
+        assert_eq!(
+            admitted[0]["skill_path"],
+            ".agents/skills/php-lint/SKILL.md"
+        );
     }
 }
