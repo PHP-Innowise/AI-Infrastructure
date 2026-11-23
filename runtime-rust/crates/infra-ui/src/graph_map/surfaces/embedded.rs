@@ -1163,6 +1163,15 @@ pub(in crate::graph_map) fn transfer_surface_state_to_modal(emb: &V, mut modal: 
             modal[key] = emb[key].clone();
         }
     }
+    if emb["auto_lod"].is_boolean() {
+        modal["auto_lod"] = emb["auto_lod"].clone();
+    }
+    if !emb["lod"].is_null() {
+        modal["lod"] = emb["lod"].clone();
+    }
+    if !emb["min_weight"].is_null() {
+        modal["min_weight"] = emb["min_weight"].clone();
+    }
     if !emb["fit"].is_null() {
         modal["fit"] = json!(m::yes(&emb["fit"]));
     }

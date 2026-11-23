@@ -2731,4 +2731,45 @@ fn crate_and_folder_lod_preserve_extended_rules_and_violation_budget() {
             .as_array()
             .is_some_and(|arr| arr.iter().any(|v| v == "pkg-ui"))
     );
+
+    // Also verify File-view mark_architecture restores truncated sem:* violations past DRAWN.
+    let mut truncated_file_edges: Vec<Value> = (0..crate::graph_map::DRAWN)
+        .map(|i| {
+            json!({
+                "from": format!("crates/clean{:02}/src/mod.ts", i % clean_count),
+                "to": format!("crates/clean{:02}/src/mod.ts", (i + 1) % clean_count),
+                "links": 5
+            })
+        })
+        .collect();
+    let file_nodes_with_sem: Vec<Value> = {
+        let mut v = vec![
+            json!({"path": "crates/app/src/OrderCtrl.php", "name": "OrderCtrl.php"}),
+            json!({"path": "sem:table:orders", "name": "table:orders", "node_kind": "semantic", "semantic": true}),
+        ];
+        for i in 0..clean_count {
+            v.push(json!({"path": format!("crates/clean{i:02}/src/mod.ts"), "name": "mod.ts"}));
+        }
+        v
+    };
+    let mut file_view_truncated = json!({
+        "nodes": file_nodes_with_sem,
+        "edges": std::mem::take(&mut truncated_file_edges)
+    });
+    idx.mark_architecture(&mut file_view_truncated, false, Some(&rules));
+    let restored_file_sem = file_view_truncated["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["from"] == "crates/app/src/OrderCtrl.php" && e["to"] == "sem:table:orders")
+        .expect(
+            "File-view truncated sem:table:orders violation must be restored in KEPT_VIOLATIONS",
+        );
+    assert_eq!(restored_file_sem["kept"], "violation");
+    assert_eq!(restored_file_sem["against"], true);
+    assert!(
+        restored_file_sem["rule_ids"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v == "sem-orders-only"))
+    );
 }

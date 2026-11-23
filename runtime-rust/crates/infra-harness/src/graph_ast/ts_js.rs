@@ -635,7 +635,7 @@ fn walk_ts_js(
                             };
                             let leaf_composed = ctx.compose_call_route_path(leaf);
                             ctx.ts_router_leaves
-                                .entry(route_root_obj)
+                                .entry(route_root_obj.clone())
                                 .or_default()
                                 .push((
                                     verb,
@@ -646,16 +646,17 @@ fn walk_ts_js(
                                 ));
                         }
 
-                        let mounted_prefix =
-                            if prop_low == "use" && is_ts_route_receiver_hint(effective_recv) {
-                                str_args
-                                    .first()
-                                    .map(|s| s.trim())
-                                    .filter(|s| s.starts_with('/'))
-                                    .map(str::to_owned)
-                            } else {
-                                None
-                            };
+                        let is_route_use =
+                            prop_low == "use" && is_ts_route_receiver_hint(effective_recv);
+                        let mounted_prefix = if is_route_use {
+                            str_args
+                                .first()
+                                .map(|s| s.trim())
+                                .filter(|s| s.starts_with('/'))
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        };
 
                         let target = owner_ty.as_deref().unwrap_or(obj_txt).to_owned();
                         ctx.push_ref(AstRef {
@@ -673,7 +674,12 @@ fn walk_ts_js(
 
                         if let Some(ref prefix) = mounted_prefix {
                             if let Some(args) = args_node {
-                                emit_mounted_router_routes(ctx, args, prefix);
+                                emit_mounted_router_routes(
+                                    ctx,
+                                    args,
+                                    prefix,
+                                    Some(&route_root_obj),
+                                );
                                 let mark = ctx.push_call_route_prefix(prefix);
                                 walk_ts_js(
                                     ctx,
@@ -698,6 +704,11 @@ fn walk_ts_js(
                                 var_types,
                             );
                             return;
+                        } else if is_route_use
+                            && str_args.is_empty()
+                            && let Some(args) = args_node
+                        {
+                            emit_mounted_router_routes(ctx, args, "/", Some(&route_root_obj));
                         }
                     }
                 } else {
@@ -1048,7 +1059,17 @@ fn chained_express_route_path(
     None
 }
 
-fn emit_mounted_router_routes(ctx: &mut ExtractCtx<'_>, args: Node<'_>, prefix: &str) {
+fn emit_mounted_router_routes(
+    ctx: &mut ExtractCtx<'_>,
+    args: Node<'_>,
+    prefix: &str,
+    parent_router: Option<&str>,
+) {
+    let parent_valid = parent_router.filter(|p| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    });
     let mut mounted_leaves = Vec::new();
     for i in 0..args.named_child_count() {
         let Some(ch) = args.named_child(i) else {
@@ -1056,6 +1077,9 @@ fn emit_mounted_router_routes(ctx: &mut ExtractCtx<'_>, args: Node<'_>, prefix: 
         };
         if ch.kind() == "identifier" {
             let ident = ctx.text(ch).trim();
+            if parent_valid == Some(ident) {
+                continue;
+            }
             if let Some(leaves) = ctx.ts_router_leaves.get(ident) {
                 mounted_leaves.extend(leaves.iter().cloned());
             }
@@ -1065,13 +1089,21 @@ fn emit_mounted_router_routes(ctx: &mut ExtractCtx<'_>, args: Node<'_>, prefix: 
         return;
     }
     let mark = ctx.push_call_route_prefix(prefix);
+    let mut propagated = Vec::with_capacity(mounted_leaves.len());
     for (verb, leaf_path, enclosing, line, evidence) in mounted_leaves {
         let composed = ctx.compose_call_route_path(&leaf_path);
         if let Some(target) = normalize_route_contract(Some(&verb), &composed, false) {
-            ctx.push_semantic("exposes_route", target, enclosing, line, &evidence);
+            ctx.push_semantic("exposes_route", target, enclosing.clone(), line, &evidence);
         }
+        propagated.push((verb, composed, enclosing, line, evidence));
     }
     ctx.truncate_call_route_prefixes(mark);
+    if let Some(parent) = parent_valid {
+        ctx.ts_router_leaves
+            .entry(parent.to_owned())
+            .or_default()
+            .extend(propagated);
+    }
 }
 
 fn extract_ts_class_route_prefix(node: Node<'_>, source: &str) -> Option<String> {

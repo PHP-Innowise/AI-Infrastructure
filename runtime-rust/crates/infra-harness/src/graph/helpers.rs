@@ -585,7 +585,39 @@ fn collect_git_stat_snapshot(
         }
     }
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
-    dirs.insert(root.to_path_buf());
+    let mut dir_stack = vec![root.to_path_buf()];
+    while let Some(cur_dir) = dir_stack.pop() {
+        if !dirs.insert(cur_dir.clone()) {
+            continue;
+        }
+        if dirs.len() > PRINT_DIR_STAT_LIMIT {
+            return None;
+        }
+        let Ok(entries) = std::fs::read_dir(&cur_dir) else {
+            return None;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return None;
+            };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                return None;
+            };
+            if meta.file_type().is_symlink() {
+                if path.is_dir() {
+                    return None;
+                }
+                continue;
+            }
+            if meta.is_dir() {
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                dir_stack.push(path);
+            }
+        }
+    }
     let mut file_stamps = Vec::with_capacity(all_paths.len());
     for abs in all_paths {
         if abs.is_dir() {

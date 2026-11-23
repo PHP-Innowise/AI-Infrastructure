@@ -1287,14 +1287,18 @@ impl Index {
         reshaped: bool,
     ) {
         if let Some(threshold) = min_weight {
-            if let Some(edges) = view.get_mut("edges").and_then(Value::as_array_mut) {
-                edges.retain(|edge| {
-                    edge.get("links")
+            let keep_edge = |edge: &Value| {
+                edge.get("against").and_then(Value::as_bool) == Some(true)
+                    || edge.get("kept").and_then(Value::as_str) == Some("violation")
+                    || edge
+                        .get("links")
                         .or_else(|| edge.get("weight"))
                         .and_then(Value::as_u64)
                         .unwrap_or(1)
                         >= threshold
-                });
+            };
+            if let Some(edges) = view.get_mut("edges").and_then(Value::as_array_mut) {
+                edges.retain(keep_edge);
                 let new_len = edges.len() as u64;
                 if view.get("between").is_some()
                     && view.get("backbone").and_then(Value::as_bool) != Some(true)
@@ -1307,13 +1311,7 @@ impl Index {
                 .and_then(|p| p.get_mut("cross_page_edges"))
                 .and_then(Value::as_array_mut)
             {
-                cross.retain(|edge| {
-                    edge.get("links")
-                        .or_else(|| edge.get("weight"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(1)
-                        >= threshold
-                });
+                cross.retain(keep_edge);
             }
             if let Some(obj) = view.as_object_mut() {
                 obj.insert("min_weight".into(), json!(threshold));

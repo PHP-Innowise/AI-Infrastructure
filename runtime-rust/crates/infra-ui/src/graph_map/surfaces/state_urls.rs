@@ -1020,6 +1020,16 @@ pub(super) fn plan_sse_graph_refresh(
     for node in nodes {
         let p = normalize_rel_path(&m::text(node, "path"));
         let f = normalize_rel_path(&m::text(node, "file"));
+        let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+        if is_folder
+            && !p.is_empty()
+            && removed_set
+                .iter()
+                .any(|rem| p == "." || path_within_scope(rem, &p))
+        {
+            // Removing a file rolled up into a folder node alters aggregated folder counts/edges.
+            return SseRefreshMode::FullReload;
+        }
         if (!p.is_empty() && removed_set.contains(&p))
             || (!f.is_empty() && removed_set.contains(&f))
         {
@@ -1034,16 +1044,27 @@ pub(super) fn plan_sse_graph_refresh(
     }
 
     let scope = m::text(state, "scope");
-    let unscoped = scope.trim_matches('/').is_empty()
+    let view_scope = m::text(view, "scope");
+    let eff_scope = if !scope.trim_matches('/').is_empty() {
+        scope.clone()
+    } else {
+        view_scope
+    };
+    let unscoped = eff_scope.trim_matches('/').is_empty()
         && m::text(state, "focus").is_empty()
         && !m::yes(&state["isolate_active"]);
+    for rem in &removed_set {
+        if !loaded_paths.contains(rem) && !unscoped && path_within_scope(rem, &eff_scope) {
+            return SseRefreshMode::FullReload;
+        }
+    }
     for changed in &delta.changed_files {
         let norm = normalize_rel_path(changed);
         if norm.is_empty() || removed_set.contains(&norm) || loaded_paths.contains(&norm) {
             continue;
         }
         // Newly created/unloaded file visible in current scope requires FullReload to add its node.
-        if unscoped || path_within_scope(&norm, &scope) {
+        if unscoped || path_within_scope(&norm, &eff_scope) {
             return SseRefreshMode::FullReload;
         }
     }
@@ -1092,17 +1113,84 @@ pub(super) fn apply_sse_delta_patch_to_view(
         .filter(|f| !f.is_empty())
         .collect();
     if !removed_set.is_empty() {
+        let mut dropped_node_paths: BTreeSet<String> = BTreeSet::new();
+        let mut removed_file_count = 0u64;
+        let mut dropped_nodes_count = 0usize;
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            let mut next_nodes = Vec::with_capacity(nodes.len());
+            for mut node in std::mem::take(nodes) {
+                let path = normalize_rel_path(&m::text(&node, "path"));
+                let file = normalize_rel_path(&m::text(&node, "file"));
+                let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+                let is_leaf_file = !is_folder
+                    && !m::yes(&node["symbol"])
+                    && !m::yes(&node["semantic"])
+                    && !path.starts_with("sem:")
+                    && !path.starts_with("__semantic__/");
+                if !is_folder {
+                    if (!path.is_empty() && removed_set.contains(&path))
+                        || (!file.is_empty() && removed_set.contains(&file))
+                    {
+                        if !path.is_empty() {
+                            dropped_node_paths.insert(path);
+                        }
+                        if is_leaf_file {
+                            removed_file_count += 1;
+                        }
+                        dropped_nodes_count += 1;
+                        patched += 1;
+                        continue;
+                    }
+                    next_nodes.push(node);
+                } else {
+                    let child_rem = if path.is_empty() {
+                        0u64
+                    } else {
+                        removed_set
+                            .iter()
+                            .filter(|rem| path == "." || path_within_scope(rem, &path))
+                            .count() as u64
+                    };
+                    if child_rem > 0 {
+                        if let Some(prev_files) = node["files"].as_u64() {
+                            let decremented = child_rem.min(prev_files);
+                            let remaining = prev_files.saturating_sub(child_rem);
+                            removed_file_count += decremented;
+                            if remaining == 0 {
+                                if !path.is_empty() {
+                                    dropped_node_paths.insert(path);
+                                }
+                                dropped_nodes_count += 1;
+                                patched += 1;
+                                continue;
+                            }
+                            node["files"] = json!(remaining);
+                            patched += 1;
+                        }
+                    }
+                    next_nodes.push(node);
+                }
+            }
+            *nodes = next_nodes;
+        }
+
         let mut lost_out: HashMap<String, u64> = HashMap::new();
         let mut lost_in: HashMap<String, u64> = HashMap::new();
+        let mut removed_links = 0u64;
+        let mut removed_guessed = 0u64;
+        let mut dropped_edges_count = 0usize;
         if let Some(edges) = view["edges"].as_array_mut() {
             let before = edges.len();
             edges.retain(|edge| {
                 let from = normalize_rel_path(&m::text(edge, "from"));
                 let to = normalize_rel_path(&m::text(edge, "to"));
-                let drop_from = removed_set.contains(&from);
-                let drop_to = removed_set.contains(&to);
+                let drop_from = removed_set.contains(&from) || dropped_node_paths.contains(&from);
+                let drop_to = removed_set.contains(&to) || dropped_node_paths.contains(&to);
                 if drop_from || drop_to {
                     let links = edge["links"].as_u64().unwrap_or(1).max(1);
+                    let guessed = edge["guessed"].as_u64().unwrap_or(0).min(links);
+                    removed_links += links;
+                    removed_guessed += guessed;
                     if !drop_from && !from.is_empty() {
                         *lost_out.entry(from).or_default() += links;
                     }
@@ -1114,17 +1202,11 @@ pub(super) fn apply_sse_delta_patch_to_view(
                     true
                 }
             });
-            patched += before.saturating_sub(edges.len());
+            dropped_edges_count = before.saturating_sub(edges.len());
+            patched += dropped_edges_count;
         }
+
         if let Some(nodes) = view["nodes"].as_array_mut() {
-            let before = nodes.len();
-            nodes.retain(|node| {
-                let path = normalize_rel_path(&m::text(node, "path"));
-                let file = normalize_rel_path(&m::text(node, "file"));
-                !((!path.is_empty() && removed_set.contains(&path))
-                    || (!file.is_empty() && removed_set.contains(&file)))
-            });
-            patched += before.saturating_sub(nodes.len());
             for node in nodes.iter_mut() {
                 let path = normalize_rel_path(&m::text(node, "path"));
                 if let Some(&d_out) = lost_out.get(&path) {
@@ -1144,41 +1226,60 @@ pub(super) fn apply_sse_delta_patch_to_view(
                 if let Some(arr) = view["focus"][side].as_array_mut() {
                     arr.retain(|entry| {
                         let p = normalize_rel_path(&m::text(entry, "path"));
-                        p.is_empty() || !removed_set.contains(&p)
+                        p.is_empty()
+                            || (!removed_set.contains(&p) && !dropped_node_paths.contains(&p))
                     });
                 }
+            }
+        }
+        if let Some(totals) = view["totals"].as_object_mut() {
+            if let Some(prev) = totals.get("files").and_then(V::as_u64) {
+                totals.insert(
+                    "files".into(),
+                    json!(prev.saturating_sub(removed_file_count)),
+                );
+            }
+            if let Some(prev) = totals.get("links").and_then(V::as_u64) {
+                totals.insert("links".into(), json!(prev.saturating_sub(removed_links)));
+            }
+            if let Some(prev) = totals.get("guessed").and_then(V::as_u64) {
+                totals.insert(
+                    "guessed".into(),
+                    json!(prev.saturating_sub(removed_guessed)),
+                );
+            }
+            if let Some(prev) = totals.get("read").and_then(V::as_u64) {
+                let removed_read = removed_links.saturating_sub(removed_guessed);
+                totals.insert("read".into(), json!(prev.saturating_sub(removed_read)));
+            }
+            if let Some(prev) = totals.get("nodes").and_then(V::as_u64) {
+                totals.insert(
+                    "nodes".into(),
+                    json!(prev.saturating_sub(dropped_nodes_count as u64)),
+                );
+            }
+            if let Some(prev) = totals.get("edges").and_then(V::as_u64) {
+                totals.insert(
+                    "edges".into(),
+                    json!(prev.saturating_sub(dropped_edges_count as u64)),
+                );
             }
         }
     }
 
     if delta.nodes.is_some() || delta.edges.is_some() {
-        if !view["totals"].is_object() {
-            view["totals"] = json!({});
-        }
-        if let Some(n) = delta.nodes {
-            if view["totals"].get("nodes").is_some_and(V::is_number) {
-                view["totals"]["nodes"] = json!(n);
-                patched += 1;
+        if let Some(totals) = view["totals"].as_object_mut() {
+            if let Some(n) = delta.nodes {
+                if totals.get("symbols").is_some_and(V::is_number) {
+                    totals.insert("symbols".into(), json!(n));
+                    patched += 1;
+                }
             }
-            if view["totals"].get("files").is_some_and(V::is_number) {
-                view["totals"]["files"] = json!(n);
-                patched += 1;
-            } else if view["totals"].get("nodes").is_none() {
-                view["totals"]["nodes"] = json!(n);
-                patched += 1;
-            }
-        }
-        if let Some(e) = delta.edges {
-            if view["totals"].get("edges").is_some_and(V::is_number) {
-                view["totals"]["edges"] = json!(e);
-                patched += 1;
-            }
-            if view["totals"].get("links").is_some_and(V::is_number) {
-                view["totals"]["links"] = json!(e);
-                patched += 1;
-            } else if view["totals"].get("edges").is_none() {
-                view["totals"]["edges"] = json!(e);
-                patched += 1;
+            if let Some(e) = delta.edges {
+                if totals.get("relations").is_some_and(V::is_number) {
+                    totals.insert("relations".into(), json!(e));
+                    patched += 1;
+                }
             }
         }
     }
@@ -1189,23 +1290,65 @@ pub(super) fn apply_sse_delta_patch_to_view(
         .map(|f| normalize_rel_path(f))
         .filter(|f| !f.is_empty())
         .collect();
-    if !changed_set.is_empty() {
+    let plain_map = view["chosen"].is_null();
+    if !changed_set.is_empty() || plain_map {
         if let Some(nodes) = view["nodes"].as_array_mut() {
             for node in nodes {
                 let path = normalize_rel_path(&m::text(node, "path"));
                 let file = normalize_rel_path(&m::text(node, "file"));
-                if (!path.is_empty() && changed_set.contains(&path))
+                let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+                let match_count = if changed_set.is_empty() {
+                    0u64
+                } else if is_folder {
+                    if path.is_empty() {
+                        0
+                    } else {
+                        changed_set
+                            .iter()
+                            .filter(|c| path == "." || path_within_scope(c, &path))
+                            .count() as u64
+                    }
+                } else if (!path.is_empty() && changed_set.contains(&path))
                     || (!file.is_empty() && changed_set.contains(&file))
                 {
-                    node["changed"] = json!(true);
+                    1
+                } else {
+                    0
+                };
+                if match_count > 0 {
+                    node["changed"] = json!(match_count);
+                    node["sse_changed"] = json!(true);
+                    patched += 1;
+                } else if node["sse_changed"] == json!(true)
+                    || (plain_map
+                        && (node["changed"].as_u64().unwrap_or(0) > 0
+                            || node["changed"].as_bool() == Some(true)))
+                {
+                    node["changed"] = json!(0);
+                    if let Some(obj) = node.as_object_mut() {
+                        obj.remove("sse_changed");
+                    }
                     patched += 1;
                 }
             }
         }
         if view["focus"].is_object() {
             let fpath = normalize_rel_path(&m::text(&view["focus"], "path"));
-            if !fpath.is_empty() && changed_set.contains(&fpath) {
-                view["focus"]["changed"] = json!(true);
+            let matched = !fpath.is_empty() && changed_set.contains(&fpath);
+            if matched {
+                view["focus"]["changed"] = json!(1);
+                view["focus"]["sse_changed"] = json!(true);
+                patched += 1;
+            } else if view["focus"]["sse_changed"] == json!(true)
+                || (plain_map
+                    && (view["focus"]["changed"].as_u64().unwrap_or(0) > 0
+                        || view["focus"]["changed"].as_bool() == Some(true)))
+            {
+                view["focus"]["changed"] = json!(0);
+                if let Some(obj) = view["focus"].as_object_mut() {
+                    obj.remove("sse_changed");
+                }
+                patched += 1;
             }
         }
     }
@@ -1923,9 +2066,18 @@ mod tests {
                 { "path": "src/db.rs", "name": "db.rs", "out": 0, "in": 1 }
             ],
             "edges": [
-                { "from": "src/auth.rs", "to": "src/db.rs", "links": 1 }
+                { "from": "src/auth.rs", "to": "src/db.rs", "links": 1, "guessed": 0 }
             ],
-            "totals": { "nodes": 2, "edges": 1 }
+            "totals": {
+                "files": 2,
+                "links": 1,
+                "read": 1,
+                "guessed": 0,
+                "symbols": 12,
+                "relations": 18,
+                "nodes": 2,
+                "edges": 1
+            }
         });
 
         // Identical revision without changed files skips reload.
@@ -1939,7 +2091,8 @@ mod tests {
             SseRefreshMode::SkipAlreadyCurrent
         );
 
-        // Incremental changed_files with unchanged counts qualifies for targeted patch.
+        // Incremental changed_files sets u64 `changed: 1` (compatible with render/mod.rs `.as_u64()`)
+        // and subsequent deltas clear stale flags on untouched plain-map nodes.
         let inc = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
@@ -1956,10 +2109,26 @@ mod tests {
         let patched_n = apply_sse_delta_patch_to_view(&mut patched_view, &inc);
         assert!(patched_n >= 1);
         assert_eq!(patched_view["ir_revision"], json!(11));
-        assert_eq!(patched_view["nodes"][0]["changed"], json!(true));
+        assert_eq!(patched_view["nodes"][0]["changed"], json!(1));
         assert!(patched_view["nodes"][1]["changed"].is_null());
 
-        // Safe node + edge removal without unmounted additions patches view & counts in-place.
+        let inc2 = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "nodes": 2,
+            "edges": 1,
+            "changed_files": ["src/db.rs"]
+        }));
+        apply_sse_delta_patch_to_view(&mut patched_view, &inc2);
+        assert_eq!(
+            patched_view["nodes"][0]["changed"],
+            json!(0),
+            "stale changed flag on src/auth.rs must reset cleanly"
+        );
+        assert_eq!(patched_view["nodes"][1]["changed"], json!(1));
+
+        // Safe node + edge removal decrements view totals (files/links/read) without conflating IR counts.
         let removed_safe = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
@@ -1979,24 +2148,30 @@ mod tests {
         assert_eq!(removed_patched["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(removed_patched["edges"].as_array().unwrap().len(), 0);
         assert_eq!(removed_patched["nodes"][0]["out"], json!(0));
+        assert_eq!(removed_patched["totals"]["files"], json!(1));
+        assert_eq!(removed_patched["totals"]["links"], json!(0));
+        assert_eq!(removed_patched["totals"]["read"], json!(0));
         assert_eq!(removed_patched["totals"]["nodes"], json!(1));
         assert_eq!(removed_patched["totals"]["edges"], json!(0));
+        assert_eq!(removed_patched["totals"]["symbols"], json!(1));
+        assert_eq!(removed_patched["totals"]["relations"], json!(0));
 
-        // Scoped views receiving out-of-scope global count deltas patch totals badge counts in-place.
+        // Scoped views receiving out-of-scope global IR deltas update symbols/relations ONLY,
+        // preserving view-level `files`/`links`/`nodes`/`edges`.
         let scoped_state = json!({ "scope": "src/auth" });
         let out_of_scope_counts = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
             "revision": 13,
-            "nodes": 40,
-            "edges": 80,
+            "nodes": 400,
+            "edges": 800,
             "changed_files": ["packages/billing/invoice.ts"]
         }));
         assert_eq!(
             plan_sse_graph_refresh(
                 &out_of_scope_counts,
-                Some(39),
-                Some(78),
+                Some(390),
+                Some(780),
                 &map_view,
                 &scoped_state
             ),
@@ -2004,8 +2179,52 @@ mod tests {
         );
         let mut scoped_patched = map_view.clone();
         apply_sse_delta_patch_to_view(&mut scoped_patched, &out_of_scope_counts);
-        assert_eq!(scoped_patched["totals"]["nodes"], json!(40));
-        assert_eq!(scoped_patched["totals"]["edges"], json!(80));
+        assert_eq!(scoped_patched["totals"]["symbols"], json!(400));
+        assert_eq!(scoped_patched["totals"]["relations"], json!(800));
+        assert_eq!(scoped_patched["totals"]["files"], json!(2));
+        assert_eq!(scoped_patched["totals"]["links"], json!(1));
+
+        // Scoped folder view receiving removed_files for a child inside a collapsed folder must
+        // request FullReload in planner AND cleanly decrement/drop folders if patched directly.
+        let scoped_folder_view = json!({
+            "mode": "map",
+            "scope": "src",
+            "ir_revision": 10,
+            "nodes": [
+                { "path": "src/nested", "name": "nested", "folder": true, "files": 2, "out": 1, "in": 0 },
+                { "path": "src/single", "name": "single", "folder": true, "files": 1, "out": 0, "in": 1 }
+            ],
+            "edges": [
+                { "from": "src/nested", "to": "src/single", "links": 2, "guessed": 1 }
+            ],
+            "totals": { "files": 3, "links": 2, "read": 1, "guessed": 1, "symbols": 20, "relations": 30 }
+        });
+        let child_removed_only = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 14,
+            "removed_files": ["src/single/only.rs"],
+            "changed_files": []
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(
+                &child_removed_only,
+                Some(20),
+                Some(30),
+                &scoped_folder_view,
+                &json!({ "scope": "src" })
+            ),
+            SseRefreshMode::FullReload
+        );
+        let mut folder_patched = scoped_folder_view.clone();
+        apply_sse_delta_patch_to_view(&mut folder_patched, &child_removed_only);
+        assert_eq!(folder_patched["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(folder_patched["nodes"][0]["path"], "src/nested");
+        assert_eq!(folder_patched["edges"].as_array().unwrap().len(), 0);
+        assert_eq!(folder_patched["totals"]["files"], json!(2));
+        assert_eq!(folder_patched["totals"]["links"], json!(0));
+        assert_eq!(folder_patched["totals"]["read"], json!(0));
+        assert_eq!(folder_patched["totals"]["guessed"], json!(0));
 
         // Unscoped brand-new nodes, removing focused node, or aggregate modes still trigger FullReload.
         let count_changed_unloaded = crate::graph::extract_sse_delta_payload(&json!({

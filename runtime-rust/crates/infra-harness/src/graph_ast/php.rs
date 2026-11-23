@@ -961,6 +961,81 @@ fn collect_php_param_type_names(params_node: Node<'_>, source: &str) -> Vec<Stri
         .collect()
 }
 
+fn extract_php_route_attr_path(params: Node<'_>, source: &str) -> Option<String> {
+    let mut positional: Option<String> = None;
+    let mut saw_argument = false;
+    let mut stack = vec![params];
+    while let Some(cur) = stack.pop() {
+        if cur.kind() == "argument" {
+            saw_argument = true;
+            let name_node = cur
+                .child_by_field_name("name")
+                .or_else(|| cur.named_child(0).filter(|c| c.kind() == "name"));
+            if let Some(name_n) = name_node {
+                let arg_name = node_text(name_n, source).trim().to_ascii_lowercase();
+                if matches!(
+                    arg_name.as_str(),
+                    "path" | "prefix" | "value" | "uri" | "url"
+                ) && let Some(val) = all_string_arg_texts(cur, source)
+                    .into_iter()
+                    .map(|s| s.trim().to_owned())
+                    .find(|s| !s.is_empty())
+                {
+                    return Some(val);
+                }
+            } else if positional.is_none() {
+                let expr = cur.named_child(0).unwrap_or(cur);
+                if is_string_kind(expr.kind())
+                    && let Some(val) = unquote_literal(node_text(expr, source))
+                {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        positional = Some(trimmed.to_owned());
+                    }
+                }
+            }
+            continue;
+        }
+        for i in (0..cur.child_count()).rev() {
+            if let Some(ch) = cur.child(i) {
+                stack.push(ch);
+            }
+        }
+    }
+    if positional.is_some() || saw_argument {
+        positional
+    } else {
+        all_string_arg_texts(params, source)
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .find(|s| !s.is_empty())
+    }
+}
+
+fn is_php_route_attr_short(short_lower: &str) -> bool {
+    matches!(
+        short_lower,
+        "route"
+            | "requestmapping"
+            | "path"
+            | "getmapping"
+            | "httpget"
+            | "get"
+            | "postmapping"
+            | "httppost"
+            | "post"
+            | "putmapping"
+            | "httpput"
+            | "put"
+            | "deletemapping"
+            | "httpdelete"
+            | "delete"
+            | "patchmapping"
+            | "httppatch"
+            | "patch"
+    )
+}
+
 fn extract_php_class_route_prefix(node: Node<'_>, source: &str) -> Option<String> {
     let attr_list = node.child_by_field_name("attributes")?;
     let mut stack = vec![attr_list];
@@ -981,11 +1056,9 @@ fn extract_php_class_route_prefix(node: Node<'_>, source: &str) -> Option<String
                 short.as_str(),
                 "route" | "requestmapping" | "path" | "controller"
             ) && let Some(params) = cur.child_by_field_name("parameters")
+                && let Some(path) = extract_php_route_attr_path(params, source)
             {
-                let strs = all_string_arg_texts(params, source);
-                if let Some(first) = strs.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    return Some(first.to_owned());
-                }
+                return Some(path);
             }
             continue;
         }
@@ -1100,9 +1173,23 @@ fn emit_php_attributes(
         if cur.kind() == "attribute" {
             let attr_text = ctx.text(cur);
             let attr_name = cur.child(0).map(|n| ctx.text(n)).unwrap_or(attr_text);
+            let short_lower = attr_name
+                .rsplit(['\\', ':', '.'])
+                .next()
+                .unwrap_or(attr_name)
+                .trim_start_matches(['@', '#'])
+                .to_ascii_lowercase();
             let strs = cur
                 .child_by_field_name("parameters")
-                .map(|p| all_string_arg_texts(p, ctx.source))
+                .map(|p| {
+                    if is_php_route_attr_short(&short_lower) {
+                        extract_php_route_attr_path(p, ctx.source)
+                            .into_iter()
+                            .collect()
+                    } else {
+                        all_string_arg_texts(p, ctx.source)
+                    }
+                })
                 .unwrap_or_default();
             emit_semantic_from_attribute(
                 ctx,
@@ -1476,6 +1563,40 @@ fn kebab_to_studly(raw: &str) -> String {
     out
 }
 
+fn find_masked_blade_close(bytes: &[u8], start: usize, close_delim: &[u8]) -> Option<usize> {
+    let mut j = start;
+    let mut quote: Option<u8> = None;
+    let mut inner_depth = 0usize;
+    while j < bytes.len() {
+        if let Some(q) = quote {
+            if bytes[j] == b'\\' {
+                j = (j + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[j] == q {
+                quote = None;
+            }
+            j += 1;
+            continue;
+        }
+        if matches!(bytes[j], b'\'' | b'"' | b'`') {
+            quote = Some(bytes[j]);
+            j += 1;
+            continue;
+        }
+        if inner_depth == 0 && bytes[j..].starts_with(close_delim) {
+            return Some(j + close_delim.len());
+        }
+        if bytes[j] == b'{' {
+            inner_depth += 1;
+        } else if bytes[j] == b'}' && inner_depth > 0 {
+            inner_depth -= 1;
+        }
+        j += 1;
+    }
+    None
+}
+
 fn mask_blade_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
@@ -1493,29 +1614,54 @@ fn mask_blade_comments(source: &str) -> String {
 
     // Also mask escaped Blade JS/Alpine expressions (`@{{ ... }}` and `@{!! ... !!}`)
     // so neither inline PHP extraction nor regex scanners misattribute them as PHP calls.
+    // Respect `@@{{` / `@@{!!` escaped `@` parity (even `@` counts stay live PHP),
+    // string quotes, and balanced nested `{ ... }` braces.
     let bytes = out.as_bytes();
     let mut masked = String::with_capacity(out.len());
     let mut i = 0usize;
     while i < bytes.len() {
-        let close = if bytes[i..].starts_with(b"@{{") {
-            Some(b"}}".as_slice())
-        } else if bytes[i..].starts_with(b"@{!!") {
-            Some(b"!!}".as_slice())
-        } else {
-            None
-        };
-        if let Some(close_delim) = close {
-            let open_len = close_delim.len() + 1;
-            if let Some(rel_end) =
-                out[i + open_len..].find(std::str::from_utf8(close_delim).unwrap())
-            {
-                let end = i + open_len + rel_end + close_delim.len();
-                for ch in out[i..end].chars() {
-                    masked.push(if ch == '\n' { '\n' } else { ' ' });
+        if bytes[i] == b'@' {
+            let mut at_count = 0usize;
+            while i + at_count < bytes.len() && bytes[i + at_count] == b'@' {
+                at_count += 1;
+            }
+            let after_at = i + at_count;
+            let close_delim = if bytes[after_at..].starts_with(b"{{") {
+                Some(b"}}".as_slice())
+            } else if bytes[after_at..].starts_with(b"{!!") {
+                Some(b"!!}".as_slice())
+            } else {
+                None
+            };
+            if let Some(delim) = close_delim {
+                if at_count.is_multiple_of(2) {
+                    for _ in 0..at_count {
+                        masked.push('@');
+                    }
+                    i = after_at;
+                    continue;
                 }
-                i = end;
+                for _ in 0..(at_count - 1) {
+                    masked.push('@');
+                }
+                let esc_start = after_at - 1;
+                let expr_start = after_at + delim.len();
+                if let Some(end) = find_masked_blade_close(bytes, expr_start, delim) {
+                    for ch in out[esc_start..end].chars() {
+                        masked.push(if ch == '\n' { '\n' } else { ' ' });
+                    }
+                    i = end;
+                    continue;
+                }
+                masked.push('@');
+                i = after_at;
                 continue;
             }
+            for _ in 0..at_count {
+                masked.push('@');
+            }
+            i = after_at;
+            continue;
         }
         let ch = out[i..].chars().next().unwrap();
         masked.push(ch);

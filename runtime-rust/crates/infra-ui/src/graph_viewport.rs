@@ -2105,6 +2105,11 @@ pub(crate) mod canvas2d {
         scale.is_finite() && scale > 0.0 && scale < CLUSTER_HULL_MAX_SCALE
     }
 
+    #[allow(dead_code)]
+    pub fn should_paint_cluster_hull_labels(overlay_only: bool, show_cluster_hulls: bool) -> bool {
+        !overlay_only && show_cluster_hulls
+    }
+
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct DenseSceneMeta {
         pub nodes: HashMap<usize, DenseNodeMeta>,
@@ -3550,6 +3555,8 @@ pub(crate) mod canvas2d {
             fnv1a_mix_str(&mut h, &node.role);
             if let Some(nm) = meta.nodes.get(&node.index) {
                 fnv1a_mix_u64(&mut h, u64::from(nm.in_cycle));
+                fnv1a_mix_str(&mut h, &nm.symbol_kind);
+                fnv1a_mix_str(&mut h, &nm.visibility);
                 fnv1a_mix_str(&mut h, &nm.blast_tag);
                 fnv1a_mix_str(&mut h, &nm.badge_text);
             }
@@ -3567,31 +3574,75 @@ pub(crate) mod canvas2d {
                 | (u64::from(edge.on) << 2)
                 | (u64::from(edge.lit) << 3)
                 | (u64::from(edge.dim) << 4)
-                | (u64::from(edge.detour) << 5);
+                | (u64::from(edge.detour) << 5)
+                | (u64::from(edge.guessed) << 6)
+                | (u64::from(edge.commit_touched) << 7)
+                | (u64::from(edge.back) << 8);
             fnv1a_mix_u64(&mut h, flags);
             fnv1a_mix_str(&mut h, &edge.kind);
             fnv1a_mix_str(&mut h, &edge.diff);
-            if let Some(&(x, y)) = edge.pts.first() {
+            fnv1a_mix_str(&mut h, &edge.impact);
+            fnv1a_mix_u64(&mut h, edge.kinds.len() as u64);
+            for k in &edge.kinds {
+                fnv1a_mix_str(&mut h, k);
+            }
+            for &(x, y) in &edge.pts {
                 fnv1a_mix_u64(&mut h, x.to_bits());
                 fnv1a_mix_u64(&mut h, y.to_bits());
             }
-            if let Some(&(x, y)) = edge.pts.last() {
-                fnv1a_mix_u64(&mut h, x.to_bits());
-                fnv1a_mix_u64(&mut h, y.to_bits());
+            for cmd in &edge.cmds {
+                match *cmd {
+                    DensePathCmd::Move(x, y) => {
+                        fnv1a_mix_u64(&mut h, 1);
+                        fnv1a_mix_u64(&mut h, x.to_bits());
+                        fnv1a_mix_u64(&mut h, y.to_bits());
+                    }
+                    DensePathCmd::Line(x, y) => {
+                        fnv1a_mix_u64(&mut h, 2);
+                        fnv1a_mix_u64(&mut h, x.to_bits());
+                        fnv1a_mix_u64(&mut h, y.to_bits());
+                    }
+                    DensePathCmd::Curve { c1, c2, to } => {
+                        fnv1a_mix_u64(&mut h, 3);
+                        fnv1a_mix_u64(&mut h, c1.0.to_bits());
+                        fnv1a_mix_u64(&mut h, c1.1.to_bits());
+                        fnv1a_mix_u64(&mut h, c2.0.to_bits());
+                        fnv1a_mix_u64(&mut h, c2.1.to_bits());
+                        fnv1a_mix_u64(&mut h, to.0.to_bits());
+                        fnv1a_mix_u64(&mut h, to.1.to_bits());
+                    }
+                }
             }
         }
         for c in &meta.containers {
+            let kind_tag = match c.kind {
+                DenseContainerKind::TierBand => 0_u64,
+                DenseContainerKind::ServiceFrame => 1_u64,
+            };
+            fnv1a_mix_u64(&mut h, kind_tag);
             fnv1a_mix_u64(&mut h, c.x.to_bits());
             fnv1a_mix_u64(&mut h, c.y.to_bits());
             fnv1a_mix_u64(&mut h, c.w.to_bits());
             fnv1a_mix_u64(&mut h, c.h.to_bits());
+            fnv1a_mix_u64(&mut h, c.radius.to_bits());
             fnv1a_mix_str(&mut h, &c.label);
         }
         for hull in &meta.cluster_hulls {
             fnv1a_mix_str(&mut h, &hull.key);
-            fnv1a_mix_u64(&mut h, hull.bounds.0.to_bits());
-            fnv1a_mix_u64(&mut h, hull.bounds.2.to_bits());
             fnv1a_mix_str(&mut h, &hull.label);
+            fnv1a_mix_u64(&mut h, hull.color_slot as u64);
+            fnv1a_mix_u64(&mut h, hull.node_count as u64);
+            fnv1a_mix_u64(&mut h, hull.bounds.0.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.1.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.2.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.3.to_bits());
+            fnv1a_mix_u64(&mut h, hull.centroid.0.to_bits());
+            fnv1a_mix_u64(&mut h, hull.centroid.1.to_bits());
+            fnv1a_mix_u64(&mut h, hull.polygon.len() as u64);
+            for &(x, y) in &hull.polygon {
+                fnv1a_mix_u64(&mut h, x.to_bits());
+                fnv1a_mix_u64(&mut h, y.to_bits());
+            }
         }
         h
     }
@@ -5163,7 +5214,7 @@ pub(crate) mod canvas2d {
                 }
             }
         }
-        if show_cluster_hulls {
+        if should_paint_cluster_hull_labels(overlay_only, show_cluster_hulls) {
             paint_cluster_hull_labels(
                 ctx,
                 &meta.cluster_hulls,
@@ -6714,6 +6765,153 @@ mod tests {
             Some((0, 0)),
             &hov_nodes
         ));
+    }
+
+    #[test]
+    fn scene_digest_tracks_all_rendered_node_edge_container_and_hull_fields() {
+        let mut scene = canvas2d::DenseScene {
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![canvas2d::DenseNodeSpec {
+                index: 0,
+                x: 20.0,
+                y: 20.0,
+                w: 120.0,
+                h: 48.0,
+                label: "svc".into(),
+                ..Default::default()
+            }],
+            edges: vec![canvas2d::DenseEdgeSpec {
+                index: 0,
+                kind: "calls".into(),
+                pts: vec![(20.0, 20.0), (80.0, 35.0), (140.0, 40.0)],
+                cmds: vec![
+                    canvas2d::DensePathCmd::Move(20.0, 20.0),
+                    canvas2d::DensePathCmd::Line(80.0, 35.0),
+                    canvas2d::DensePathCmd::Line(140.0, 40.0),
+                ],
+                weight: 1,
+                kinds: vec!["calls".into()],
+                ..Default::default()
+            }],
+        };
+        let mut meta = canvas2d::DenseSceneMeta::default();
+        meta.nodes.insert(
+            0,
+            canvas2d::DenseNodeMeta {
+                symbol_kind: "class".into(),
+                visibility: "public".into(),
+                ..Default::default()
+            },
+        );
+        meta.containers.push(canvas2d::DenseContainerSpec {
+            kind: canvas2d::DenseContainerKind::TierBand,
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+            radius: 8.0,
+            label: "Domain".into(),
+        });
+        meta.rebuild_caches(&scene);
+        meta.cluster_hulls.push(canvas2d::DenseClusterHull {
+            key: "c0".into(),
+            label: "Domain".into(),
+            color_slot: 1,
+            node_count: 3,
+            polygon: vec![(10.0, 10.0), (150.0, 10.0), (150.0, 90.0)],
+            centroid: (80.0, 50.0),
+            bounds: (10.0, 10.0, 150.0, 90.0),
+        });
+
+        let base = canvas2d::compute_scene_digest(&scene, &meta);
+
+        // DenseNodeMeta.{symbol_kind, visibility}
+        meta.nodes.get_mut(&0).unwrap().symbol_kind = "interface".into();
+        let d = canvas2d::compute_scene_digest(&scene, &meta);
+        assert_ne!(base, d, "symbol_kind must affect scene_digest");
+        meta.nodes.get_mut(&0).unwrap().symbol_kind = "class".into();
+
+        meta.nodes.get_mut(&0).unwrap().visibility = "private".into();
+        assert_ne!(
+            base,
+            canvas2d::compute_scene_digest(&scene, &meta),
+            "visibility must affect scene_digest"
+        );
+        meta.nodes.get_mut(&0).unwrap().visibility = "public".into();
+
+        // DenseEdgeSpec.{guessed, impact, commit_touched, back, kinds}, interior pts, cmds
+        scene.edges[0].guessed = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].guessed = false;
+
+        scene.edges[0].impact = "high".into();
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].impact.clear();
+
+        scene.edges[0].commit_touched = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].commit_touched = false;
+
+        scene.edges[0].back = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].back = false;
+
+        scene.edges[0].kinds.push("imports".into());
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].kinds.pop();
+
+        scene.edges[0].pts[1] = (90.0, 55.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].pts[1] = (80.0, 35.0);
+
+        scene.edges[0].cmds[1] = canvas2d::DensePathCmd::Curve {
+            c1: (50.0, 20.0),
+            c2: (110.0, 40.0),
+            to: (140.0, 40.0),
+        };
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].cmds[1] = canvas2d::DensePathCmd::Line(80.0, 35.0);
+
+        // DenseContainerSpec.{kind, radius}
+        meta.containers[0].kind = canvas2d::DenseContainerKind::ServiceFrame;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.containers[0].kind = canvas2d::DenseContainerKind::TierBand;
+
+        meta.containers[0].radius = 16.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.containers[0].radius = 8.0;
+
+        // DenseClusterHull bounds.{1,3}, color_slot, node_count, polygon, centroid
+        meta.cluster_hulls[0].bounds.1 = 15.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].bounds.1 = 10.0;
+
+        meta.cluster_hulls[0].bounds.3 = 95.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].bounds.3 = 90.0;
+
+        meta.cluster_hulls[0].color_slot = 2;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].color_slot = 1;
+
+        meta.cluster_hulls[0].node_count = 4;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].node_count = 3;
+
+        meta.cluster_hulls[0].centroid = (85.0, 50.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].centroid = (80.0, 50.0);
+
+        meta.cluster_hulls[0].polygon[1] = (155.0, 12.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].polygon[1] = (150.0, 10.0);
+
+        assert_eq!(base, canvas2d::compute_scene_digest(&scene, &meta));
+
+        assert!(canvas2d::should_paint_cluster_hull_labels(false, true));
+        assert!(!canvas2d::should_paint_cluster_hull_labels(true, true));
+        assert!(!canvas2d::should_paint_cluster_hull_labels(false, false));
     }
 
     trait CameraTestExt {

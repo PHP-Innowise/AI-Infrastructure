@@ -10373,3 +10373,34 @@ fn progressive_lod_reads_zoom_and_live_modal_camera_scale_and_sse_updates_graph_
     );
     assert!(surfaces::modal_explain_button_state(None, &V::Null, true).0);
 }
+
+#[test]
+fn auto_lod_defaults_true_on_fresh_and_normalized_embedded_states() {
+    let f = fresh("");
+    assert_eq!(f["auto_lod"], json!(true));
+
+    // Legacy state without `auto_lod` or explicit `lod`/`min_weight` enables `auto_lod`.
+    let norm_default = normalize_map_state(json!({"scope": ""}));
+    assert_eq!(norm_default["auto_lod"], json!(true));
+
+    // Explicit `lod` or `min_weight` disables implicit `auto_lod`, while explicit `false` stays `false`.
+    let norm_explicit = normalize_map_state(json!({"lod": "folder"}));
+    assert_eq!(norm_explicit["auto_lod"], json!(false));
+    let norm_off = normalize_map_state(json!({"auto_lod": false}));
+    assert_eq!(norm_off["auto_lod"], json!(false));
+
+    // Embedded surface_state uses fresh/normalize defaults, so zooming out activates auto_lod URL.
+    m::take(surfaces::SESSION_SURFACE.state_model_key);
+    m::set(
+        surfaces::SESSION_SURFACE.camera_key,
+        json!({ "scale": 0.25, "fit_mode": false }),
+    );
+    let emb_st = surfaces::surface_state(surfaces::SESSION_SURFACE);
+    assert_eq!(emb_st["auto_lod"], json!(true));
+    let emb_url = build_scoped_map_path(&GraphTargetScope::single("proj-emb"), &emb_st, true);
+    m::take(surfaces::SESSION_SURFACE.camera_key);
+    assert!(
+        emb_url.contains("lod=crate") && emb_url.contains("min_weight=2"),
+        "expected fresh embedded surface at 0.25 scale to enable auto_lod: {emb_url}"
+    );
+}

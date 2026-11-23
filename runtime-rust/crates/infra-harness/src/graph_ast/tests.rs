@@ -1068,3 +1068,119 @@ class CheckoutHandler {
         "expected di_binds semantic edge for app()->make: {di_binds:?}"
     );
 }
+
+#[test]
+fn route_di_blade_escaping_nested_routers_and_named_php_attributes_regression() {
+    // 1. Express app.get('/users', UserController) and app.get('port') must not emit DI bindings/resolutions,
+    // while NestJS app.get(UsersService) still works. Also multi-level router propagation must emit /api/u/profile.
+    let ts = r#"
+const uRouter = express.Router();
+uRouter.get('/profile', getProfile);
+const v1Router = express.Router();
+v1Router.use('/u', uRouter);
+app.use('/api', v1Router);
+
+app.get('/users', UserController);
+const port = app.get('port');
+const svc = app.get(UsersService);
+"#;
+    let ts_ir = parse_file_ir("src/routes/multi.ts", ts).expect("parse multi router");
+    let ts_di: Vec<&str> = ts_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "di_binds")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        !ts_di.iter().any(|t| *t == "service:/users"
+            || *t == "service:port"
+            || *t == "service:UserController"),
+        "Express route/config app.get must not emit false DI bindings: {ts_di:?}"
+    );
+    assert!(
+        !ts_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.context == "di_resolve" && r.target_name == "UserController"),
+        "Express handler UserController must not become di_resolve: {:?}",
+        ts_ir.calls_and_refs
+    );
+    assert!(
+        ts_di.contains(&"service:UsersService"),
+        "typed container app.get(UsersService) should still emit DI: {ts_di:?}"
+    );
+    let ts_routes: Vec<&str> = ts_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        ts_routes.contains(&"route:GET /api/u/profile"),
+        "expected 2-level mounted router route GET /api/u/profile: {ts_routes:?}"
+    );
+    assert!(
+        ts_routes.contains(&"route:GET /users"),
+        "expected GET /users route: {ts_routes:?}"
+    );
+
+    // 2. Blade mask_blade_comments handles quoted ' }}', nested {a:{b:1}}, and @@{{ / @@{!! live PHP echoes.
+    let blade = r#"
+<div x-data="@{{ { quoted: ' }}', nested: { fn: IgnoredEscaped::skip() } } }}"></div>
+<div>@{!! { raw: '!!}', call: IgnoredRawEsc::skip() } !!}</div>
+<div>@@{{ LiveEcho::run() }}</div>
+<div>@@{!! LiveRaw::exec() !!}</div>
+"#;
+    let blade_ir = parse_file_ir("resources/views/escaped.blade.php", blade)
+        .expect("parse blade escaping edge cases");
+    let blade_refs: Vec<&str> = blade_ir
+        .calls_and_refs
+        .iter()
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert!(
+        !blade_refs
+            .iter()
+            .any(|r| r.contains("IgnoredEscaped") || r.contains("IgnoredRawEsc")),
+        "nested/quoted @{{ }} and @{{!! !!}} must remain masked: {blade_refs:?}"
+    );
+    assert!(
+        blade_refs.iter().any(|r| r.contains("LiveEcho")),
+        "@@{{ }} must remain live PHP: {blade_refs:?}"
+    );
+    assert!(
+        blade_refs.iter().any(|r| r.contains("LiveRaw")),
+        "@@{{!! !!}} must remain live PHP: {blade_refs:?}"
+    );
+
+    // 3. Symfony PHP named #[Route(name: ..., path: ...)] attributes extract `path:`, not `name:`.
+    let php = r#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Annotation\Route;
+
+#[Route(name: 'admin_', path: '/admin')]
+class AdminController {
+    #[Route(name: 'users_list', path: '/users', methods: ['GET'])]
+    public function list(): void {}
+}
+"#;
+    let php_ir =
+        parse_file_ir("src/Controller/AdminController.php", php).expect("parse php named route");
+    let php_routes: Vec<&str> = php_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        php_routes.contains(&"route:* /admin/users"),
+        "expected composed named Symfony Route /admin/users: {php_routes:?}"
+    );
+    assert!(
+        !php_routes
+            .iter()
+            .any(|r| r.contains("admin_") || r.contains("users_list")),
+        "attribute name: arg must never be mistaken for route path: {php_routes:?}"
+    );
+}
