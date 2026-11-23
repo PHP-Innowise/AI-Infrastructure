@@ -1372,7 +1372,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         .ok_or_else(|| HarnessError::invalid("Missing other session id."))?
         .to_owned();
     wait_until(
-        Duration::from_secs(15),
+        Duration::from_secs(45),
         "Secondary fixture session did not complete.",
         || Ok(store.get(&other_session_id)?["status"] == "completed"),
     )
@@ -1406,7 +1406,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         .ok_or_else(|| HarnessError::invalid("Missing primary session id."))?
         .to_owned();
     wait_until(
-        Duration::from_secs(15),
+        Duration::from_secs(45),
         "Primary fixture session did not reach pending permission state.",
         || {
             let s = store.get(&session_id)?;

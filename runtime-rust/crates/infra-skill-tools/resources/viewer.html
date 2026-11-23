@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eval Review</title>
+  <link rel="icon" href="data:,">
 
   <style>
     :root {
@@ -579,7 +580,7 @@
     </div>
 
     <!-- View tabs (only shown when benchmark data exists) -->
-    <div class="view-tabs" id="view-tabs" role="tablist" aria-label="Evaluation views" style="display:none;">
+    <div class="view-tabs" id="view-tabs" role="tablist" aria-label="Evaluation views" hidden>
       <button type="button" class="view-tab active" id="tab-outputs" role="tab" aria-selected="true" aria-controls="panel-outputs" tabindex="0" data-eval-action="view-outputs">Outputs</button>
       <button type="button" class="view-tab" id="tab-benchmark" role="tab" aria-selected="false" aria-controls="panel-benchmark" tabindex="-1" data-eval-action="view-benchmark">Benchmark</button>
     </div>
@@ -589,7 +590,7 @@
     <div class="main">
       <!-- Prompt -->
       <div class="section">
-        <div class="section-header">Prompt <span class="config-badge" id="config-badge" style="display:none;"></span></div>
+        <div class="section-header">Prompt <span class="config-badge" id="config-badge" hidden></span></div>
         <div class="section-body">
           <div class="prompt-text" id="prompt-text"></div>
         </div>
@@ -604,7 +605,7 @@
       </div>
 
       <!-- Previous Output (collapsible) -->
-      <div class="section" id="prev-outputs-section" style="display:none;">
+      <div class="section" id="prev-outputs-section" hidden>
         <div class="section-header">
           <button type="button" class="grades-toggle" id="prev-outputs-toggle" aria-expanded="false" aria-controls="prev-outputs-content" data-eval-action="toggle-previous">
             <span class="arrow" id="prev-outputs-arrow" aria-hidden="true">&#9654;</span>
@@ -615,7 +616,7 @@
       </div>
 
       <!-- Grades (collapsible) -->
-      <div class="section" id="grades-section" style="display:none;">
+      <div class="section" id="grades-section" hidden>
         <div class="section-header">
           <button type="button" class="grades-toggle" id="grades-toggle" aria-expanded="false" aria-controls="grades-content" data-eval-action="toggle-grades">
             <span class="arrow" id="grades-arrow" aria-hidden="true">&#9654;</span>
@@ -636,7 +637,7 @@
             placeholder="What do you think of this output? Any issues, suggestions, or things that look great?"
           ></textarea>
           <div class="feedback-status" id="feedback-status" role="status" aria-live="polite"></div>
-          <div class="prev-feedback" id="prev-feedback" style="display:none;">
+          <div class="prev-feedback" id="prev-feedback" hidden>
             <div class="prev-feedback-label">Previous feedback</div>
             <div id="prev-feedback-text"></div>
           </div>
