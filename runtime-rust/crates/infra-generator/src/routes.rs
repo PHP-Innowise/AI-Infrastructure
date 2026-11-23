@@ -5,7 +5,177 @@ use crate::{
 use infra_core::{Result, RuntimeError, fs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const COMMAND_ANALYZER_CACHE_CAP: usize = 64;
+const COMMAND_ANALYZER_RACY_NS: i128 = 2_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestFileStamp {
+    exists: bool,
+    regular: bool,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl ManifestFileStamp {
+    fn capture(path: &Path) -> Self {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return Self {
+                exists: false,
+                regular: true,
+                len: 0,
+                mtime_ns: 0,
+            };
+        };
+        let regular = !meta.file_type().is_symlink() && meta.is_file();
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())
+            .unwrap_or(0);
+        Self {
+            exists: true,
+            regular,
+            len: meta.len(),
+            mtime_ns,
+        }
+    }
+
+    fn content_sha(&self, path: &Path) -> Option<String> {
+        if !self.exists || !self.regular {
+            return None;
+        }
+        std::fs::read(path).ok().map(|bytes| sha(&bytes))
+    }
+
+    fn is_racy(&self, now_ns: i128) -> bool {
+        self.exists
+            && (!self.regular
+                || self.mtime_ns == 0
+                || (now_ns - self.mtime_ns).abs() < COMMAND_ANALYZER_RACY_NS)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkspaceManifestPair {
+    composer: ManifestFileStamp,
+    package: ManifestFileStamp,
+}
+
+struct CachedAnalyzerEntry {
+    analyzer: Arc<commands::CommandAnalyzer>,
+    stamps: WorkspaceManifestPair,
+    composer_hash: Option<String>,
+    package_hash: Option<String>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct CommandAnalyzerCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedAnalyzerEntry>,
+}
+
+fn command_analyzer_cache() -> &'static Mutex<CommandAnalyzerCache> {
+    static CACHE: OnceLock<Mutex<CommandAnalyzerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CommandAnalyzerCache::default()))
+}
+
+#[cfg(test)]
+fn command_analyzer_build_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn current_unix_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+/// Returns a workspace-stamped, `RACY_NS`-guarded cached [`commands::CommandAnalyzer`]
+/// (64-entry LRU) shared by generator routes and `infra-system`.
+pub fn cached_command_analyzer(target: &Path) -> Result<Arc<commands::CommandAnalyzer>> {
+    let ws_canon = ownership::resolve_target(target)?;
+    if !ws_canon.is_dir() {
+        return Err(RuntimeError::invalid("target is not a directory"));
+    }
+    let composer_path = ws_canon.join("composer.json");
+    let package_path = ws_canon.join("package.json");
+    let current = WorkspaceManifestPair {
+        composer: ManifestFileStamp::capture(&composer_path),
+        package: ManifestFileStamp::capture(&package_path),
+    };
+    let now_ns = current_unix_ns();
+    if current.composer.regular && current.package.regular {
+        let mut cache = command_analyzer_cache()
+            .lock()
+            .map_err(|_| RuntimeError::unavailable("CommandAnalyzer cache lock failed"))?;
+        cache.seq = cache.seq.saturating_add(1);
+        let use_seq = cache.seq;
+        if let Some(entry) = cache.entries.get_mut(&ws_canon)
+            && entry.stamps == current
+        {
+            let racy_match = (!current.composer.is_racy(now_ns)
+                || entry.composer_hash == current.composer.content_sha(&composer_path))
+                && (!current.package.is_racy(now_ns)
+                    || entry.package_hash == current.package.content_sha(&package_path));
+            if racy_match {
+                entry.last_used = use_seq;
+                return Ok(Arc::clone(&entry.analyzer));
+            }
+        }
+    }
+
+    let built = Arc::new(commands::CommandAnalyzer::new(&ws_canon)?);
+    #[cfg(test)]
+    if let Ok(mut counts) = command_analyzer_build_counts().lock() {
+        *counts.entry(ws_canon.clone()).or_insert(0) += 1;
+    }
+    let after = WorkspaceManifestPair {
+        composer: ManifestFileStamp::capture(&composer_path),
+        package: ManifestFileStamp::capture(&package_path),
+    };
+    if after.composer.regular && after.package.regular {
+        let composer_hash = after.composer.content_sha(&composer_path);
+        let package_hash = after.package.content_sha(&package_path);
+        let mut cache = command_analyzer_cache()
+            .lock()
+            .map_err(|_| RuntimeError::unavailable("CommandAnalyzer cache lock failed"))?;
+        cache.seq = cache.seq.saturating_add(1);
+        let use_seq = cache.seq;
+        if cache.entries.len() >= COMMAND_ANALYZER_CACHE_CAP
+            && !cache.entries.contains_key(&ws_canon)
+            && let Some(evict_key) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict_key);
+        }
+        cache.entries.insert(
+            ws_canon,
+            CachedAnalyzerEntry {
+                analyzer: Arc::clone(&built),
+                stamps: after,
+                composer_hash,
+                package_hash,
+                last_used: use_seq,
+            },
+        );
+    }
+    Ok(built)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeneratorOutput {
     pub code: i32,
@@ -325,7 +495,7 @@ pub fn execute(
         .replace('_', "-");
     match operation.as_str() {
         "analyze-commands" => {
-            let analyzer = match commands::CommandAnalyzer::new(&path(request, "target")?) {
+            let analyzer = match cached_command_analyzer(&path(request, "target")?) {
                 Ok(analyzer) => analyzer,
                 Err(error) => {
                     return GeneratorOutput::json(&object!({"error":error.to_string()}), 2);
@@ -420,6 +590,18 @@ pub fn execute(
             Ok(output)
         }
         "validate-skill-quality" => quality_route(request),
+        "partition-update-slices" => {
+            let target = ownership::resolve_target(&path(request, "target")?)?;
+            let manifest = ownership::load_manifest(&target)?;
+            let staging = ownership::resolve_target(&path(request, "staging")?)?;
+            if !staging.is_dir() {
+                return Err(RuntimeError::not_found("Staging directory not found"));
+            }
+            GeneratorOutput::json(
+                &coverage::partition_update_slices(&target, &staging, &manifest)?,
+                0,
+            )
+        }
         "validate-generated" => {
             let target = path(request, "target")?;
             let options = generated::GeneratedOptions {
@@ -450,6 +632,18 @@ pub fn execute(
                 runtime_contract: assets::runtime_contract(),
             };
             let errors = generated::validate(&options, services)?;
+            let want_stamp = field(request, "stamp_manifest").as_bool() == Some(true)
+                || flag(request, "stamp_manifest");
+            if errors.is_empty()
+                && want_stamp
+                && !flag(request, "read_only")
+                && options.target.join(ownership::MANIFEST).is_file()
+            {
+                ownership::stamp_manifest_if_needed(
+                    &options.target,
+                    optional(request, "stamp_slice").as_deref(),
+                )?;
+            }
             if flag(request, "json") {
                 let items: Vec<Violation> = errors
                     .iter()
@@ -623,13 +817,31 @@ fn ownership_route(request: &Value) -> Result<GeneratorOutput> {
                 if !staging.is_dir() {
                     return Err(RuntimeError::not_found("Staging directory not found"));
                 }
+                if flag(request, "partition") {
+                    GeneratorOutput::json(
+                        &coverage::partition_update_slices(&target, &staging, &manifest)?,
+                        0,
+                    )
+                } else {
+                    GeneratorOutput::json(
+                        &object!(ownership::classify_update(&target, &staging, &manifest)?),
+                        0,
+                    )
+                }
+            }
+            "partition" => {
+                let manifest = ownership::load_manifest(&target)?;
+                let staging = ownership::resolve_target(&path(request, "staging")?)?;
+                if !staging.is_dir() {
+                    return Err(RuntimeError::not_found("Staging directory not found"));
+                }
                 GeneratorOutput::json(
-                    &object!(ownership::classify_update(&target, &staging, &manifest)?),
+                    &coverage::partition_update_slices(&target, &staging, &manifest)?,
                     0,
                 )
             }
             _ => Err(RuntimeError::invalid(
-                "Ownership command must be manifest, refresh or classify",
+                "Ownership command must be manifest, refresh, classify or partition",
             )),
         }
     })();
@@ -851,8 +1063,10 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "infra-generator-routes-test-{}",
+                "infra-generator-routes-test-{}-{seq}",
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&path);
@@ -909,7 +1123,7 @@ mod tests {
                 decisions: object!({}),
                 generated_at: None,
             },
-            Some(BTreeMap::new()),
+            None,
         )
         .unwrap();
         ownership::write_manifest(&dir.0, &manifest).unwrap();
@@ -949,5 +1163,119 @@ mod tests {
         );
         assert_eq!(skeleton.code, "RUNTIME_SKELETON_MISSING");
         assert_eq!(skeleton.path.as_deref(), Some("specs/MANIFEST.md"));
+        let after = ownership::load_manifest(&dir.0).unwrap();
+        assert!(after.get("validation_stamps").is_none());
+    }
+
+    #[test]
+    fn cached_command_analyzer_reuses_entry_and_invalidates_on_racy_change() {
+        let dir = TempDir::new();
+        let ws = dir.0.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let pkg = ws.join("package.json");
+        std::fs::write(&pkg, r#"{"scripts":{"test":"phpunit"}}"#).unwrap();
+        let ws_canon = ownership::resolve_target(&ws).unwrap();
+
+        let _ = cached_command_analyzer(&ws).unwrap();
+        let first_count = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(first_count, 1);
+
+        let out = execute(
+            "analyze-commands",
+            &object!({"target": &ws, "command": ["npm run test"], "verification": true}),
+            &DummyServices,
+        )
+        .unwrap();
+        assert_eq!(out.code, 0);
+        let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            parsed["scripts"]["package:test"]["expanded_commands"][0],
+            "phpunit"
+        );
+        let reused_count = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(reused_count, 1);
+
+        // Mutate package.json within the 2s RACY_NS window (same size or same timestamp bucket).
+        std::fs::write(&pkg, r#"{"scripts":{"test":"pest   "}}"#).unwrap();
+        let rebuilt = cached_command_analyzer(&ws).unwrap();
+        let third_count = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(third_count, 2);
+        let analyzed = rebuilt.analyze("npm run test", true, None).unwrap();
+        assert_eq!(analyzed.expanded_commands, vec!["pest   "]);
+    }
+
+    #[test]
+    fn partition_update_slices_route_and_ownership_partition_separate_stamped_slices() {
+        let dir = TempDir::new();
+        let target = dir.0.join("target");
+        let staging = dir.0.join("staging");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(target.join("a.md"), b"same-content\n").unwrap();
+        std::fs::write(target.join("b.md"), b"old-content\n").unwrap();
+        std::fs::write(staging.join("a.md"), b"same-content\n").unwrap();
+        std::fs::write(staging.join("b.md"), b"new-content\n").unwrap();
+
+        let owned = vec!["a.md".to_string(), "b.md".to_string()];
+        let manifest = ownership::build_manifest(
+            &target,
+            &owned,
+            &ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-001".into(),
+                profile: "minimal".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: object!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        ownership::write_manifest(&target, &manifest).unwrap();
+        assert!(ownership::stamp_manifest_if_needed(&target, Some("wave3")).unwrap());
+        assert!(!ownership::stamp_manifest_if_needed(&target, Some("wave3")).unwrap());
+
+        let out = execute(
+            "partition-update-slices",
+            &object!({"target": &target, "staging": &staging}),
+            &DummyServices,
+        )
+        .unwrap();
+        assert_eq!(out.code, 0);
+        let partitioned: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(partitioned["skipped_unchanged"], object!(["a.md"]));
+        assert_eq!(partitioned["pending_slices"], object!(["b.md"]));
+
+        let via_ownership = execute(
+            "ownership",
+            &object!({
+                "command": "classify",
+                "target": &target,
+                "staging": &staging,
+                "partition": true,
+            }),
+            &DummyServices,
+        )
+        .unwrap();
+        assert_eq!(via_ownership.code, 0);
+        let parsed: Value = serde_json::from_slice(&via_ownership.stdout).unwrap();
+        assert_eq!(parsed, partitioned);
     }
 }

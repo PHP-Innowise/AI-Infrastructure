@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 infra-core = { path = "../infra-core" }
+infra-generator = { path = "../infra-generator" }
 infra-host = { path = "../infra-host" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order", "arbitrary_precision"] }

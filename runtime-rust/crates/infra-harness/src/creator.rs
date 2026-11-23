@@ -233,7 +233,23 @@ impl CreatorManager {
             "waiting_permissions": waiting_permissions,
         });
         if value["run"]["status"] == "preview" {
-            value["preview"] = files::preview(&value["run"], &self.root.join(&id))?;
+            let run_dir = self.root.join(&id);
+            value["preview"] = files::preview(&value["run"], &run_dir)?;
+            if value["run"]["operation"] == "update" {
+                let target = Path::new(value["run"]["target"].as_str().unwrap_or(""));
+                let staging = run_dir
+                    .join("agent")
+                    .join(files::TASK)
+                    .join("infra-generate-staging");
+                if staging.is_dir()
+                    && let Ok(manifest) = infra_generator::ownership::load_manifest(target)
+                    && let Ok(partition) = infra_generator::coverage::partition_update_slices(
+                        target, &staging, &manifest,
+                    )
+                {
+                    value["update_partition"] = partition;
+                }
+            }
         }
         Ok(value)
     }
@@ -337,6 +353,22 @@ impl CreatorManager {
             ) {
                 request["verified_scan_facts_sha256"] =
                     store::sha(serde_json::to_vec(&facts).unwrap_or_default().as_slice()).into();
+            }
+        } else if phase == "generate" && run["operation"] == "update" {
+            let target_path = Path::new(run["target"].as_str().unwrap_or(""));
+            let staging = directory
+                .join("agent")
+                .join(files::TASK)
+                .join("infra-generate-staging");
+            if staging.is_dir()
+                && let Ok(manifest) = infra_generator::ownership::load_manifest(target_path)
+                && let Ok(partition) = infra_generator::coverage::partition_update_slices(
+                    target_path,
+                    &staging,
+                    &manifest,
+                )
+            {
+                request["update_partition"] = partition;
             }
         }
         files::write(&directory, &format!("request-{nonce}.json"), &request)?;
@@ -785,6 +817,29 @@ pub(crate) fn write_verified_scan_facts(
         }
     }
     let existing_manifest = infra_generator::ownership::load_manifest(target).ok();
+    let mut validated_paths = Vec::new();
+    let mut stale_validation_stamps = Vec::new();
+    if let Some(stamps) = existing_manifest
+        .as_ref()
+        .and_then(|m| m.get("validation_stamps"))
+        .and_then(Value::as_object)
+        && let Ok(mut pub_files) = infra_core::bank::publication::PublicationFiles::new(target)
+    {
+        for (rel, entry) in stamps {
+            let expected = entry.get("sha256").and_then(Value::as_str);
+            let live = infra_generator::ownership::normalize(rel)
+                .ok()
+                .and_then(|clean| pub_files.read(&clean, files::LIMIT).ok().flatten())
+                .map(|bytes| infra_core::query::sha256(&bytes));
+            if expected.is_some() && expected == live.as_deref() {
+                validated_paths.push(rel.clone());
+            } else {
+                stale_validation_stamps.push(rel.clone());
+            }
+        }
+    }
+    validated_paths.sort();
+    stale_validation_stamps.sort();
     let validation_stamp_count = existing_manifest
         .as_ref()
         .and_then(|m| m.get("validation_stamps"))
@@ -801,6 +856,8 @@ pub(crate) fn write_verified_scan_facts(
         "gate_probes": probe_results,
         "existing_manifest_present": existing_manifest.is_some(),
         "validation_stamp_count": validation_stamp_count,
+        "validated_paths": validated_paths,
+        "stale_validation_stamps": stale_validation_stamps,
         "generated_at": store::now(),
     });
     let task_dir = directory.join("agent").join(files::TASK);
@@ -1221,6 +1278,40 @@ mod tests {
                 .iter()
                 .any(|s| s == "composer.json")
         );
+        assert_eq!(task_facts["validated_paths"], json!([]));
+        assert_eq!(task_facts["stale_validation_stamps"], json!([]));
+
+        // Write a stamped `.infra-manifest.json` on target -> scan facts detect valid vs stale stamps.
+        std::fs::write(target_path.join("AGENTS.md"), b"# Valid policy\n").unwrap();
+        let owned = vec!["AGENTS.md".to_string()];
+        let manifest = infra_generator::ownership::build_manifest(
+            &target_path,
+            &owned,
+            &infra_generator::ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-001".into(),
+                profile: "minimal".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: json!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        infra_generator::ownership::write_manifest(&target_path, &manifest).unwrap();
+        infra_generator::ownership::stamp_manifest_if_needed(&target_path, Some("generate"))
+            .unwrap();
+        let facts_valid = write_verified_scan_facts(&target_path, &run_dir, "update").unwrap();
+        assert_eq!(facts_valid["validated_paths"], json!(["AGENTS.md"]));
+        assert_eq!(facts_valid["stale_validation_stamps"], json!([]));
+
+        // Mutating AGENTS.md invalidates its stamp cleanly in verified_scan_facts.
+        std::fs::write(target_path.join("AGENTS.md"), b"# Modified policy\n").unwrap();
+        let facts_stale = write_verified_scan_facts(&target_path, &run_dir, "update").unwrap();
+        assert_eq!(facts_stale["validated_paths"], json!([]));
+        assert_eq!(facts_stale["stale_validation_stamps"], json!(["AGENTS.md"]));
 
         let _ = sessions.close();
         let _ = sessions.wait_closed().await;

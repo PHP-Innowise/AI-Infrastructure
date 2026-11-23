@@ -4,9 +4,159 @@ use infra_core::{BankService, Result, Roots, RuntimeContext, RuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+const DISCOVERY_RACY_NS: i128 = 2_000_000_000;
+const SOURCE_DIGEST_CACHE_CAP: usize = 2048;
+
+#[derive(Clone, Debug)]
+struct CachedSourceDigest {
+    len: u64,
+    mtime_ns: i128,
+    sha256: String,
+    settled: bool,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct SourceDigestCacheState {
+    seq: u64,
+    entries: HashMap<(PathBuf, String), CachedSourceDigest>,
+}
+
+fn source_digest_cache() -> &'static Mutex<SourceDigestCacheState> {
+    static CACHE: OnceLock<Mutex<SourceDigestCacheState>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SourceDigestCacheState::default()))
+}
+
+#[cfg(test)]
+fn source_digest_read_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn discovery_now_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+fn stat_confined_regular_file(root: &Path, rel: &str) -> Option<(PathBuf, u64, i128)> {
+    let root_canon = infra_core::fs::canonicalize(root).ok()?;
+    let mut cur = root_canon.clone();
+    let parts: Vec<&str> = rel.split('/').collect();
+    for (idx, part) in parts.iter().enumerate() {
+        cur.push(part);
+        let meta = std::fs::symlink_metadata(&cur).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+        let is_last = idx + 1 == parts.len();
+        if is_last {
+            if !meta.is_file() {
+                return None;
+            }
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .and_then(|d| i128::try_from(d.as_nanos()).ok())?;
+            return Some((root_canon, meta.len(), mtime_ns));
+        } else if !meta.is_dir() {
+            return None;
+        }
+    }
+    None
+}
+
+fn read_source_digest(
+    root: &Path,
+    name: &str,
+    digests: &mut BTreeMap<String, String>,
+    used: &mut usize,
+    now_ns: i128,
+) -> Result<String> {
+    relative(name)?;
+    if let Some(existing) = digests.get(name) {
+        return Ok(existing.clone());
+    }
+    let limit = MAX_FILE.min(MAX_ROOT.saturating_sub(*used));
+    let stat = stat_confined_regular_file(root, name);
+    if let Some((ref root_canon, len, mtime_ns)) = stat
+        && len <= limit as u64
+        && mtime_ns > 0
+        && now_ns > DISCOVERY_RACY_NS
+        && mtime_ns <= now_ns - DISCOVERY_RACY_NS
+        && let Ok(mut cache) = source_digest_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        let key = (root_canon.clone(), name.to_owned());
+        if let Some(hit) = cache.entries.get_mut(&key)
+            && hit.settled
+            && hit.len == len
+            && hit.mtime_ns == mtime_ns
+        {
+            hit.last_used = seq;
+            let sha = hit.sha256.clone();
+            drop(cache);
+            *used += len as usize;
+            digests.insert(name.into(), sha.clone());
+            return Ok(sha);
+        }
+    }
+
+    let raw = read_file(root, name, limit)?;
+    #[cfg(test)]
+    if let Ok(root_canon) = infra_core::fs::canonicalize(root)
+        && let Ok(mut counts) = source_digest_read_counts().lock()
+    {
+        *counts.entry(root_canon.join(name)).or_insert(0) += 1;
+    }
+    let sha = digest(&raw);
+    *used += raw.len();
+    digests.insert(name.into(), sha.clone());
+
+    if let Some((root_canon, len, mtime_ns)) = stat_confined_regular_file(root, name)
+        && len as usize == raw.len()
+        && mtime_ns > 0
+        && now_ns > DISCOVERY_RACY_NS
+        && mtime_ns <= now_ns - DISCOVERY_RACY_NS
+        && let Ok(mut cache) = source_digest_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        let key = (root_canon, name.to_owned());
+        if cache.entries.len() >= SOURCE_DIGEST_CACHE_CAP
+            && !cache.entries.contains_key(&key)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(
+            key,
+            CachedSourceDigest {
+                len,
+                mtime_ns,
+                sha256: sha.clone(),
+                settled: true,
+                last_used: seq,
+            },
+        );
+    }
+
+    Ok(sha)
+}
 
 pub const MAX_FILES: usize = 120;
 pub const MAX_FILE: usize = 64 * 1024;
@@ -65,7 +215,9 @@ fn native_memory(
     name: &str,
     raw: &[u8],
     cache: &mut BTreeMap<String, Vec<u8>>,
+    digests: &mut BTreeMap<String, String>,
     used: &mut usize,
+    now_ns: i128,
 ) -> Result<()> {
     let content = std::str::from_utf8(raw).map_err(|_| fail("Memory is not UTF-8"))?;
     let text = content.replace("\r\n", "\n").replace('\r', "\n");
@@ -87,6 +239,7 @@ fn native_memory(
         root: &Path,
         name: &str,
         cache: &mut BTreeMap<String, Vec<u8>>,
+        digests: &mut BTreeMap<String, String>,
         used: &mut usize,
     ) -> Result<Vec<u8>> {
         if let Some(raw) = cache.get(name) {
@@ -95,10 +248,17 @@ fn native_memory(
         let limit = MAX_FILE.min(MAX_ROOT.saturating_sub(*used));
         let raw = read_file(root, name, limit)?;
         *used += raw.len();
+        digests.insert(name.into(), digest(&raw));
         cache.insert(name.into(), raw.clone());
         Ok(raw)
     }
-    let config = match read(root, "project-brain/config/runtime.json", cache, used) {
+    let config = match read(
+        root,
+        "project-brain/config/runtime.json",
+        cache,
+        digests,
+        used,
+    ) {
         Ok(raw) => parse_json(&raw, MAX_FILE)?,
         Err(error) if error.kind == infra_core::ErrorKind::NotFound => object!({}),
         Err(error) => return Err(error),
@@ -145,7 +305,8 @@ fn native_memory(
         if !sources.contains(&path)
             || !seen.insert(path.clone())
             || !hex(string(&fingerprint["sha256"]), 64)
-            || digest(&read(root, &path, cache, used)?) != string(&fingerprint["sha256"])
+            || read_source_digest(root, &path, digests, used, now_ns)?
+                != string(&fingerprint["sha256"])
         {
             return Err(fail("Stale or invalid memory evidence"));
         }
@@ -162,6 +323,13 @@ fn native_memory(
     Ok(())
 }
 pub fn collect(root: &Path, excluded: &[PathBuf]) -> Result<(BTreeMap<String, Evidence>, Value)> {
+    collect_at(root, excluded, discovery_now_ns())
+}
+fn collect_at(
+    root: &Path,
+    excluded: &[PathBuf],
+    now_ns: i128,
+) -> Result<(BTreeMap<String, Evidence>, Value)> {
     let mut guard = PublicationFiles::new(root)?;
     let identity = guard.root_identity();
     let (mut candidates, mut omitted) = guard.walk_files(12, 12000, |name| {
@@ -241,6 +409,7 @@ pub fn collect(root: &Path, excluded: &[PathBuf]) -> Result<(BTreeMap<String, Ev
     let mut evidence = BTreeMap::new();
     let mut used = 0;
     let mut memory_cache = BTreeMap::new();
+    let mut memory_digests = BTreeMap::new();
     let mut memory_used = 0;
     for name in candidates {
         if evidence.len() >= MAX_FILES {
@@ -257,7 +426,15 @@ pub fn collect(root: &Path, excluded: &[PathBuf]) -> Result<(BTreeMap<String, Ev
             }
             let kind = kind_for(&name);
             if kind == "memory" {
-                native_memory(root, &name, &raw, &mut memory_cache, &mut memory_used)?;
+                native_memory(
+                    root,
+                    &name,
+                    &raw,
+                    &mut memory_cache,
+                    &mut memory_digests,
+                    &mut memory_used,
+                    now_ns,
+                )?;
             }
             if used + raw.len() > MAX_ROOT {
                 return Err(fail("Root evidence limit"));
@@ -277,7 +454,7 @@ pub fn collect(root: &Path, excluded: &[PathBuf]) -> Result<(BTreeMap<String, Ev
         }
     }
     guard.check()?;
-    let signature = object!({"identity":[identity.0,identity.1],"files":evidence.iter().map(|(name,value)|object!([name,value.sha256])).collect::<Vec<_>>(),"memory_inputs":memory_cache.iter().map(|(name,raw)|object!([name,digest(raw)])).collect::<Vec<_>>(),"omitted":omitted});
+    let signature = object!({"identity":[identity.0,identity.1],"files":evidence.iter().map(|(name,value)|object!([name,value.sha256])).collect::<Vec<_>>(),"memory_inputs":memory_digests.iter().map(|(name,sha)|object!([name,sha])).collect::<Vec<_>>(),"omitted":omitted});
     Ok((evidence, signature))
 }
 pub fn validate_draft(value: &Value) -> Result<()> {
@@ -859,4 +1036,115 @@ pub fn get(state: &State, sid: &str) -> Result<Value> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_digests_stat_cache_respects_racy_ns_and_skips_disk_reads_when_settled() {
+        let dir =
+            std::env::temp_dir().join(format!("infra-sys-discovery-racy-{}", uuid::Uuid::new_v4()));
+        let docs = dir.join("docs");
+        let chunks = dir.join("memory-bank/chunks");
+        let bank_cfg = dir.join("project-brain/config");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&chunks).unwrap();
+        std::fs::create_dir_all(&bank_cfg).unwrap();
+
+        let src_rel = "docs/spec.md";
+        let src_path = dir.join(src_rel);
+        std::fs::write(&src_path, b"spec-v1\n").unwrap();
+        let src_sha = digest(b"spec-v1\n");
+        let (_root_c, _len, mtime_ns) = stat_confined_regular_file(&dir, src_rel).unwrap();
+
+        let meta = object!({
+            "schema_version": 1,
+            "id": "MEM-20261123-00000001-spec",
+            "title": "Spec",
+            "status": "active",
+            "privacy": "public",
+            "authority": "verified",
+            "confidence": "high",
+            "tags": ["arch"],
+            "sources": [src_rel],
+            "source_digests": [{"path": src_rel, "sha256": src_sha}],
+            "review_after": "2099-01-01",
+            "valid_to": null,
+            "superseded_by": null,
+        });
+        std::fs::write(
+            chunks.join("MEM-20261123-00000001-spec.md"),
+            format!(
+                "---\n{}\n---\nSpec body\n",
+                serde_json::to_string_pretty(&meta).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let src_canon = infra_core::fs::canonicalize(&dir).unwrap().join(src_rel);
+        let read_count = || {
+            source_digest_read_counts()
+                .lock()
+                .unwrap()
+                .get(&src_canon)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        let mut digests = BTreeMap::new();
+        let mut used = 0;
+
+        // Inside DISCOVERY_RACY_NS -> always hashes from disk, never populates settled cache.
+        let racy_now = mtime_ns + DISCOVERY_RACY_NS - 1;
+        assert_eq!(
+            read_source_digest(&dir, src_rel, &mut digests, &mut used, racy_now).unwrap(),
+            src_sha
+        );
+        assert_eq!(read_count(), 1);
+        digests.clear();
+        used = 0;
+        assert_eq!(
+            read_source_digest(&dir, src_rel, &mut digests, &mut used, racy_now).unwrap(),
+            src_sha
+        );
+        assert_eq!(read_count(), 2);
+
+        // Settled beyond DISCOVERY_RACY_NS -> first call warms cache, second skips disk read.
+        let settled_now = mtime_ns + DISCOVERY_RACY_NS + 100;
+        digests.clear();
+        used = 0;
+        assert_eq!(
+            read_source_digest(&dir, src_rel, &mut digests, &mut used, settled_now).unwrap(),
+            src_sha
+        );
+        assert_eq!(read_count(), 3);
+        digests.clear();
+        used = 0;
+        assert_eq!(
+            read_source_digest(&dir, src_rel, &mut digests, &mut used, settled_now + 5).unwrap(),
+            src_sha
+        );
+        assert_eq!(read_count(), 3);
+        assert_eq!(used, b"spec-v1\n".len());
+
+        // Same-length mutation invalidates immediately via mtime + RACY_NS guard.
+        std::fs::write(&src_path, b"spec-v2\n").unwrap();
+        let (_root_c2, _len2, mtime2) = stat_confined_regular_file(&dir, src_rel).unwrap();
+        digests.clear();
+        used = 0;
+        let d2 = read_source_digest(
+            &dir,
+            src_rel,
+            &mut digests,
+            &mut used,
+            mtime2 + DISCOVERY_RACY_NS + 100,
+        )
+        .unwrap();
+        assert_eq!(d2, digest(b"spec-v2\n"));
+        assert_eq!(read_count(), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

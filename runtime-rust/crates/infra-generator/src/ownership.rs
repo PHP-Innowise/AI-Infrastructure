@@ -537,6 +537,7 @@ pub fn stamp_validated_artifacts(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    existing.retain(|path, _| files.contains_key(path));
     let verified_at = infra_core::domain::utc_now();
     for (rel, digest) in stamps {
         let rel = normalize(rel)?;
@@ -561,6 +562,41 @@ pub fn stamp_validated_artifacts(
     }
     manifest["validation_stamps"] = Value::Object(existing);
     Ok(())
+}
+
+/// Stamps every manifest-owned artifact in `<target>/.infra-manifest.json` after
+/// `validate-generated` passes, avoiding rewrites if matching stamps already exist.
+pub fn stamp_manifest_if_needed(target: &Path, slice_tag: Option<&str>) -> Result<bool> {
+    let mut manifest = load_manifest(target)?;
+    let files = strings_map(&manifest["files"])?;
+    if files.is_empty() {
+        return Ok(false);
+    }
+    let normalized_tag = slice_tag.filter(|t| !t.trim().is_empty());
+    let already_stamped = manifest
+        .get("validation_stamps")
+        .and_then(Value::as_object)
+        .is_some_and(|existing| {
+            existing.len() == files.len()
+                && files.iter().all(|(rel, digest)| {
+                    existing.get(rel).is_some_and(|entry| {
+                        entry.get("sha256").and_then(Value::as_str) == Some(digest.as_str())
+                            && entry
+                                .get("verified_at")
+                                .and_then(Value::as_str)
+                                .is_some_and(|ts| !ts.trim().is_empty())
+                            && normalized_tag.is_none_or(|tag| {
+                                entry.get("slice").and_then(Value::as_str) == Some(tag)
+                            })
+                    })
+                })
+        });
+    if already_stamped {
+        return Ok(false);
+    }
+    stamp_validated_artifacts(&mut manifest, &files, normalized_tag)?;
+    write_manifest(target, &manifest)?;
+    Ok(true)
 }
 
 /// Returns owned relative paths whose on-disk target hash, staged proposal hash, and

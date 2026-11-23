@@ -11,12 +11,13 @@ use infra_generator::{NativeGateServices, execute as gate};
 use infra_host::permission::PermissionMode;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub struct CreatorRunner {
     pub store: SessionStore,
@@ -567,13 +568,261 @@ fn format_repair_prompt(base_prompt: String, repair: Option<&RepairContext>) -> 
     )
 }
 
+const CREATOR_HASH_RACY_NS: i128 = 2_000_000_000;
+const CREATOR_FILE_DIGEST_CACHE_CAP: usize = 4096;
+const CREATOR_GATE_SQLITE_CAP: i64 = 4096;
+
+#[derive(Clone, Debug)]
+struct CachedFileDigest {
+    len: u64,
+    mtime_ns: i128,
+    sha256: String,
+    settled: bool,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct CreatorFileDigestCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedFileDigest>,
+}
+
+fn creator_file_digest_cache() -> &'static Mutex<CreatorFileDigestCache> {
+    static CACHE: OnceLock<Mutex<CreatorFileDigestCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CreatorFileDigestCache::default()))
+}
+
+#[cfg(test)]
+fn creator_hash_read_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn current_unix_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+fn meta_mtime_ns(meta: &std::fs::Metadata) -> Option<i128> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+
+fn current_exe_fingerprint() -> &'static str {
+    static EXE_FP: OnceLock<String> = OnceLock::new();
+    EXE_FP.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::symlink_metadata(&p).ok().map(|m| (p, m)))
+            .map(|(p, m)| {
+                let mtime = meta_mtime_ns(&m).unwrap_or(0);
+                infra_core::query::sha256(
+                    format!("{}:{}:{mtime}", p.to_string_lossy(), m.len()).as_bytes(),
+                )
+            })
+            .unwrap_or_else(|| "unknown-exe".into())
+    })
+}
+
+fn gate_cache_disabled_flag(val: Option<&str>) -> bool {
+    val.is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn gate_cache_disabled() -> bool {
+    gate_cache_disabled_flag(std::env::var("HARNESS_DISABLE_CHECK_CACHE").ok().as_deref())
+}
+
+fn persistent_gate_cache_path(state: &Path) -> PathBuf {
+    state
+        .join("cache")
+        .join("creator")
+        .join("verified_gates.sqlite3")
+}
+
+fn ensure_verified_gate_db(db_path: &Path) -> Result<rusqlite::Connection> {
+    if let Some(parent) = db_path.parent() {
+        infra_core::fs::ensure_directory(parent, true)?;
+    }
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_secs(2))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS creator_verified_gates(
+            op TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (op, input_digest)
+        );
+        CREATE INDEX IF NOT EXISTS idx_creator_verified_gates_updated
+            ON creator_verified_gates(updated_at);",
+    )?;
+    Ok(conn)
+}
+
 #[derive(Default)]
 struct VerifiedGateCache {
     passed: BTreeMap<String, String>,
     reused_count: usize,
+    db_path: Option<PathBuf>,
+}
+
+impl VerifiedGateCache {
+    fn open(db_path: Option<PathBuf>) -> Self {
+        Self {
+            passed: BTreeMap::new(),
+            reused_count: 0,
+            db_path,
+        }
+    }
+
+    fn contains(&mut self, op: &str, input_digest: &str) -> bool {
+        if gate_cache_disabled() {
+            return false;
+        }
+        if self
+            .passed
+            .get(op)
+            .is_some_and(|stored| stored == input_digest)
+        {
+            return true;
+        }
+        let Some(db_path) = &self.db_path else {
+            return false;
+        };
+        if !db_path.is_file() {
+            return false;
+        }
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return false;
+        };
+        let found = conn
+            .query_row(
+                "SELECT 1 FROM creator_verified_gates WHERE op=?1 AND input_digest=?2 LIMIT 1",
+                rusqlite::params![op, input_digest],
+                |_| Ok(1i64),
+            )
+            .is_ok();
+        if found {
+            self.passed.insert(op.to_owned(), input_digest.to_owned());
+        }
+        found
+    }
+
+    fn record(&mut self, op: &str, input_digest: String) {
+        if gate_cache_disabled() {
+            return;
+        }
+        self.passed.insert(op.to_owned(), input_digest.clone());
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        if let Ok(conn) = ensure_verified_gate_db(db_path) {
+            let now_ts = chrono::Utc::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO creator_verified_gates(op, input_digest, updated_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![op, &input_digest, &now_ts],
+            );
+            let _ = conn.execute(
+                "DELETE FROM creator_verified_gates WHERE rowid IN (
+                    SELECT rowid FROM creator_verified_gates
+                    ORDER BY updated_at DESC, rowid DESC
+                    LIMIT -1 OFFSET ?1
+                )",
+                rusqlite::params![CREATOR_GATE_SQLITE_CAP],
+            );
+        }
+    }
+
+    fn invalidate(&mut self, op: &str, input_digest: &str) {
+        self.passed.remove(op);
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        if db_path.is_file()
+            && let Ok(conn) = ensure_verified_gate_db(db_path)
+        {
+            let _ = conn.execute(
+                "DELETE FROM creator_verified_gates WHERE op=?1 AND input_digest=?2",
+                rusqlite::params![op, input_digest],
+            );
+        }
+    }
+}
+
+fn cached_file_sha256(path: &Path, len: u64, mtime_ns: Option<i128>, now_ns: i128) -> String {
+    let key = infra_core::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let settled = mtime_ns.is_some_and(|m| {
+        m > 0 && now_ns > CREATOR_HASH_RACY_NS && m <= now_ns - CREATOR_HASH_RACY_NS
+    });
+    if settled
+        && let Some(mtime) = mtime_ns
+        && let Ok(mut cache) = creator_file_digest_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if let Some(hit) = cache.entries.get_mut(&key)
+            && hit.settled
+            && hit.len == len
+            && hit.mtime_ns == mtime
+        {
+            hit.last_used = seq;
+            return hit.sha256.clone();
+        }
+    }
+
+    let sha = std::fs::read(path)
+        .map(|b| infra_core::query::sha256(&b))
+        .unwrap_or_default();
+    #[cfg(test)]
+    if let Ok(mut counts) = creator_hash_read_counts().lock() {
+        *counts.entry(key.clone()).or_insert(0) += 1;
+    }
+
+    if settled
+        && let Some(mtime) = mtime_ns
+        && std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|m| m.len() == len && meta_mtime_ns(&m) == Some(mtime))
+        && let Ok(mut cache) = creator_file_digest_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if cache.entries.len() >= CREATOR_FILE_DIGEST_CACHE_CAP
+            && !cache.entries.contains_key(&key)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(
+            key,
+            CachedFileDigest {
+                len,
+                mtime_ns: mtime,
+                sha256: sha.clone(),
+                settled: true,
+                last_used: seq,
+            },
+        );
+    }
+    sha
 }
 
 fn hash_path_entry(path: &Path) -> Value {
+    hash_path_entry_at(path, current_unix_ns())
+}
+
+fn hash_path_entry_at(path: &Path, now_ns: i128) -> Value {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return json!({"exists": false});
     };
@@ -581,48 +830,76 @@ fn hash_path_entry(path: &Path) -> Value {
         return json!({"linked": true});
     }
     if meta.is_file() {
-        let sha = std::fs::read(path)
-            .map(|b| infra_core::query::sha256(&b))
-            .unwrap_or_default();
+        let mtime = meta_mtime_ns(&meta);
+        let sha = cached_file_sha256(path, meta.len(), mtime, now_ns);
         return json!({"file": true, "len": meta.len(), "sha256": sha});
     }
     if meta.is_dir() {
         let mut children = BTreeMap::new();
         let mut stack = vec![path.to_path_buf()];
+        let mut truncated = false;
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            for entry in entries.flatten().take(1024) {
+            let mut sorted: Vec<_> = entries.flatten().collect();
+            sorted.sort_by_key(|e| e.file_name());
+            for entry in sorted {
+                let name = entry.file_name();
+                if matches!(
+                    name.to_string_lossy().as_ref(),
+                    ".git" | "vendor" | "node_modules"
+                ) {
+                    continue;
+                }
+                if children.len() >= 1024 {
+                    truncated = true;
+                    break;
+                }
                 let p = entry.path();
                 let Ok(m) = std::fs::symlink_metadata(&p) else {
                     continue;
                 };
                 if infra_core::fs::linked(&m) {
-                    continue;
-                }
-                if m.is_dir() {
-                    if children.len() < 1024 {
-                        stack.push(p);
-                    }
-                } else if m.is_file() && children.len() < 1024 {
                     let rel = p
                         .strip_prefix(path)
                         .map(|r| r.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_default();
-                    let sha = std::fs::read(&p)
-                        .map(|b| infra_core::query::sha256(&b))
+                    children.insert(rel, json!({"linked": true}));
+                    continue;
+                }
+                if m.is_dir() {
+                    stack.push(p);
+                } else if m.is_file() {
+                    let rel = p
+                        .strip_prefix(path)
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_default();
+                    let mtime = meta_mtime_ns(&m);
+                    let sha = cached_file_sha256(&p, m.len(), mtime, now_ns);
                     children.insert(rel, json!([m.len(), sha]));
                 }
             }
+            if truncated {
+                break;
+            }
         }
-        return json!({"dir": children});
+        return if truncated {
+            json!({"dir": children, "truncated": true})
+        } else {
+            json!({"dir": children})
+        };
     }
     json!({"other": true})
 }
 
-fn gate_input_digest(op: &str, data: &Value, task: &Path, request: &Value) -> String {
+fn gate_input_digest(
+    op: &str,
+    data: &Value,
+    task: &Path,
+    request: &Value,
+    source_root: &Path,
+) -> String {
     let mut parts = BTreeMap::<String, Value>::new();
     for key in [
         "plan",
@@ -669,6 +946,11 @@ fn gate_input_digest(op: &str, data: &Value, task: &Path, request: &Value) -> St
         );
     }
     parts.insert("approved_hashes".into(), request["approved"].clone());
+    parts.insert(
+        "source_root".into(),
+        json!(source_root.to_string_lossy().as_ref()),
+    );
+    parts.insert("exe_fp".into(), json!(current_exe_fingerprint()));
     infra_core::query::sha256(json!({"op": op, "parts": parts}).to_string().as_bytes())
 }
 
@@ -680,7 +962,9 @@ impl CreatorRunner {
         installed: bool,
         emit: &Event,
     ) -> Result<std::result::Result<(), VerifyFailure>> {
-        self.verify_structured_with_cache(request, generated, installed, emit, None)
+        let mut cache =
+            VerifiedGateCache::open(Some(persistent_gate_cache_path(&self.store.state)));
+        self.verify_structured_with_cache(request, generated, installed, emit, Some(&mut cache))
     }
 
     fn verify_structured_with_cache(
@@ -699,6 +983,15 @@ impl CreatorRunner {
         let registry = self.source.join(
             "Infrastructure-Creator/.agents/skills/skill-forge/references/candidate-registry.json",
         );
+        let stamp_manifest = request
+            .get("stamp_manifest")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let stamp_slice = if request.get("operation").and_then(Value::as_str) == Some("update") {
+            "update"
+        } else {
+            "generate"
+        };
         let safe_gates = ValidationGates {
             inner: self.gates.as_ref(),
             base: directory.clone(),
@@ -708,9 +1001,9 @@ impl CreatorRunner {
         let mut run = |op: &str,
                        mut data: Value|
          -> Result<std::result::Result<(), VerifyFailure>> {
-            let input_digest = gate_input_digest(op, &data, &task, request);
+            let input_digest = gate_input_digest(op, &data, &task, request, &self.source);
             if let Some(c) = cache.as_deref_mut()
-                && c.passed.get(op) == Some(&input_digest)
+                && c.contains(op, &input_digest)
             {
                 c.reused_count += 1;
                 emit(
@@ -721,6 +1014,10 @@ impl CreatorRunner {
             emit(json!({"kind":"status","text":format!("Checking {op}")}))?;
             if let Some(obj) = data.as_object_mut() {
                 obj.insert("json".into(), Value::Bool(true));
+                if op == "validate-generated" {
+                    obj.insert("stamp_manifest".into(), Value::Bool(stamp_manifest));
+                    obj.insert("stamp_slice".into(), Value::String(stamp_slice.into()));
+                }
             }
             let result = gate(op, &data, &safe_gates)?;
             for raw in [&result.stdout, &result.stderr] {
@@ -732,7 +1029,7 @@ impl CreatorRunner {
             }
             if result.code != 0 {
                 if let Some(c) = cache.as_deref_mut() {
-                    c.passed.remove(op);
+                    c.invalidate(op, &input_digest);
                 }
                 let (error_count, summary, diagnostics) =
                     parse_gate_diagnostics(op, &result.stdout, &result.stderr);
@@ -745,7 +1042,12 @@ impl CreatorRunner {
                 }));
             }
             if let Some(c) = cache.as_deref_mut() {
-                c.passed.insert(op.to_owned(), input_digest);
+                let recorded_digest = if op == "validate-generated" && stamp_manifest {
+                    gate_input_digest(op, &data, &task, request, &self.source)
+                } else {
+                    input_digest
+                };
+                c.record(op, recorded_digest);
             }
             Ok(Ok(()))
         };
@@ -882,13 +1184,51 @@ impl CreatorRunner {
             Ok(current)
         };
         fresh()?;
-        self.verify(request, true, false, emit)?;
+        let mut pre_publish_request = request.clone();
+        if let Some(obj) = pre_publish_request.as_object_mut() {
+            obj.insert("stamp_manifest".into(), Value::Bool(false));
+        }
+        self.verify(&pre_publish_request, true, false, emit)?;
         let current = fresh()?;
         let paths = files::texts(&current["paths"])?;
         let removals = files::texts(&current["removals"])?;
         let watch = files::texts(&current["watched"])?;
         infra_generator::publication::verify_plan_ownership(&target, &staging, &paths, &removals)?;
-        let all = paths.iter().chain(&removals).cloned().collect::<Vec<_>>();
+        let publish_paths = if target.join(infra_generator::ownership::MANIFEST).is_file()
+            && let Ok(target_manifest) = infra_generator::ownership::load_manifest(&target)
+            && let Ok(partition) = infra_generator::coverage::partition_update_slices(
+                &target,
+                &staging,
+                &target_manifest,
+            ) {
+            let skipped: BTreeSet<String> = partition["skipped_unchanged"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|p| *p != infra_generator::ownership::MANIFEST)
+                .filter(|p| current["before"][*p]["mode"] == current["payloads"][*p]["mode"])
+                .map(str::to_owned)
+                .collect();
+            if !skipped.is_empty() {
+                emit(json!({
+                    "kind": "status",
+                    "text": format!("Skipping {} unchanged verified update slice(s).", skipped.len())
+                }))?;
+            }
+            paths
+                .iter()
+                .filter(|p| !skipped.contains(p.as_str()))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            paths.clone()
+        };
+        let all = publish_paths
+            .iter()
+            .chain(&removals)
+            .cloned()
+            .collect::<Vec<_>>();
         let snapshot = infra_generator::publication::build_snapshot(&target, &all, &watch)?;
         fresh()?;
 
@@ -899,7 +1239,7 @@ impl CreatorRunner {
             infra_generator::publication::publish(
                 &target,
                 &staging,
-                &paths,
+                &publish_paths,
                 &snapshot,
                 &directory.join("journal"),
                 &removals,
@@ -1146,7 +1486,8 @@ impl CreatorRunner {
         let max_seconds = request["budgets"]["seconds"].as_u64();
         let mut repair: Option<RepairContext> = None;
         let mut repair_rounds = 0usize;
-        let mut gate_cache = VerifiedGateCache::default();
+        let mut gate_cache =
+            VerifiedGateCache::open(Some(persistent_gate_cache_path(&self.store.state)));
         loop {
             let output_limited = match self
                 .agent(
@@ -1651,12 +1992,339 @@ mod tests {
         std::fs::write(&registry, b"{}").unwrap();
         let data = json!({"plan": &plan, "review": &review, "registry": &registry});
         let req = json!({"approved": {}});
-        let d1 = gate_input_digest("validate-plan-review", &data, &task, &req);
-        let d2 = gate_input_digest("validate-plan-review", &data, &task, &req);
+        let d1 = gate_input_digest("validate-plan-review", &data, &task, &req, &target);
+        let d2 = gate_input_digest("validate-plan-review", &data, &task, &req, &target);
         assert_eq!(d1, d2);
         std::fs::write(&review, b"{\"ok\":false}").unwrap();
-        let d3 = gate_input_digest("validate-plan-review", &data, &task, &req);
+        let d3 = gate_input_digest("validate-plan-review", &data, &task, &req, &target);
         assert_ne!(d1, d3);
+        assert!(gate_cache_disabled_flag(Some("1")));
+        assert!(!gate_cache_disabled_flag(None));
+    }
+
+    #[test]
+    fn hash_path_entry_respects_racy_ns_and_skips_file_reads_when_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let a = root.join("AGENTS.md");
+        let b = root.join("SKILL.md");
+        std::fs::write(&a, b"policy-v1\n").unwrap();
+        std::fs::write(&b, b"skill-v1\n").unwrap();
+        let mtime = meta_mtime_ns(&std::fs::symlink_metadata(&a).unwrap()).unwrap();
+        let count_a = || {
+            creator_hash_read_counts()
+                .lock()
+                .unwrap()
+                .get(&a)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        // Inside CREATOR_HASH_RACY_NS: always reads disk, never trusts stat cache.
+        let racy_now = mtime + CREATOR_HASH_RACY_NS - 1;
+        let _ = hash_path_entry_at(&root, racy_now);
+        assert_eq!(count_a(), 1);
+        let _ = hash_path_entry_at(&root, racy_now);
+        assert_eq!(count_a(), 2);
+
+        // Settled beyond CREATOR_HASH_RACY_NS: warms once, then reuses via stat without reading file.
+        let settled_now = mtime + CREATOR_HASH_RACY_NS + 100;
+        let v1 = hash_path_entry_at(&root, settled_now);
+        assert_eq!(count_a(), 3);
+        let v2 = hash_path_entry_at(&root, settled_now + 10);
+        assert_eq!(count_a(), 3);
+        assert_eq!(v1, v2);
+
+        // Editing AGENTS.md changes mtime/len -> invalidates stat cache and updates digest.
+        std::fs::write(&a, b"policy-v2-updated\n").unwrap();
+        let mtime2 = meta_mtime_ns(&std::fs::symlink_metadata(&a).unwrap()).unwrap();
+        let v3 = hash_path_entry_at(&root, mtime2 + CREATOR_HASH_RACY_NS + 100);
+        assert_eq!(count_a(), 4);
+        assert_ne!(v1, v3);
+    }
+
+    #[test]
+    fn verified_gate_cache_persists_across_restarts_and_skips_unchanged_update_slices() {
+        struct Stub;
+        impl NativeGateServices for Stub {
+            fn validate_host(
+                &self,
+                _: &Path,
+                _: &Path,
+                _: &str,
+                _: &BTreeMap<String, String>,
+            ) -> infra_core::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn runtime_command(
+                &self,
+                _: &Path,
+                _: &[String],
+                _: std::time::Duration,
+            ) -> infra_core::Result<infra_generator::NativeOutput> {
+                Ok(infra_generator::NativeOutput {
+                    code: 0,
+                    stdout: b"{}".to_vec(),
+                    stderr: vec![],
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let state = root.join("state");
+        let source = root.join("source");
+        let target = root.join("target");
+        let run_dir = state.join("creator").join("run1");
+        let task = run_dir.join("agent").join(files::TASK);
+        let staging = task.join("infra-generate-staging");
+        std::fs::create_dir_all(
+            source.join("Infrastructure-Creator/.agents/skills/skill-forge/references"),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("Infrastructure-Creator/.agents/skills/skill-forge/references/candidate-registry.json"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        // Populate required report & publication plan artifacts.
+        let profile = task.join(files::REPORTS[0]);
+        let plan = task.join(files::REPORTS[1]);
+        let plan_review = task.join(files::REPORTS[2]);
+        let validate_review = task.join(files::REPORTS[6]);
+        let pub_plan = task.join(files::PLANS[0]);
+        std::fs::write(&profile, b"# Profile\n").unwrap();
+        std::fs::write(&plan, b"{\"skills\":[]}").unwrap();
+        std::fs::write(&plan_review, b"{\"ok\":true}").unwrap();
+        std::fs::write(&validate_review, b"{\"ok\":true}").unwrap();
+        std::fs::write(
+            &pub_plan,
+            "AGENTS.md\n.codex/skills/orders/SKILL.md\n.infra-manifest.json\n",
+        )
+        .unwrap();
+
+        // Target has AGENTS.md + .codex/skills/orders/SKILL.md v1 with valid validation_stamps.
+        std::fs::create_dir_all(target.join(".codex/skills/orders")).unwrap();
+        std::fs::write(target.join("AGENTS.md"), b"# Unchanged policy\n").unwrap();
+        std::fs::write(
+            target.join(".codex/skills/orders/SKILL.md"),
+            b"# Skill v1\n",
+        )
+        .unwrap();
+        let owned = vec![
+            "AGENTS.md".to_string(),
+            ".codex/skills/orders/SKILL.md".to_string(),
+        ];
+        let target_manifest = infra_generator::ownership::build_manifest(
+            &target,
+            &owned,
+            &infra_generator::ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-001".into(),
+                profile: "minimal".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: json!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        infra_generator::ownership::write_manifest(&target, &target_manifest).unwrap();
+        infra_generator::ownership::stamp_manifest_if_needed(&target, Some("generate")).unwrap();
+
+        // Staging keeps AGENTS.md identical and updates .codex/skills/orders/SKILL.md -> stamped before preview.
+        std::fs::create_dir_all(staging.join(".codex/skills/orders")).unwrap();
+        std::fs::write(staging.join("AGENTS.md"), b"# Unchanged policy\n").unwrap();
+        std::fs::write(
+            staging.join(".codex/skills/orders/SKILL.md"),
+            b"# Skill v2 updated\n",
+        )
+        .unwrap();
+        let staging_manifest = infra_generator::ownership::build_manifest(
+            &staging,
+            &owned,
+            &infra_generator::ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-001".into(),
+                profile: "minimal".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: json!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        infra_generator::ownership::write_manifest(&staging, &staging_manifest).unwrap();
+        infra_generator::ownership::stamp_manifest_if_needed(&staging, Some("update")).unwrap();
+
+        let identity = files::identity(&target).unwrap();
+        let approved = files::hashes(&run_dir).unwrap();
+        let mut request = json!({
+            "id": "run1",
+            "target": &target,
+            "directory": &run_dir,
+            "identity": identity,
+            "tools": ["codex"],
+            "operation": "update",
+            "approved": approved,
+            "status": "preview",
+        });
+        let preview = files::preview(&request, &run_dir).unwrap();
+        files::write(&run_dir, "approved-preview.json", &preview).unwrap();
+        request["status"] = json!("new");
+
+        // Pre-warm persisted gate cache (simulating completed generate/review checks prior to restart).
+        let registry = source.join(
+            "Infrastructure-Creator/.agents/skills/skill-forge/references/candidate-registry.json",
+        );
+        {
+            let _store1 = SessionStore::open(&state).unwrap();
+            let mut cache = VerifiedGateCache::open(Some(persistent_gate_cache_path(&state)));
+            for (op, data) in [
+                (
+                    "validate-scan-coverage",
+                    json!({"target": &target, "task_dir": &task, "plan": &plan}),
+                ),
+                (
+                    "validate-plan-review",
+                    json!({"plan": &plan, "review": &plan_review, "registry": &registry}),
+                ),
+                (
+                    "validate-skill-quality",
+                    json!({"plan": &plan, "target": &target, "registry": &registry, "plan_only": true}),
+                ),
+                (
+                    "validate-plan-mutations",
+                    json!({"plan": &plan, "target": &target, "registry": &registry}),
+                ),
+                (
+                    "validate-content-review",
+                    json!({"publication_plan": &pub_plan, "review": &validate_review}),
+                ),
+                (
+                    "validate-generated",
+                    json!({"target": &staging, "editions": ["codex"], "skill_plan": &plan, "evidence_target": &target, "delivery_root": &target, "approved_profile": &profile, "approved_profile_sha256": approved[files::REPORTS[0]], "profile_path": format!("{}/{}", files::TASK, files::REPORTS[0]), "registry": &registry}),
+                ),
+            ] {
+                let d = gate_input_digest(op, &data, &task, &request, &source);
+                cache.record(op, d);
+            }
+            // Also seed expected post-publish validate-generated digest.
+            let sim_root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(sim_root.path().join(".codex/skills/orders")).unwrap();
+            std::fs::write(sim_root.path().join("AGENTS.md"), b"# Unchanged policy\n").unwrap();
+            std::fs::write(
+                sim_root.path().join(".codex/skills/orders/SKILL.md"),
+                b"# Skill v2 updated\n",
+            )
+            .unwrap();
+            std::fs::write(
+                sim_root.path().join(".infra-manifest.json"),
+                std::fs::read(staging.join(".infra-manifest.json")).unwrap(),
+            )
+            .unwrap();
+            let tmp_data = json!({"target": sim_root.path(), "editions": ["codex"], "skill_plan": &plan, "evidence_target": &target, "delivery_root": &target, "approved_profile": &profile, "approved_profile_sha256": approved[files::REPORTS[0]], "profile_path": format!("{}/{}", files::TASK, files::REPORTS[0]), "registry": &registry});
+            let sim_digest =
+                gate_input_digest("validate-generated", &tmp_data, &task, &request, &source);
+            cache.record("validate-generated", sim_digest);
+        }
+        assert!(persistent_gate_cache_path(&state).is_file());
+
+        // Fresh runner instance after restart reuses all 6 gates from SQLite without re-running them,
+        // and apply skips the unchanged verified slice (`AGENTS.md`).
+        let runner2 = CreatorRunner {
+            store: SessionStore::open(&state).unwrap(),
+            source: source.clone(),
+            gates: Arc::new(Stub),
+            links: None,
+        };
+        let events = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let events_capture = Arc::clone(&events);
+        let emit: Event = Arc::new(move |ev| {
+            events_capture.lock().unwrap().push(ev);
+            Ok(())
+        });
+        let mut verify_req = request.clone();
+        verify_req["stamp_manifest"] = Value::Bool(false);
+        assert!(
+            runner2
+                .verify_structured(&verify_req, true, false, &emit)
+                .unwrap()
+                .is_ok()
+        );
+        let texts: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Reusing verified validate-generated")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("Checking ")),
+            "persisted cache should avoid running live gates: {texts:?}"
+        );
+
+        #[cfg(unix)]
+        let agents_ino_before = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(target.join("AGENTS.md"))
+                .unwrap()
+                .ino()
+        };
+
+        let apply_events = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let apply_events_capture = Arc::clone(&apply_events);
+        let apply_emit: Event = Arc::new(move |ev| {
+            apply_events_capture.lock().unwrap().push(ev);
+            Ok(())
+        });
+        runner2.apply(&request, &apply_emit).unwrap();
+
+        let apply_texts: Vec<String> = apply_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            apply_texts
+                .iter()
+                .any(|t| t.contains("Skipping 1 unchanged verified update slice(s)")),
+            "{apply_texts:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let agents_ino_after = std::fs::symlink_metadata(target.join("AGENTS.md"))
+                .unwrap()
+                .ino();
+            assert_eq!(
+                agents_ino_before, agents_ino_after,
+                "unchanged stamped AGENTS.md must be skipped from publication overwrite"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(target.join(".codex/skills/orders/SKILL.md")).unwrap(),
+            "# Skill v2 updated\n"
+        );
+        let published_manifest = infra_generator::ownership::load_manifest(&target).unwrap();
+        assert!(published_manifest["validation_stamps"]["AGENTS.md"]["sha256"].is_string());
+        assert!(
+            published_manifest["validation_stamps"][".codex/skills/orders/SKILL.md"]["sha256"]
+                .is_string()
+        );
     }
 
     #[test]
