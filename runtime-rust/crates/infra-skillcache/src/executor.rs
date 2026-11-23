@@ -69,8 +69,10 @@ struct Runner<'a> {
     log: RunLog,
     /// Results of the programs this command ran, returned with its answer.
     results: Map<String, Value>,
-    /// Replay only: a read-only program must leave the workspace as it was.
+    /// Read-only programs must leave the workspace unchanged on both live runs and replays.
     check_read_only: bool,
+    /// Live runs only: record workspace file changes into the sidecar change log.
+    record_changes: bool,
     /// Replay only: the diagnostics of every failure, by plan index.
     failures: Vec<Value>,
 }
@@ -270,7 +272,8 @@ impl<'a> Runner<'a> {
             log: RunLog::open(session.state_file, &state.generation)?,
             state,
             results: Map::new(),
-            check_read_only: false,
+            check_read_only: true,
+            record_changes: true,
             failures: Vec::new(),
         })
     }
@@ -529,7 +532,7 @@ impl<'a> Runner<'a> {
             let allowlist = &self.session.package.capsule.capabilities.allow_ignored;
             let before = if self.check_read_only && program.read_only {
                 workspace_listing(self.session.workspace, allowlist)
-            } else if !self.check_read_only {
+            } else if self.record_changes {
                 workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
             } else {
                 None
@@ -550,7 +553,7 @@ impl<'a> Runner<'a> {
                 None
             };
             let changed_files = match (&before, &after) {
-                (Some(prev), Some(next)) if !self.check_read_only => {
+                (Some(prev), Some(next)) if self.record_changes => {
                     diff_workspace_changes(prev, next, self.session.workspace)
                 }
                 _ => Vec::new(),
@@ -1029,6 +1032,7 @@ pub fn replay(session: &Session<'_>, examples: &Examples) -> Reply {
     let state = RunState::new(&session.package.capsule_sha256, session.generation);
     let mut runner = Runner::open(session, state)?;
     runner.check_read_only = true;
+    runner.record_changes = false;
     let take = |names: &[String]| -> Result<Value, Refusal> {
         let mut values = Map::new();
         for name in names {

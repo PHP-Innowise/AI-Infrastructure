@@ -157,6 +157,10 @@ impl Stand {
             .env("GITHUB_TOKEN", "not-for-programs")
             .env("Database_Password", "not-for-programs")
             .env("OPENAI_API_KEY", "not-for-programs")
+            .env("APP_SECRET", "not-for-programs")
+            .env("SERVICE_CREDENTIAL", "not-for-programs")
+            .env("SUDO_PASSWD", "not-for-programs")
+            .env("OAUTH_HEADER", "not-for-programs")
             .env("FIXTURE_PLAIN", "kept")
             .stdin(Stdio::null());
         command
@@ -448,6 +452,10 @@ fn executor_persists_state_before_program() {
         "GITHUB_TOKEN",
         "Database_Password",
         "OPENAI_API_KEY",
+        "APP_SECRET",
+        "SERVICE_CREDENTIAL",
+        "SUDO_PASSWD",
+        "OAUTH_HEADER",
         "SKILLCACHE_STATE_FILE",
         "SKILLCACHE_GENERATION",
     ] {
@@ -1152,4 +1160,63 @@ fn reset_clears_bad_state_and_complete_trims_bloated_results() {
     assert_eq!(changes.len(), 2, "{changes:?}");
     assert_eq!(changes[0]["changes"][0]["path"], "out/rows.json");
     assert_eq!(changes[1]["changes"][0]["path"], "out/summary.csv");
+}
+
+#[test]
+fn live_run_fails_read_only_program_that_mutates_workspace() {
+    let mut mutating_specs = specs();
+    mutating_specs[2].1 = json!({
+        "result": {"rows": 2},
+        "write": {"leaked-mutation.txt": "should-fail"}
+    });
+    let stand = Stand::with(capsule(), mutating_specs);
+    let answer = stand.ok(&["run", Stand::all_values()]);
+    assert_eq!(answer["status"], "program_failed", "{answer}");
+    assert_eq!(answer["program"], "verify_csv");
+    assert_eq!(answer["diagnostics"]["reason"], "read_only_violation");
+    assert_eq!(answer["diagnostics"]["attempts"], 1);
+    assert!(stand.workspace.join("leaked-mutation.txt").is_file());
+    assert!(stand.events().contains(&"program_failed:3".to_string()));
+    let changes = infra_skillcache::state::read_log_at(
+        &infra_skillcache::state::changes_path(&infra_skillcache::state::log_path(
+            &stand.state_file,
+        )),
+        0,
+    )
+    .unwrap();
+    assert!(
+        changes.iter().any(|entry| {
+            entry["changes"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|c| c["path"] == "leaked-mutation.txt"))
+        }),
+        "live read_only mutation should still record sidecar workspace changes: {changes:?}"
+    );
+    // Continuing past the failed verification step reaches the remaining inspection.
+    let next = stand.ok(&["continue"]);
+    assert_eq!(next["status"], "your_steps", "{next}");
+    let done = stand.ok(&["continue"]);
+    assert_eq!(done["status"], "complete", "{done}");
+    assert_eq!(
+        done["failed"],
+        json!([{"step_index": 3, "reason": "read_only_violation"}])
+    );
+
+    // A read_only plan program that modifies an existing file without changing its
+    // length also triggers `read_only_violation` and does not bind declared outputs.
+    let mut ro_plan = capsule();
+    ro_plan["programs"][0]["read_only"] = json!(true);
+    let mut ro_specs = specs();
+    ro_specs[0].1 = json!({
+        "result": {"rows_file": "out/rows.json"},
+        "write": {"seed.txt": "BB"}
+    });
+    let stand_edit = Stand::empty();
+    std::fs::write(stand_edit.workspace.join("seed.txt"), "AA").unwrap();
+    stand_edit.install(ro_plan, ro_specs);
+    let edit_answer = stand_edit.ok(&["run", Stand::all_values()]);
+    assert_eq!(edit_answer["status"], "program_failed", "{edit_answer}");
+    assert_eq!(edit_answer["program"], "extract");
+    assert_eq!(edit_answer["diagnostics"]["reason"], "read_only_violation");
+    assert!(stand_edit.state()["bindings"].get("rows_file").is_none());
 }
