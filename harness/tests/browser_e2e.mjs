@@ -1694,6 +1694,15 @@ async function suite3MapLenses(driver) {
     const btn = document.getElementById('graph-map-display-toggle');
     return Boolean(pop && !pop.hidden && btn?.getAttribute('aria-expanded') === 'true');
   }, '#graph-map-display-popover opens', 4_000);
+  const popBounds = await driver.callFn(() => {
+    const pop = document.getElementById('graph-map-display-popover');
+    const r = pop.getBoundingClientRect();
+    return { left: r.left, right: r.right, vw: window.innerWidth, width: r.width };
+  });
+  assert(
+    popBounds.left >= 0 && popBounds.right <= popBounds.vw && popBounds.width >= 200,
+    `Expected #graph-map-display-popover within viewport bounds without left clipping: ${JSON.stringify(popBounds)}`,
+  );
 
   const mapBeforeLod = driver.responsesByUrl.length;
   await driver.callFn(() => {
@@ -2487,9 +2496,9 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     return d?.hidden === true && !main?.hasAttribute('inert') && !sidebar?.hasAttribute('inert');
   }, '#approvals-drawer closes on Escape and clears inert');
 
-  // Verify Ctrl+K stacked above an open modal (#approvals-drawer): inert, Tab trap, and navigating execution closes underlying modal
-  await driver.click('#approvals-queue-toggle');
-  await driver.waitFor(() => !document.getElementById('approvals-drawer')?.hidden, '#approvals-drawer opens before stacked Ctrl+K check');
+  // Verify Alt+A opens #approvals-drawer globally when no pending card is focused, and Ctrl+K stacks above it cleanly
+  await driver.pressKey({ key: 'a', code: 'KeyA', keyCode: 65, modifiers: 1 });
+  await driver.waitFor(() => !document.getElementById('approvals-drawer')?.hidden, 'Alt+A opens #approvals-drawer', 4_000);
   await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
   const stackedState = await driver.waitFor(() => {
     const pal = document.getElementById('command-palette');

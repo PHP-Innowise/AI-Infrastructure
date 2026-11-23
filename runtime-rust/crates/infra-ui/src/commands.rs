@@ -1176,6 +1176,13 @@ pub fn open_palette() {
     dom::hidden("command-palette", false);
     render_palette();
     dom::focus("command-palette-input");
+    if cfg!(target_arch = "wasm32") {
+        spawn_local(async {
+            if crate::management::ensure_installed_skills_loaded().await && palette_open() {
+                render_palette();
+            }
+        });
+    }
 }
 
 pub fn close_palette() {
@@ -1828,5 +1835,21 @@ mod tests {
             parse_palette_skill_payload(&json!("pdf")),
             ("pdf".into(), String::new(), String::new())
         );
+
+        assert!(crate::management::installed_skills_need_load(
+            "proj-b",
+            "proj-a",
+            &json!({"skills": []}),
+        ));
+        assert!(crate::management::installed_skills_need_load(
+            "proj-a",
+            "proj-a",
+            &V::Null,
+        ));
+        assert!(!crate::management::installed_skills_need_load(
+            "proj-a",
+            "proj-a",
+            &json!({"skills": []}),
+        ));
     }
 }

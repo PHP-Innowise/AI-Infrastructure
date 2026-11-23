@@ -14,6 +14,8 @@ pub(crate) use creator::{on_sse_creator_resync, on_sse_creator_run};
 pub use setup::invalidate;
 pub use setup::{folder_open, folder_open_at, load_attachment, load_setup};
 pub use skills::{accelerators, load_skills};
+#[allow(unused_imports)]
+pub(crate) use skills::{ensure_installed_skills_loaded, installed_skills_need_load};
 
 use crate::{activity::events_card, api, dom, model as m, run, session};
 use creator::*;
@@ -47,6 +49,8 @@ pub(crate) fn on_global_project_change(project: &str) {
         invalidate(k);
     }
     m::take("skills-change-preview");
+    m::take("skills-installed");
+    m::take("skills-installed-project");
     if !m::yes(&m::data("creator-pending")) {
         let prev_creator = if cfg!(target_arch = "wasm32") {
             dom::value("creator-project")

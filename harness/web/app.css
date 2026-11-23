@@ -2984,7 +2984,7 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 .graph-lens-bar { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px; }
 .graph-lens-btn[aria-selected="true"] { background:var(--purple-soft); border-color:var(--purple-line); color:var(--purple); font-weight:var(--weight-strong); }
 .graph-display-wrap { position:relative; display:inline-block; }
-.graph-display-popover { position:absolute; top:calc(100% + 4px); right:0; z-index:12; min-width:230px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--paper); box-shadow:0 8px 24px var(--shadow-strong); display:flex; flex-direction:column; gap:6px; }
+.graph-display-popover { position:absolute; top:calc(100% + 4px); left:0; right:auto; z-index:12; min-width:230px; max-width:min(280px, calc(100vw - 24px)); padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--paper); box-shadow:0 8px 24px var(--shadow-strong); display:flex; flex-direction:column; gap:6px; }
 .graph-path-bar,.graph-isolate-group { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px; }
 .graph-path-bar input { width:120px; min-height:var(--control-height-sm); padding:0 6px; font-size:var(--text-meta); }
 .graph-isolate-group select { width:auto; flex:0 0 auto; min-height:var(--control-height-sm); padding:2px 24px 2px 8px; font-size:var(--text-meta); }

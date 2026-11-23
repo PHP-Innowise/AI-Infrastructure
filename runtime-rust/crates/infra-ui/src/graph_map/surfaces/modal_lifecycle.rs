@@ -1799,6 +1799,28 @@ pub async fn event(
                     "aria-expanded",
                     if next_hidden { "false" } else { "true" },
                 );
+                if !next_hidden {
+                    if let Some(html_pop) = pop.dyn_ref::<web_sys::HtmlElement>() {
+                        let style = html_pop.style();
+                        let _ = style.set_property("left", "0px");
+                        let _ = style.set_property("right", "auto");
+                        let vw = dom::window()
+                            .inner_width()
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1280.0);
+                        let rect = pop.get_bounding_client_rect();
+                        if rect.right() > vw - 12.0 {
+                            let _ = style.set_property("left", "auto");
+                            let _ = style.set_property("right", "0px");
+                            let flipped = pop.get_bounding_client_rect();
+                            if flipped.left() < 12.0 {
+                                let shift = 12.0 - flipped.left();
+                                let _ = style.set_property("right", &format!("-{shift:.0}px"));
+                            }
+                        }
+                    }
+                }
             }
             return true;
         }

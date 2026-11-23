@@ -2212,6 +2212,14 @@ pub(crate) fn can_target_drawer_shortcut(
     in_pending_card || in_drawer_list || in_queue_item
 }
 
+pub(crate) fn should_toggle_approvals_drawer_on_alt_a(
+    drawer_open: bool,
+    has_pending_action: bool,
+    palette_open: bool,
+) -> bool {
+    !palette_open && (!drawer_open || !has_pending_action)
+}
+
 enum ApprovalQueueEntry {
     Card {
         key: String,
@@ -2732,16 +2740,19 @@ pub(crate) async fn toggle_approvals_drawer() {
     }
 }
 
-/// Scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer item.
+/// Global Alt+A (open/toggle Approvals drawer when not acting on a pending approval card)
+/// and scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer item.
 pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool {
     if !event.alt_key() || event.ctrl_key() || event.meta_key() || event.is_composing() {
         return false;
     }
     let key = event.key().to_ascii_lowercase();
-    let target_decision = match (key.as_str(), event.shift_key()) {
-        ("a", false) => "allow",
-        ("a", true) => "allow_session",
-        ("d", false) => "deny",
+    let is_a_key = key == "a" || event.code() == "KeyA";
+    let is_d_key = key == "d" || event.code() == "KeyD";
+    let target_decision = match (is_a_key, is_d_key, event.shift_key()) {
+        (true, false, false) => "allow",
+        (true, false, true) => "allow_session",
+        (false, true, false) => "deny",
         _ => return false,
     };
     let Some(active) = dom::document().active_element() else {
@@ -2762,37 +2773,56 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
         && (active.closest("#approvals-drawer").ok().flatten().is_some()
             || active.tag_name() == "BODY");
     let queue_item = active.closest(".approvals-queue-item").ok().flatten();
-    if !can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some()) {
+    let card =
+        if can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some())
+        {
+            pending_card
+                .as_ref()
+                .cloned()
+                .or_else(|| {
+                    queue_item.as_ref().and_then(|item| {
+                        item.query_selector(".conversation-permission[data-state=\"pending\"]")
+                            .ok()
+                            .flatten()
+                    })
+                })
+                .or_else(|| {
+                    dom::get("approvals-drawer-list").and_then(|list| {
+                        list.query_selector(".conversation-permission[data-state=\"pending\"]")
+                            .ok()
+                            .flatten()
+                    })
+                })
+        } else {
+            None
+        };
+    let has_pending_card = card.is_some();
+    let allow_btn = card.and_then(|c| {
+        let sel = format!(
+            "button[data-action=\"permission-decide\"][data-decision=\"{target_decision}\"]"
+        );
+        c.query_selector(&sel)
+            .ok()
+            .flatten()
+            .filter(|btn| !dom::is_disabled(btn))
+    });
+    if let Some(btn) = allow_btn {
+        if let Some(html) = btn.dyn_ref::<web_sys::HtmlElement>() {
+            html.click();
+            return true;
+        }
         return false;
     }
-    let card = pending_card
-        .or_else(|| {
-            queue_item.and_then(|item| {
-                item.query_selector(".conversation-permission[data-state=\"pending\"]")
-                    .ok()
-                    .flatten()
-            })
-        })
-        .or_else(|| {
-            dom::get("approvals-drawer-list").and_then(|list| {
-                list.query_selector(".conversation-permission[data-state=\"pending\"]")
-                    .ok()
-                    .flatten()
-            })
+    if target_decision == "allow"
+        && should_toggle_approvals_drawer_on_alt_a(
+            drawer_open,
+            has_pending_card,
+            crate::commands::palette_open(),
+        )
+    {
+        wasm_bindgen_futures::spawn_local(async {
+            toggle_approvals_drawer().await;
         });
-    let Some(card) = card else {
-        return false;
-    };
-    let sel =
-        format!("button[data-action=\"permission-decide\"][data-decision=\"{target_decision}\"]");
-    let Ok(Some(btn)) = card.query_selector(&sel) else {
-        return false;
-    };
-    if dom::is_disabled(&btn) {
-        return false;
-    }
-    if let Some(html) = btn.dyn_ref::<web_sys::HtmlElement>() {
-        html.click();
         return true;
     }
     false
