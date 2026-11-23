@@ -827,11 +827,12 @@ impl Index {
             }
             let layer = if node["folder"] == true {
                 folder_nodes.insert(node_path.to_owned());
+                let scope_path = if path == "." { "" } else { path };
                 let mut under = self
                     .files
                     .iter()
                     .zip(&way.of)
-                    .filter(|(file, _)| under(path, file))
+                    .filter(|(file, _)| under(scope_path, file))
                     .map(|(_, layer)| *layer);
                 under
                     .next()
@@ -858,10 +859,10 @@ impl Index {
                 }
                 parent = holder(parent);
             }
-            None
+            folder_nodes.get(".").map(String::as_str)
         };
         let mut drawn = HashMap::new();
-        let symbols = view["mode"] == "file";
+        let symbols = view["mode"] == "file" || view["lod"] == "symbol";
         // Folder arrows represent many file links. Attribute a violation only
         // to the boxes representing its two ends.
         if !symbols {
