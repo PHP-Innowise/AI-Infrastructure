@@ -1144,7 +1144,14 @@ mod tests {
         let rels: Vec<String> = custom
             .iter()
             .filter_map(|e| e.0.strip_prefix(&root).ok())
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| {
+                let s = p.to_string_lossy();
+                if cfg!(windows) {
+                    s.replace('\\', "/")
+                } else {
+                    s.into_owned()
+                }
+            })
             .collect();
         assert!(rels.contains(&"src/item.txt".into()));
         assert!(rels.contains(&"dist/item.txt".into()));

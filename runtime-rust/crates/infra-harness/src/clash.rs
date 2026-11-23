@@ -2130,6 +2130,14 @@ mod tests {
         }
     }
 
+    fn echo_argv(message: &str) -> Value {
+        if cfg!(windows) {
+            json!(["cmd", "/C", format!("echo {message}")])
+        } else {
+            json!(["/bin/sh", "-c", format!("echo {message}")])
+        }
+    }
+
     #[tokio::test]
     async fn run_clash_precheck_reads_project_path_and_falls_back_to_workspace_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -2142,7 +2150,7 @@ mod tests {
             "_workspace_path": missing,
             "clash": {
                 "challenger": "codex",
-                "precheck": {"argv": ["/bin/sh", "-c", "echo clash-precheck-project-path"], "timeout_seconds": 10}
+                "precheck": {"argv": echo_argv("clash-precheck-project-path"), "timeout_seconds": 10}
             }
         });
         assert_eq!(precheck_workspace(&persisted_session), ws.as_path());
@@ -2159,7 +2167,7 @@ mod tests {
             "_workspace_path": ws,
             "clash": {
                 "challenger": "codex",
-                "precheck": {"argv": ["/bin/sh", "-c", "echo clash-precheck-fallback"], "timeout_seconds": 10}
+                "precheck": {"argv": echo_argv("clash-precheck-fallback"), "timeout_seconds": 10}
             }
         });
         assert_eq!(precheck_workspace(&transient_session), ws.as_path());
@@ -2173,7 +2181,7 @@ mod tests {
             "project_path": missing,
             "clash": {
                 "challenger": "codex",
-                "precheck": {"argv": ["/bin/sh", "-c", "echo unreachable"], "timeout_seconds": 10}
+                "precheck": {"argv": echo_argv("unreachable"), "timeout_seconds": 10}
             }
         });
         assert!(run_clash_precheck(&missing_session).await.is_none());
@@ -2220,7 +2228,7 @@ mod tests {
         std::fs::write(&file, "<?php\n").unwrap();
 
         let precheck = json!({
-            "argv": ["/bin/sh", "-c", "echo precheck-ok"],
+            "argv": echo_argv("precheck-ok"),
             "timeout_seconds": 10
         });
         let (_digest, max_mtime) =

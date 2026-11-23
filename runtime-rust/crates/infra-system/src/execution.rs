@@ -1522,9 +1522,14 @@ mod usage_components_tests {
 
         let svc_canon = infra_core::fs::canonicalize(&svc).unwrap();
         let (_digest, max_mtime) = verify_tree_stamp(&svc_canon).unwrap();
+        let argv = if cfg!(windows) {
+            object!(["cmd", "/C", "echo verify-ok"])
+        } else {
+            object!(["/bin/sh", "-c", "echo verify-ok"])
+        };
         let specs = vec![object!({
             "name": "svc:echo",
-            "argv": ["/bin/sh", "-c", "echo verify-ok"],
+            "argv": argv,
             "cwd_service": "svc",
             "timeout_seconds": 10
         })];

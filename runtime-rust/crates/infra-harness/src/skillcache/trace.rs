@@ -820,7 +820,9 @@ mod tests {
     #[test]
     fn check_admissible_with_toolchain_enforces_read_only_and_shares_tree_sha() {
         let root = tempfile::tempdir().unwrap();
-        let workspace = infra_core::fs::canonicalize(root.path()).unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let workspace = infra_core::fs::canonicalize(&ws).unwrap();
         std::fs::write(workspace.join("composer.json"), "{}").unwrap();
         let store = SessionStore::open(&root.path().join("state")).unwrap();
         let route = ResolvedCommand {
