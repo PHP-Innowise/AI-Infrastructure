@@ -556,6 +556,11 @@ pub fn initialize() {
         true,
     );
     capture_click.forget();
+    on_project_change(|_| {
+        if !m::read(|s| s.boot.is_null()) {
+            history();
+        }
+    });
     dom::sync_a11y_widgets();
 }
 pub(super) fn apply_theme(preference: &str) {
@@ -581,6 +586,40 @@ pub(super) fn apply_theme(preference: &str) {
         }
     }
 }
+pub(crate) fn resolve_bootstrap_session_id(
+    route_project: &str,
+    route_session: &str,
+    previous_sid: &str,
+    prefs: &V,
+    sessions: &[V],
+    projects: &[V],
+) -> String {
+    if !route_session.is_empty() {
+        return route_session.to_owned();
+    }
+    let candidate = if !previous_sid.is_empty() {
+        previous_sid.to_owned()
+    } else {
+        m::text(prefs, "session_id")
+    };
+    if candidate.is_empty() {
+        return String::new();
+    }
+    let route_project_valid =
+        !route_project.is_empty() && projects.iter().any(|p| m::text(p, "id") == route_project);
+    if route_project_valid {
+        let session_project = sessions
+            .iter()
+            .find(|s| m::text(s, "id") == candidate)
+            .map(|s| m::text(s, "project_id"))
+            .unwrap_or_default();
+        if session_project != route_project {
+            return String::new();
+        }
+    }
+    candidate
+}
+
 pub async fn bootstrap() {
     dom::hidden("connecting", false);
     dom::disabled("reconnect", true);
@@ -622,8 +661,8 @@ pub async fn bootstrap() {
                 update_status(true).await;
             });
             populate();
-            history();
             restore_preferences();
+            history();
             if boot_omnigraph.is_object() {
                 omnigraph::hydrate_status(&boot_omnigraph);
             }
@@ -638,18 +677,22 @@ pub async fn bootstrap() {
             api::start_sse();
             let route = dom::hash_route();
             let wanted = dom::json_storage(PREFS);
-            let sid = if !route.session.is_empty() {
-                route.session.clone()
-            } else if !previous_sid.is_empty() {
-                previous_sid
-            } else {
-                m::text(&wanted, "session_id")
-            };
+            let (sessions, projects) =
+                m::read(|s| (s.sessions.clone(), m::array(&s.boot["projects"])));
+            let sid = resolve_bootstrap_session_id(
+                &route.project,
+                &route.session,
+                &previous_sid,
+                &wanted,
+                &sessions,
+                &projects,
+            );
             if !sid.is_empty() && m::read(|s| s.sessions.iter().any(|x| m::text(x, "id") == sid)) {
                 select(&sid).await;
             }
             apply_hash_route().await;
             m::take("bootstrapping");
+            history();
             flush_pending_sse_resync();
             run::sync_approvals_badge();
             if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {

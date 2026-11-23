@@ -1814,7 +1814,13 @@ pub(crate) fn approvals_sessions_to_fetch(
         .collect()
 }
 
-/// Schedules permission expiry countdowns only when at least one card carries `data-expires-ms`.
+pub(crate) fn has_unexpired_countdown(expires_ms: &[f64], now_ms: f64) -> bool {
+    expires_ms
+        .iter()
+        .any(|&exp| exp.is_finite() && exp > now_ms)
+}
+
+/// Schedules permission expiry countdowns only when at least one card carries an unexpired `data-expires-ms`.
 pub(crate) fn schedule_permission_countdowns() {
     if !HAS_TIMED_EXPIRIES.with(|flag| flag.get()) {
         dom::cancel_timer("permission-countdown");
@@ -1826,14 +1832,20 @@ pub(crate) fn schedule_permission_countdowns() {
         dom::cancel_timer("permission-countdown");
         return;
     }
-    sync_permission_countdown_badges_for(&timed);
+    let has_unexpired = sync_permission_countdown_badges_for(&timed);
+    if !has_unexpired {
+        HAS_TIMED_EXPIRIES.with(|flag| flag.set(false));
+        dom::cancel_timer("permission-countdown");
+        return;
+    }
     dom::later("permission-countdown", 1000, || {
         schedule_permission_countdowns();
     });
 }
 
-fn sync_permission_countdown_badges_for(cards: &[web_sys::Element]) {
+fn sync_permission_countdown_badges_for(cards: &[web_sys::Element]) -> bool {
     let now = current_now_ms();
+    let mut expires_values = Vec::with_capacity(cards.len());
     for card in cards {
         let Some(exp_ms) = card
             .get_attribute("data-expires-ms")
@@ -1842,6 +1854,7 @@ fn sync_permission_countdown_badges_for(cards: &[web_sys::Element]) {
         else {
             continue;
         };
+        expires_values.push(exp_ms);
         let (tone, text) = format_countdown_badge(exp_ms - now);
         if let Ok(Some(badge)) = card.query_selector(".permission-expiry-badge") {
             if badge.get_attribute("data-tone").as_deref() != Some(tone) {
@@ -1852,6 +1865,7 @@ fn sync_permission_countdown_badges_for(cards: &[web_sys::Element]) {
             }
         }
     }
+    has_unexpired_countdown(&expires_values, now)
 }
 
 /// Debounces live SSE-driven queue refreshes across rapid `waiting_counts` updates.
@@ -2204,6 +2218,10 @@ pub(crate) fn is_shortcut_text_input(tag_name: &str, input_type: Option<&str>) -
     }
 }
 
+pub(crate) fn allow_scoped_permission_shortcut(has_active: bool, in_text_input: bool) -> bool {
+    has_active && !in_text_input
+}
+
 pub(crate) fn can_target_drawer_shortcut(
     in_pending_card: bool,
     in_drawer_list: bool,
@@ -2362,28 +2380,64 @@ pub(crate) async fn refresh_approvals_queue() {
     refresh_approvals_queue_inner(true).await;
 }
 
-async fn refresh_approvals_queue_inner(force_all: bool) {
-    let Some(container) = dom::get("approvals-drawer-list") else {
-        return;
-    };
-    let sessions = m::read(|s| s.sessions.clone());
-    let waiting_counts = m::read(|s| s.approvals.waiting_counts.clone());
-    let all_waiting_sids: Vec<(String, String, usize)> = sessions
+pub(crate) fn prioritize_waiting_sessions_for_drawer(
+    sessions: &[V],
+    waiting_counts: &BTreeMap<String, usize>,
+    active_sid: &str,
+    current_project: &str,
+    cap: usize,
+) -> (Vec<(String, String, usize)>, usize) {
+    let mut ranked: Vec<(u8, usize, String, String, usize)> = sessions
         .iter()
-        .filter_map(|s| {
+        .enumerate()
+        .filter_map(|(idx, s)| {
             let sid = m::text(s, "id");
             let count = waiting_counts
                 .get(&sid)
                 .copied()
                 .unwrap_or_else(|| s["waiting_permissions"].as_u64().unwrap_or(0) as usize);
-            (count > 0).then(|| (sid, m::summary(s), count))
+            if count == 0 {
+                return None;
+            }
+            let tier = if !active_sid.is_empty() && sid == active_sid {
+                0
+            } else if !current_project.is_empty() && m::text(s, "project_id") == current_project {
+                1
+            } else {
+                2
+            };
+            Some((tier, idx, sid, m::summary(s), count))
         })
         .collect();
-    let total_waiting_sessions = all_waiting_sids.len();
-    let waiting_sids: Vec<(String, String, usize)> = all_waiting_sids
+    let total_waiting_sessions = ranked.len();
+    ranked.sort_by_key(|(tier, idx, _, _, _)| (*tier, *idx));
+    let selected = ranked
         .into_iter()
-        .take(APPROVALS_DRAWER_SESSION_CAP)
+        .take(cap)
+        .map(|(_, _, sid, label, count)| (sid, label, count))
         .collect();
+    (selected, total_waiting_sessions)
+}
+
+async fn refresh_approvals_queue_inner(force_all: bool) {
+    let Some(container) = dom::get("approvals-drawer-list") else {
+        return;
+    };
+    let (sessions, active_sid, waiting_counts) = m::read(|s| {
+        (
+            s.sessions.clone(),
+            s.sid.clone(),
+            s.approvals.waiting_counts.clone(),
+        )
+    });
+    let current_project = m::current_project();
+    let (waiting_sids, total_waiting_sessions) = prioritize_waiting_sessions_for_drawer(
+        &sessions,
+        &waiting_counts,
+        &active_sid,
+        &current_project,
+        APPROVALS_DRAWER_SESSION_CAP,
+    );
 
     APPROVALS_SESSION_CACHE.with(|cache| {
         let mut map = cache.borrow_mut();
@@ -2755,25 +2809,24 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
         (false, true, false) => "deny",
         _ => return false,
     };
-    let Some(active) = dom::document().active_element() else {
-        return false;
-    };
-    let input_type = active.get_attribute("type");
-    if is_shortcut_text_input(&active.tag_name(), input_type.as_deref()) {
-        return false;
-    }
-    let pending_card = active
-        .closest(".conversation-permission[data-state=\"pending\"]")
-        .ok()
-        .flatten();
     let drawer_open = m::read(|s| s.approvals.drawer_open)
         || dom::get("approvals-drawer")
             .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
-    let in_open_drawer = drawer_open
-        && (active.closest("#approvals-drawer").ok().flatten().is_some()
-            || active.tag_name() == "BODY");
-    let queue_item = active.closest(".approvals-queue-item").ok().flatten();
-    let card =
+    let active = dom::document().active_element();
+    let in_text_input = active.as_ref().is_some_and(|el| {
+        let input_type = el.get_attribute("type");
+        is_shortcut_text_input(&el.tag_name(), input_type.as_deref())
+    });
+    let card = if allow_scoped_permission_shortcut(active.is_some(), in_text_input) {
+        let active = active.as_ref().expect("active element present");
+        let pending_card = active
+            .closest(".conversation-permission[data-state=\"pending\"]")
+            .ok()
+            .flatten();
+        let in_open_drawer = drawer_open
+            && (active.closest("#approvals-drawer").ok().flatten().is_some()
+                || active.tag_name() == "BODY");
+        let queue_item = active.closest(".approvals-queue-item").ok().flatten();
         if can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some())
         {
             pending_card
@@ -2795,7 +2848,10 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
                 })
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
     let has_pending_card = card.is_some();
     let allow_btn = card.and_then(|c| {
         let sel = format!(

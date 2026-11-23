@@ -1940,4 +1940,97 @@ new file mode 100644
             3
         );
     }
+
+    #[test]
+    fn diff_deferral_chunking_and_approvals_ux_rules_work() {
+        // Collapsed files in multi-file diffs emit deferred <pre> placeholders without eagerly rendering lines.
+        let mut multi_diff = String::new();
+        for i in 0..10 {
+            multi_diff.push_str(&format!(
+                "diff --git a/src/f{i}.rs b/src/f{i}.rs\n--- a/src/f{i}.rs\n+++ b/src/f{i}.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+            ));
+        }
+        let grouped = super::super::diff::render_grouped_diff_html(&multi_diff, "results-diff");
+        crate::test_support::assert_no_inline_hex_colors(&grouped);
+        assert!(grouped.contains("data-diff-deferred=\"true\""));
+        assert_eq!(
+            super::super::diff::diff_chunk_ranges(750, 300),
+            vec![(0, 300), (300, 600), (600, 750)]
+        );
+
+        // Countdown terminates once all pending cards reach Expired.
+        assert!(super::super::permissions::has_unexpired_countdown(
+            &[900.0, 1500.0],
+            1000.0
+        ));
+        assert!(!super::super::permissions::has_unexpired_countdown(
+            &[900.0, 1000.0],
+            1000.0
+        ));
+
+        // Scoped card decisions stay blocked inside text inputs while global Alt+A still toggles.
+        assert!(!super::super::permissions::allow_scoped_permission_shortcut(true, true));
+        assert!(!super::super::permissions::allow_scoped_permission_shortcut(false, false));
+        assert!(super::super::permissions::allow_scoped_permission_shortcut(
+            true, false
+        ));
+        assert!(
+            super::super::permissions::should_toggle_approvals_drawer_on_alt_a(false, false, false)
+        );
+        assert!(
+            super::super::permissions::should_toggle_approvals_drawer_on_alt_a(true, false, false)
+        );
+
+        // Approvals drawer cap (12) prioritizes active s.sid then current_project().
+        let mut sessions = Vec::new();
+        let mut waiting_counts = std::collections::BTreeMap::new();
+        for i in 0..15 {
+            let sid = format!("s-{i}");
+            let proj = match i {
+                14 => "proj-a",
+                12 => "proj-a",
+                _ => "proj-b",
+            };
+            sessions.push(json!({"id": sid, "title": format!("S{i}"), "project_id": proj, "waiting_permissions": 1}));
+            waiting_counts.insert(format!("s-{i}"), 1usize);
+        }
+        let (prioritized, total) =
+            super::super::permissions::prioritize_waiting_sessions_for_drawer(
+                &sessions,
+                &waiting_counts,
+                "s-14",
+                "proj-a",
+                12,
+            );
+        assert_eq!(total, 15);
+        assert_eq!(prioritized.len(), 12);
+        assert_eq!(prioritized[0].0, "s-14");
+        assert_eq!(prioritized[1].0, "s-12");
+
+        // Clearing pending diff work for one scope cancels in-flight expand chunks and advances
+        // generations for that scope only without disturbing unrelated diff scopes.
+        let (k_results, gen_results) =
+            super::super::diff::seed_pending_expand_for_test("results-diff", "src/big.rs");
+        let (k_side, gen_side) =
+            super::super::diff::seed_pending_expand_for_test("workspace-results", "src/big.rs");
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_results,
+            gen_results
+        ));
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
+        super::super::diff::clear_pending_diff_work(Some("results-diff"));
+        assert!(!super::super::diff::pending_expand_still_valid_for_test(
+            &k_results,
+            gen_results
+        ));
+        assert!(super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
+        super::super::diff::clear_pending_diff_work(None);
+        assert!(!super::super::diff::pending_expand_still_valid_for_test(
+            &k_side, gen_side
+        ));
+    }
 }
