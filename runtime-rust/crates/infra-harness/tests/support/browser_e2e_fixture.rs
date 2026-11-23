@@ -269,6 +269,7 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
     let mut out = std::io::stdout().lock();
     let mut live_seq = 0u64;
     let mut holding_permission = false;
+    let mut active_native_id = "native-e2e-main".to_owned();
 
     loop {
         let msg = if holding_permission {
@@ -286,7 +287,7 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
                 emit_turn_events(
                     &mut out,
                     cwd,
-                    "native-e2e-main",
+                    &active_native_id,
                     &call_id,
                     file_rel,
                     &md_text,
@@ -361,18 +362,21 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
             "user" => {
                 let prompt = val["message"]["content"].as_str().unwrap_or("");
                 if prompt.contains(HOLD_MARKER) {
+                    if prompt.contains("[E2E_HOLD_PERMISSION_SECONDARY]") {
+                        active_native_id = "native-e2e-secondary".to_owned();
+                    }
                     emit_line(
                         &mut out,
                         &json!({
                             "type": "system",
                             "subtype": "init",
-                            "session_id": "native-e2e-main"
+                            "session_id": &active_native_id
                         }),
                     )?;
                     emit_turn_events(
                         &mut out,
                         cwd,
-                        "native-e2e-main",
+                        &active_native_id,
                         "tool-e2e-read-1",
                         "entry_00.js",
                         "Inspected `entry_00.js` and verified the module dependency graph.\n\n```js\nimport { fn_0_0 } from './pkg_00/mod_00.js';\nexport function runEntry() {\n  return fn_0_0(42);\n}\n```\n\nRequesting permission to update `entry_00.js`.",
@@ -440,7 +444,7 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
                     &mut out,
                     &json!({
                         "type": "assistant",
-                        "session_id": "native-e2e-main",
+                        "session_id": &active_native_id,
                         "message": {
                             "role": "assistant",
                             "content": [{
@@ -456,7 +460,7 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
                         "type": "result",
                         "subtype": "success",
                         "is_error": false,
-                        "session_id": "native-e2e-main",
+                        "session_id": &active_native_id,
                         "result": "Permission decision completed."
                     }),
                 )?;
@@ -827,6 +831,41 @@ fn create_fixture_project(project: &Path) -> Result<(String, String)> {
     Ok((commit_a, commit_b))
 }
 
+fn create_secondary_fixture_project(project: &Path) -> Result<()> {
+    fs::create_dir_all(project)?;
+    let init_main = std::process::Command::new("git")
+        .current_dir(project)
+        .args(["init", "--quiet", "-b", "main"])
+        .status()?;
+    if !init_main.success() {
+        run_git(project, &["init", "--quiet"])?;
+        run_git(project, &["checkout", "-B", "main"])?;
+    }
+    fs::write(
+        project.join("README.md"),
+        "# Secondary E2E Project\n\nUsed for live multi-project SSE waiting_counts and deep-link tests.\n",
+    )?;
+    fs::write(
+        project.join("entry_00.js"),
+        "export function secondaryHealth() {\n  return 'beta-ok';\n}\n",
+    )?;
+    run_git(project, &["add", "-A"])?;
+    run_git(
+        project,
+        &[
+            "-c",
+            "user.name=E2E Fixture",
+            "-c",
+            "user.email=e2e@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial secondary project",
+        ],
+    )?;
+    Ok(())
+}
+
 /// Stops the fixture once the parent closes its end of standard input, or is
 /// gone. Only a pipe says that: a terminal, a file and the null device end for
 /// other reasons, or never.
@@ -1162,12 +1201,19 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
 
     let project = root.join("project");
     let (commit_a, commit_b) = create_fixture_project(&project)?;
+    let project_beta = root.join("project-beta");
+    create_secondary_fixture_project(&project_beta)?;
 
     let store = SessionStore::open(&root.join("state"))?;
     let registered = store.register(&project)?;
     let project_id = registered["id"]
         .as_str()
         .ok_or_else(|| HarnessError::invalid("Missing registered project id."))?
+        .to_owned();
+    let registered_beta = store.register(&project_beta)?;
+    let secondary_project_id = registered_beta["id"]
+        .as_str()
+        .ok_or_else(|| HarnessError::invalid("Missing secondary registered project id."))?
         .to_owned();
 
     let providers = Arc::new(ProviderDomain {
@@ -1378,6 +1424,38 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     )
     .await?;
     seed_skillcache(&store, &project, &project_id, &other_session_id)?;
+
+    let secondary_created = json_payload(
+        sessions
+            .execute(
+                "sessions.create",
+                json!({
+                    "body": {
+                        "project_id": secondary_project_id,
+                        "provider": "claude",
+                        "workflow": "native",
+                        "mode": "edit",
+                        "permissions": "bypass",
+                        "agents_enabled": false,
+                        "agent_count": 1,
+                        "project_context": false,
+                        "budgets": { "seconds": 600 },
+                        "prompt": "Secondary project baseline check on entry_00.js."
+                    }
+                }),
+            )
+            .await?,
+    )?;
+    let secondary_session_id = secondary_created["session"]["id"]
+        .as_str()
+        .ok_or_else(|| HarnessError::invalid("Missing secondary session id."))?
+        .to_owned();
+    wait_until(
+        Duration::from_secs(45),
+        "Secondary project fixture session did not complete.",
+        || Ok(store.get(&secondary_session_id)?["status"] == "completed"),
+    )
+    .await?;
 
     // Create primary active session holding a real pending permission + initial tool & Markdown events.
     let main_created = json_payload(
@@ -1593,6 +1671,8 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         "project_id": project_id,
         "session_id": session_id,
         "other_session_id": other_session_id,
+        "secondary_project_id": secondary_project_id,
+        "secondary_session_id": secondary_session_id,
         "commit_a": commit_a,
         "commit_b": commit_b,
         "system_config_path": "system.json",

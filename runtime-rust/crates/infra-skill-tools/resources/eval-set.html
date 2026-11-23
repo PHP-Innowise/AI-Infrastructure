@@ -9,35 +9,49 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     [hidden] { display: none !important; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-    body { font-family: Georgia, 'Times New Roman', serif; background: #faf9f5; padding: 2rem; color: #141413; }
-    h1 { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 0.5rem; font-size: 1.5rem; }
-    .description { color: #5f5d55; margin-bottom: 1.5rem; font-style: italic; max-width: 900px; }
-    .controls { margin-bottom: 1rem; display: flex; gap: 0.5rem; }
+    body { font-family: Georgia, 'Times New Roman', serif; background: #faf9f5; padding: 2rem; color: #141413; overflow-x: hidden; }
+    h1 { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 0.5rem; font-size: 1.5rem; overflow-wrap: anywhere; }
+    .description { color: #5f5d55; margin-bottom: 1.5rem; font-style: italic; max-width: 900px; overflow-wrap: anywhere; }
+    .controls { margin-bottom: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .btn { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 0.5rem 1rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
-    .btn-add { background: #6a9bcc; color: white; }
-    .btn-add:hover { background: #5889b8; }
-    .btn-export { background: #d97757; color: white; }
-    .btn-export:hover { background: #c4613f; }
-    table { width: 100%; max-width: 1100px; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .btn-add { background: #2e5f96; color: white; }
+    .btn-add:hover { background: #244b78; }
+    .btn-export { background: #b34a28; color: white; }
+    .btn-export:hover { background: #963c1e; }
+    .table-scroll { width: 100%; max-width: 1100px; overflow-x: auto; -webkit-overflow-scrolling: touch; background: white; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    table { width: 100%; border-collapse: collapse; background: white; }
     th { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #141413; color: #faf9f5; padding: 0.75rem 1rem; text-align: left; font-size: 0.875rem; }
     td { padding: 0.75rem 1rem; border-bottom: 1px solid #e8e6dc; vertical-align: top; }
     tr:nth-child(even) td { background: #faf9f5; }
     tr:hover td { background: #f3f1ea; }
     .section-header td { background: #e8e6dc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 500; font-size: 0.8rem; color: #141413; text-transform: uppercase; letter-spacing: 0.05em; }
     .query-input { width: 100%; padding: 0.4rem; border: 1px solid #e8e6dc; border-radius: 4px; font-size: 0.875rem; font-family: Georgia, 'Times New Roman', serif; resize: vertical; min-height: 60px; }
-    .query-input:focus { outline: none; border-color: #d97757; box-shadow: 0 0 0 2px rgba(217,119,87,0.15); }
+    .query-input:focus { outline: none; border-color: #b34a28; box-shadow: 0 0 0 2px rgba(179,74,40,0.18); }
     .toggle-wrap { display: inline-flex; align-items: center; gap: 0.5rem; }
     .toggle { position: relative; display: inline-block; width: 44px; height: 24px; }
     .toggle input { opacity: 0; width: 0; height: 0; }
     .toggle .slider { position: absolute; inset: 0; background: #b0aea5; border-radius: 24px; cursor: pointer; transition: 0.2s; }
     .toggle .slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
-    .toggle input:checked + .slider { background: #d97757; }
+    .toggle input:checked + .slider { background: #b34a28; }
     .toggle input:checked + .slider::before { transform: translateX(20px); }
-    .toggle input:focus-visible + .slider { outline: 2px solid #d97757; outline-offset: 2px; }
+    .toggle input:focus-visible + .slider { outline: 2px solid #b34a28; outline-offset: 2px; }
     .trigger-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 0.875rem; font-weight: 500; color: #141413; cursor: pointer; }
-    .btn-delete { background: #c44; color: white; padding: 0.3rem 0.6rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-    .btn-delete:hover { background: #a33; }
-    .summary { margin-top: 1rem; color: #5f5d55; font-size: 0.875rem; }
+    .btn-delete { background: #b32d2d; color: white; padding: 0.3rem 0.6rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .btn-delete:hover { background: #8f2222; }
+    .summary { margin-top: 1rem; color: #5f5d55; font-size: 0.875rem; overflow-wrap: anywhere; }
+    @media (max-width: 640px) {
+      body { padding: 1rem; }
+      h1 { font-size: 1.25rem; }
+      .controls .btn { flex: 1 1 auto; text-align: center; }
+      th, td { padding: 0.5rem 0.625rem; }
+      .query-input { min-width: 140px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0s !important;
+        animation-duration: 0s !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -49,16 +63,18 @@
     <button type="button" class="btn btn-export" data-editor-action="export">Export Eval Set</button>
   </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th style="width:65%">Query</th>
-        <th style="width:18%">Should Trigger</th>
-        <th style="width:10%">Actions</th>
-      </tr>
-    </thead>
-    <tbody id="eval-body"></tbody>
-  </table>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:65%">Query</th>
+          <th style="width:18%">Should Trigger</th>
+          <th style="width:10%">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="eval-body"></tbody>
+    </table>
+  </div>
 
   <p class="summary" id="summary" role="status" aria-live="polite"></p>
 

@@ -13,11 +13,11 @@
       --border: #e8e6dc;
       --text: #141413;
       --text-muted: #6f6d65;
-      --accent: #d97757;
-      --accent-hover: #c4613f;
-      --green: #788c5d;
+      --accent: #b34a28;
+      --accent-hover: #963c1e;
+      --green: #4a612d;
       --green-bg: #eef2e8;
-      --red: #c44;
+      --red: #b3261e;
       --red-bg: #fceaea;
       --header-bg: #141413;
       --header-text: #faf9f5;
@@ -33,6 +33,9 @@
       background: var(--bg);
       color: var(--text);
       height: 100vh;
+      min-height: 100dvh;
+      max-width: 100%;
+      overflow-x: hidden;
       display: flex;
       flex-direction: column;
     }
@@ -66,11 +69,25 @@
     /* ---- Main content ---- */
     .main {
       flex: 1;
+      min-width: 0;
+      max-width: 100%;
       overflow-y: auto;
       padding: 1.5rem 2rem;
       display: flex;
       flex-direction: column;
       gap: 1.25rem;
+    }
+    .eval-load-error {
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--red);
+      border-radius: var(--radius);
+      background: var(--red-bg);
+      color: var(--red);
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      font-weight: 500;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
     }
 
     /* ---- Sections ---- */
@@ -79,6 +96,8 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       flex-shrink: 0;
+      min-width: 0;
+      max-width: 100%;
     }
     .section-header {
       font-family: var(--font-sans);
@@ -90,9 +109,12 @@
       color: var(--text-muted);
       border-bottom: 1px solid var(--border);
       background: var(--bg);
+      overflow-wrap: anywhere;
     }
     .section-body {
       padding: 1rem;
+      min-width: 0;
+      max-width: 100%;
     }
 
     /* ---- Config badge ---- */
@@ -110,11 +132,11 @@
     }
     .config-badge.config-primary {
       background: rgba(33, 150, 243, 0.12);
-      color: #1976d2;
+      color: #155fa8;
     }
     .config-badge.config-baseline {
       background: rgba(255, 193, 7, 0.15);
-      color: #f57f17;
+      color: #8a4b00;
     }
 
     /* ---- Prompt ---- */
@@ -129,6 +151,8 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       overflow: hidden;
+      min-width: 0;
+      max-width: 100%;
     }
     .output-file + .output-file {
       margin-top: 1rem;
@@ -142,20 +166,26 @@
       border-bottom: 1px solid var(--border);
       font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
       display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
       justify-content: space-between;
       align-items: center;
     }
+    .output-file-header > span:first-child {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
     .output-file-header .dl-btn {
-      font-size: 0.7rem;
+      font-size: 0.75rem;
       color: var(--accent);
       text-decoration: none;
       cursor: pointer;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-weight: 500;
-      opacity: 0.8;
+      font-weight: 600;
+      flex-shrink: 0;
     }
     .output-file-header .dl-btn:hover {
-      opacity: 1;
+      color: var(--accent-hover);
       text-decoration: underline;
     }
     .output-file-content {
@@ -378,14 +408,27 @@
       color: var(--accent);
       border-bottom-color: var(--accent);
     }
-    .view-panel { display: none; }
-    .view-panel.active { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+    .view-panel { display: none; min-width: 0; max-width: 100%; }
+    .view-panel.active { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-width: 0; max-width: 100%; }
 
     /* ---- Benchmark view ---- */
     .benchmark-view {
       padding: 1.5rem 2rem;
       overflow-y: auto;
+      overflow-x: hidden;
       flex: 1;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .table-scroll {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      margin-bottom: 1.5rem;
+    }
+    .table-scroll .benchmark-table {
+      margin-bottom: 0;
     }
     .benchmark-table {
       border-collapse: collapse;
@@ -487,7 +530,7 @@
       cursor: pointer;
       font-size: 0.875rem;
       font-weight: 500;
-      transition: all 0.15s;
+      transition: background-color 0.15s, border-color 0.15s;
     }
     .done-btn:hover {
       background: var(--bg);
@@ -567,10 +610,71 @@
     .toast.visible {
       opacity: 1;
     }
+
+    @media (max-width: 640px) {
+      .header {
+        padding: 0.75rem 1rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      .header h1 {
+        font-size: 1.125rem;
+      }
+      .header .progress {
+        text-align: left;
+      }
+      .view-tabs {
+        padding: 0 1rem;
+        overflow-x: auto;
+      }
+      .view-tab {
+        padding: 0.625rem 0.875rem;
+        white-space: nowrap;
+      }
+      .main,
+      .benchmark-view {
+        padding: 1rem;
+      }
+      .config-badge {
+        margin-left: 0.25rem;
+      }
+      .benchmark-table th,
+      .benchmark-table td {
+        padding: 0.5rem 0.625rem;
+      }
+      .nav {
+        padding: 0.75rem 1rem;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .nav-btn,
+      .done-btn {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+      }
+      .done-btn {
+        flex: 1 1 auto;
+      }
+      .done-card {
+        margin: 1rem;
+        padding: 1.5rem;
+        max-width: calc(100vw - 2rem);
+      }
+      .toast {
+        max-width: calc(100vw - 2rem);
+        text-align: center;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0s !important;
+        animation-duration: 0s !important;
+      }
+    }
   </style>
 </head>
 <body>
-  <div id="app" style="height:100vh; display:flex; flex-direction:column;">
+  <div id="app" style="height:100vh; min-height:100dvh; max-width:100%; overflow-x:hidden; display:flex; flex-direction:column;">
     <div class="header">
       <div>
         <h1>Eval Review: <span id="skill-name"></span></h1>
@@ -588,6 +692,7 @@
     <!-- Outputs panel (qualitative review) -->
     <div class="view-panel active" id="panel-outputs" role="tabpanel" aria-labelledby="tab-outputs">
     <div class="main">
+      <div class="eval-load-error" id="eval-load-error" role="alert" hidden></div>
       <!-- Prompt -->
       <div class="section">
         <div class="section-header">Prompt <span class="config-badge" id="config-badge" hidden></span></div>
