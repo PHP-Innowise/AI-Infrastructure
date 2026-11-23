@@ -1048,9 +1048,9 @@ fn decide_for(
         && !agent_only
         && all_read_only
         && all_program_steps
-        && (plan_only
-            || stored.capsule.kind == CapsuleKind::ToolChain
-            || stored.capsule.bindings.is_empty());
+        && !stored.capsule.programs.is_empty()
+        && stored.capsule.bindings.is_empty()
+        && (plan_only || stored.capsule.kind == CapsuleKind::ToolChain);
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
         let state_dir = runtime
@@ -1573,6 +1573,12 @@ pub(crate) fn try_direct_execute(
     {
         return DirectDispatchOutcome::Fallback {
             reason: "requires_agent".into(),
+            program_failed: false,
+        };
+    }
+    if !stored.capsule.bindings.is_empty() && supplied_bindings.is_none() {
+        return DirectDispatchOutcome::Fallback {
+            reason: "needs_bindings".into(),
             program_failed: false,
         };
     }
@@ -3130,7 +3136,7 @@ mod tests {
             block: String::new(),
             environment: BTreeMap::new(),
             bin: None,
-            package: Some(hybrid_instr_dir),
+            package: Some(hybrid_instr_dir.clone()),
             state_dir: Some(hybrid_instr_state),
             direct_dispatch: true,
             seen: AtomicU64::new(0),
@@ -3180,5 +3186,165 @@ mod tests {
                 panic!("expected fallback when direct execution failed");
             }
         }
+        let _ = package::remove(&hybrid_instr_dir);
+
+        // Parameterized read-only capsule (!bindings.is_empty()) in `plan` mode MUST NOT set
+        // `direct_dispatch = true` (it keeps a normal warm hit so the agent binds inputs).
+        let param_cap_dir = dir.path().join("param-caps/cap-param-1/warm");
+        let param_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-target", "description": "Inspect parameterized PHP app"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [{"name": "target", "type": "path", "origin": "request", "description": "Target path"}],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": ["target"],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let pkg_sha = package::write_warm(&param_cap_dir, &param_cap, None, &files).unwrap();
+        let loaded_param = package::load(&param_cap_dir).unwrap();
+
+        let param_warm_stub = Warm {
+            capsule_id: "cap-param-1".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "inspect-target".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(param_cap_dir.clone()),
+            state_dir: Some(dir.path().join("param-direct-state")),
+            direct_dispatch: true,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        match try_direct_execute(&param_warm_stub, &workspace, "g-param-bindings", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            } => {
+                assert_eq!(reason, "needs_bindings");
+                assert!(!program_failed);
+            }
+            DirectDispatchOutcome::Completed { .. } => {
+                panic!("expected needs_bindings fallback when bindings are unsupplied");
+            }
+        }
+
+        let repo = dir.path().join("param-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("composer.json"), "{}\n").unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "init"]);
+        let tree_sha = trace::workspace_tree_sha(&repo).unwrap();
+        let store = SessionStore::open(&dir.path().join("param-store")).unwrap();
+        let project_id = store.register(&repo).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&["python3".into()]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": &tree_sha});
+            db::begin_capsule(
+                &db,
+                "cap-param-1",
+                "cmp-param-1",
+                &project_id,
+                "s-param",
+                "g-param",
+                &tc_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-param-1",
+                    mu_name: "inspect-target",
+                    mu_description: "Inspect parameterized PHP app",
+                    form: "hybrid",
+                    capsule_sha256: &loaded_param.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: &rt.engine_digest(),
+                    artifact_dir: param_cap_dir.parent().unwrap().to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-param-1", "tool_chain", &tree_sha).unwrap();
+            db::set_capsule_read_only(&db, "cap-param-1", true).unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-param-1", 1, gate, true, &json!({"passed": true}))
+                    .unwrap();
+            }
+        }
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect target path".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let sess = json!({
+            "id": "s-param",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "plan",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(&rt, &sess, &route, "inspect target path", &repo, None) {
+            Decision::Hit(decided) => {
+                assert_eq!(decided.capsule_id, "cap-param-1");
+                assert!(
+                    !decided.direct_dispatch,
+                    "parameterized capsule in plan mode must remain normal warm hit"
+                );
+            }
+            other => panic!("expected normal warm hit, got {}", reason(&other)),
+        }
+        let _ = package::remove(&param_cap_dir);
     }
 }

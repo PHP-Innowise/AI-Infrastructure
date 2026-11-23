@@ -2447,31 +2447,42 @@ impl Sessions {
                         reason,
                         program_failed,
                     } => {
-                        if program_failed {
-                            warm.finish(&self.store, &session, &job.generation, &|event| {
-                                emit(event)
-                            });
-                            crate::skillcache::maybe_enqueue_recompile_on_finish(
-                                &self.skillcache_runtime(),
-                                &warm.capsule_id,
-                                &|event| {
-                                    let _ = emit(event);
-                                },
-                            );
+                        if reason == "needs_bindings" && !program_failed {
+                            let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                            if let Some(event) = hit_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = hit_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            Some(warm)
                         } else {
-                            warm.cleanup_abandoned();
+                            if program_failed {
+                                warm.finish(&self.store, &session, &job.generation, &|event| {
+                                    emit(event)
+                                });
+                                crate::skillcache::maybe_enqueue_recompile_on_finish(
+                                    &self.skillcache_runtime(),
+                                    &warm.capsule_id,
+                                    &|event| {
+                                        let _ = emit(event);
+                                    },
+                                );
+                            } else {
+                                warm.cleanup_abandoned();
+                            }
+                            let fallback_decision = crate::skillcache::warm::Decision::Miss {
+                                reason: "direct_fallback",
+                                text: format!("direct execution fell back to cold run ({reason})"),
+                            };
+                            if let Some(event) = fallback_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = fallback_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            None
                         }
-                        let fallback_decision = crate::skillcache::warm::Decision::Miss {
-                            reason: "direct_fallback",
-                            text: format!("direct execution fell back to cold run ({reason})"),
-                        };
-                        if let Some(event) = fallback_decision.event() {
-                            emit(event)?;
-                        }
-                        if let Some(record) = fallback_decision.record() {
-                            let _ = results.note_skillcache(&job.generation, &record);
-                        }
-                        None
                     }
                 }
             }

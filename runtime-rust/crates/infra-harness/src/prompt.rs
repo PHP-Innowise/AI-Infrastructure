@@ -431,13 +431,19 @@ fn stat_project_context(root: &Path, now_ns: u128) -> Option<([FileStat; 5], boo
 }
 
 fn project_context_stamp(root: &Path) -> String {
+    static UNCACHEABLE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let Some((stats, racy_safe)) =
         stat_project_context(root, crate::skillcache::db::current_unix_ns())
     else {
-        return "uncacheable".into();
+        let seq = UNCACHEABLE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return format!(
+            "uncacheable:{}:{seq}",
+            crate::skillcache::db::current_unix_ns()
+        );
     };
     if !racy_safe {
-        return format!("racy:{}", crate::skillcache::db::current_unix_ns());
+        let seq = UNCACHEABLE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return format!("racy:{}:{seq}", crate::skillcache::db::current_unix_ns());
     }
     let mut out = String::new();
     for stat in stats {
@@ -1074,5 +1080,15 @@ mod tests {
         assert_eq!(n1.ledger["prefix_cache_hit"], false);
         assert_eq!(n2.ledger["prefix_cache_hit"], true);
         assert_eq!(n1.ledger["prefix_digest"], n2.ledger["prefix_digest"]);
+
+        // Uncacheable context stamps (e.g. non-regular AGENTS.md) never collide or serve stale hits.
+        std::fs::remove_file(&agents_path).unwrap();
+        std::fs::create_dir(&agents_path).unwrap();
+        let s1 = project_context_stamp(&workspace);
+        let s2 = project_context_stamp(&workspace);
+        assert!(s1.starts_with("uncacheable:"), "{s1}");
+        assert!(s2.starts_with("uncacheable:"), "{s2}");
+        assert_ne!(s1, s2);
+        assert!(load_project_excerpts(&workspace).is_err());
     }
 }
