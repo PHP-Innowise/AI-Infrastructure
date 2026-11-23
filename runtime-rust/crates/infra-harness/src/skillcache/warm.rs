@@ -1089,8 +1089,7 @@ fn decide_for_inner(
     let bypass =
         crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Bypass);
     let pin = settings::capsule_pin(session);
-    let native_slash_skill = if route.mode == "native" && route.requests.is_empty() && pin.is_none()
-    {
+    let native_slash_skill = if route.mode == "native" && route.requests.is_empty() {
         match resolve_native_slash_skill(workspace, message) {
             Some(found) => Some(found),
             None => {
@@ -1126,27 +1125,28 @@ fn decide_for_inner(
         if route.requests.len() > 1 {
             return miss("no_single_skill", "the message names more than one skill");
         }
-        let requested_skill_path = if route.requests.len() == 1 {
-            match route.requests[0]["path"]
+        let (requested_skill_path, requested_skill_name) = if let Some((name, path)) =
+            native_slash_skill.as_ref()
+        {
+            (Some(path.clone()), name.as_str())
+        } else if route.requests.len() == 1 {
+            let path = match route.requests[0]["path"]
                 .as_str()
                 .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
             {
-                Some(path) => Some(path),
+                Some(path) => path,
                 None => {
                     return miss(
                         "no_capsule",
                         "the routed skill is not a skill folder of this project or of your home",
                     );
                 }
-            }
+            };
+            let name = route.requests[0]["name"].as_str().unwrap_or("");
+            (Some(path), name)
         } else {
-            None
+            (None, "")
         };
-        let requested_skill_name = route
-            .requests
-            .first()
-            .and_then(|req| req["name"].as_str())
-            .unwrap_or("");
         let requested_tree_sha = requested_skill_path
             .as_deref()
             .and_then(|path| trace::skill_file(workspace, path))
@@ -1224,12 +1224,6 @@ fn decide_for_inner(
                     .as_str()
                     .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
                 else {
-                    if codex_manual {
-                        return miss(
-                            "codex_manual",
-                            "Codex in Manual mode would ask before every step of the executor",
-                        );
-                    }
                     return miss(
                         "no_capsule",
                         "the routed skill is not a skill folder of this project or of your home",
@@ -1334,12 +1328,6 @@ fn decide_for_inner(
                     "Cursor runs textual capsules only; no active textual capsule exists for this skill",
                 );
             }
-            if codex_manual && (!route.requests.is_empty() || native_slash_skill.is_some()) {
-                return miss(
-                    "codex_manual",
-                    "Codex in Manual mode would ask before every step of the executor",
-                );
-            }
             return miss("no_capsule", "no qualified capsule exists for this skill");
         }
         let had_provider_eligible = !eligible.is_empty();
@@ -1428,38 +1416,14 @@ fn decide_for_inner(
     let engine = runtime.engine.clone();
     let codex = runtime.codex_executable();
     let eval_arm = arm.map(String::from);
-    let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
-        if codex_manual {
-            return miss(
-                "codex_manual",
-                "Codex in Manual mode would ask before every step of the executor",
-            );
-        }
-        // A written procedure is read, and a preview stages nothing.
-        return Decision::Hit(Arc::new(Warm {
-            capsule_id,
-            form: stored.capsule.form,
-            eval_arm,
-            name,
-            block: text,
-            environment: BTreeMap::new(),
-            bin: None,
-            package: None,
-            state_dir: None,
-            engine,
-            codex,
-            direct_dispatch: false,
-            direct_bindings: None,
-            seen: AtomicU64::new(0),
-            seen_changes: AtomicU64::new(0),
-        }));
-    };
-    let all_read_only =
-        !stored.capsule.programs.is_empty() && stored.capsule.programs.iter().all(|p| p.read_only);
-    let all_program_steps = stored
-        .capsule
-        .plan()
-        .all(|step| matches!(step, Step::Program { .. }));
+    let all_read_only = stored.capsule.form == Form::Hybrid
+        && !stored.capsule.programs.is_empty()
+        && stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_program_steps = stored.capsule.form == Form::Hybrid
+        && stored
+            .capsule
+            .plan()
+            .all(|step| matches!(step, Step::Program { .. }));
     let explicit_direct = session["skillcache"]["direct_dispatch"].as_bool() == Some(true);
     let mode_allows_direct =
         plan_only || stored.capsule.kind != CapsuleKind::ToolChain || explicit_direct;
@@ -1468,7 +1432,7 @@ fn decide_for_inner(
     let state_subdir = if sid_opt.is_some() && !capsule_id.is_empty() {
         capsule_id.as_str()
     } else {
-        generation
+        generation.unwrap_or("preview")
     };
     let session_root = runtime
         .store
@@ -1482,8 +1446,9 @@ fn decide_for_inner(
     let mut resume_note: Option<String> = None;
     let mut initial_seen = 0u64;
     let mut initial_seen_changes = 0u64;
-    if sid_opt.is_some() {
-        if session_root.exists()
+    if stored.capsule.form == Form::Hybrid && sid_opt.is_some() {
+        if generation.is_some()
+            && session_root.exists()
             && let Ok(entries) = std::fs::read_dir(&session_root)
         {
             for entry in entries.flatten() {
@@ -1517,7 +1482,7 @@ fn decide_for_inner(
                     stored.capsule.plan_len(),
                     existing.awaiting,
                 ));
-            } else {
+            } else if generation.is_some() {
                 let _ = std::fs::remove_dir_all(&state_dir);
             }
         }
@@ -1545,12 +1510,32 @@ fn decide_for_inner(
         None
     };
     let direct_dispatch = direct_bindings.is_some();
-    if codex_manual && !direct_dispatch && !all_read_only {
+    if codex_manual && stored.capsule.form == Form::Hybrid && !direct_dispatch && !all_read_only {
         return miss(
             "codex_manual",
             "Codex in Manual mode would ask before every step of the executor",
         );
     }
+    let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
+        // A written procedure is read, and a preview stages nothing.
+        return Decision::Hit(Arc::new(Warm {
+            capsule_id,
+            form: stored.capsule.form,
+            eval_arm,
+            name,
+            block: text,
+            environment: BTreeMap::new(),
+            bin: None,
+            package: None,
+            state_dir: None,
+            engine,
+            codex,
+            direct_dispatch,
+            direct_bindings,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        }));
+    };
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
         infra_core::fs::ensure_directory(&state_dir, true)?;
@@ -2530,10 +2515,11 @@ mod tests {
             decide(&session("cursor", "edit", "auto", "warm_only"), &one),
             "no_capsule"
         );
-        // warm_disabled_for_codex_manual
+        // Uncompiled/unknown skill in Codex Manual must still miss with `no_capsule`,
+        // not mask uncompiled state with `codex_manual`.
         assert_eq!(
             decide(&session("codex", "edit", "manual", "auto"), &one),
-            "codex_manual"
+            "no_capsule"
         );
         // Claude in Manual is not Codex in Manual: it gets as far as the skill.
         assert_eq!(
@@ -2571,7 +2557,7 @@ mod tests {
         assert_eq!(decision.event().unwrap()["phase"], "miss");
         assert_eq!(
             decision.record().unwrap(),
-            json!({"decision": "miss", "reason": "codex_manual"})
+            json!({"decision": "miss", "reason": "no_capsule"})
         );
         assert!(Decision::Off.event().is_none() && Decision::Off.record().is_none());
         // Nothing was staged for any of them.
@@ -4863,5 +4849,336 @@ mod tests {
         assert!(!reset_hit.block.contains("Paused SkillCache run on disk"));
 
         let _ = package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn codex_manual_preview_textual_and_pinned_native_commands_behave_consistently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude/skills/audit")).unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills/writer")).unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills/notes")).unwrap();
+        std::fs::write(ws.join(".claude/skills/audit/SKILL.md"), "# Audit\n").unwrap();
+        std::fs::write(ws.join(".claude/skills/writer/SKILL.md"), "# Writer\n").unwrap();
+        std::fs::write(ws.join(".claude/skills/notes/SKILL.md"), "# Notes\n").unwrap();
+
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store: store.clone(),
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let env_fp_py = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&["python3".into()]),
+        );
+        let env_fp_empty = infra_skillcache::fingerprint::env_fingerprint(&BTreeMap::new());
+
+        // Helper to seed an active capsule on disk + SQLite.
+        let seed_cap = |cap_id: &str,
+                        skill_name: &str,
+                        skill_rel: &str,
+                        form: Form,
+                        read_only: bool,
+                        program_src: &[u8]| {
+            let tree =
+                infra_skillcache::fingerprint::tree_sha256(ws.join(skill_rel).parent().unwrap())
+                    .unwrap();
+            let cap = infra_skillcache::SkillCapsule::from_value(&if form == Form::Textual {
+                json!({
+                    "schema_version": 1,
+                    "form": "textual",
+                    "kind": "skill",
+                    "mu": {"name": format!("{skill_name}-txt"), "description": "Textual guide"},
+                    "source": {"skills": [{"name": skill_name, "path": skill_rel, "tree_sha256": tree.sha256}]},
+                })
+            } else {
+                json!({
+                    "schema_version": 1,
+                    "form": "hybrid",
+                    "kind": "skill",
+                    "mu": {"name": format!("{skill_name}-hyb"), "description": "Hybrid capsule"},
+                    "source": {"skills": [{"name": skill_name, "path": skill_rel, "tree_sha256": tree.sha256}]},
+                    "capabilities": {"network": "none", "runtimes": ["python3"]},
+                    "bindings": [],
+                    "programs": [{
+                        "id": "p",
+                        "entry": ["python3", "programs/p/main.py"],
+                        "inputs": [],
+                        "outputs": [],
+                        "check": ["python3", "programs/p/main.py", "--check"],
+                        "timeout_seconds": 30,
+                        "read_only": read_only,
+                    }],
+                    "steps": [{"kind": "program", "program": "p"}],
+                    "verification": [],
+                })
+            })
+            .unwrap();
+            let art_dir = root.join("capsules").join(cap_id);
+            let warm_dir = art_dir.join("warm");
+            let mut pkg_files = infra_skillcache::package::Files::new();
+            let markdown = if form == Form::Textual {
+                Some(b"# Textual\n\nFollow steps.\n".as_slice())
+            } else {
+                pkg_files.insert("programs/p/main.py", program_src.to_vec());
+                None
+            };
+            let pkg_sha = package::write_warm(&warm_dir, &cap, markdown, &pkg_files).unwrap();
+            let cap_sha = package::load(&warm_dir).unwrap().capsule_sha256;
+            let skill_ref = json!({
+                "name": skill_name,
+                "path": skill_rel,
+                "tree_sha256": tree.sha256,
+                "taken_ns": tree.taken_ns.to_string(),
+                "files": tree.files.iter().map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                    "mtime_ns": f.mtime_ns.to_string(),
+                })).collect::<Vec<_>>(),
+            });
+            let caps_json = if form == Form::Textual {
+                json!({})
+            } else {
+                json!({"network": "none", "runtimes": ["python3"]})
+            };
+            let env_fp = if form == Form::Textual {
+                env_fp_empty.as_str()
+            } else {
+                env_fp_py.as_str()
+            };
+            let db = store.connection().unwrap();
+            db::begin_capsule(
+                &db,
+                cap_id,
+                &format!("cmp-{cap_id}"),
+                &project_id,
+                "s0",
+                "g0",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: cap_id,
+                    mu_name: &cap.mu.name,
+                    mu_description: &cap.mu.description,
+                    form: form.as_str(),
+                    capsule_sha256: &cap_sha,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({"skills": [skill_ref]}),
+                    env_fingerprint: env_fp,
+                    engine_digest: "",
+                    artifact_dir: art_dir.to_str().unwrap(),
+                    capabilities: &caps_json,
+                },
+            )
+            .unwrap();
+            warm_dir
+        };
+
+        let dir_ro = seed_cap(
+            "cap-ro",
+            "audit",
+            ".claude/skills/audit/SKILL.md",
+            Form::Hybrid,
+            true,
+            b"print('ro')\n",
+        );
+        let dir_rw = seed_cap(
+            "cap-rw",
+            "writer",
+            ".claude/skills/writer/SKILL.md",
+            Form::Hybrid,
+            false,
+            b"print('rw')\n",
+        );
+        let dir_txt = seed_cap(
+            "cap-txt",
+            "notes",
+            ".claude/skills/notes/SKILL.md",
+            Form::Textual,
+            false,
+            b"",
+        );
+
+        let codex_manual_session = |pin: Option<&str>| {
+            let mut sc = json!({"mode": "auto"});
+            if let Some(id) = pin {
+                sc["capsule_id"] = id.into();
+            }
+            json!({
+                "id": "sess-qa",
+                "project_id": project_id,
+                "provider": "codex",
+                "mode": "edit",
+                "permissions": "manual",
+                "skillcache": sc,
+            })
+        };
+        let skill_route = |name: &str, rel: &str| ResolvedCommand {
+            mode: "text".into(),
+            text: format!("${name}"),
+            requests: vec![json!({"name": name, "path": rel})],
+            notice: None,
+        };
+
+        // 1. Existing workspace skill WITHOUT a capsule misses with `no_capsule`, NOT `codex_manual`.
+        std::fs::create_dir_all(ws.join(".claude/skills/uncompiled")).unwrap();
+        std::fs::write(ws.join(".claude/skills/uncompiled/SKILL.md"), "# Empty\n").unwrap();
+        let missing_route = skill_route("uncompiled", ".claude/skills/uncompiled/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &missing_route,
+                "$uncompiled",
+                &ws,
+                Some("g")
+            )),
+            "no_capsule"
+        );
+        assert_eq!(
+            preview(
+                &rt,
+                &codex_manual_session(None),
+                &missing_route,
+                "$uncompiled",
+                &ws
+            )["reason"],
+            "no_capsule"
+        );
+
+        // 2. Form::Textual hits cleanly on Codex + Manual for BOTH preview (`generation == None`) and live `decide`.
+        let txt_route = skill_route("notes", ".claude/skills/notes/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &txt_route,
+                "$notes",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            preview(&rt, &codex_manual_session(None), &txt_route, "$notes", &ws)["decision"],
+            "hit"
+        );
+
+        // 3. `all_read_only` Form::Hybrid hits cleanly in BOTH `preview` and live `decide` on Codex + Manual.
+        let ro_route = skill_route("audit", ".claude/skills/audit/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &ro_route,
+                "$audit",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            preview(&rt, &codex_manual_session(None), &ro_route, "$audit", &ws)["decision"],
+            "hit"
+        );
+
+        // 4. Mutating Form::Hybrid (`read_only == false`) misses with `codex_manual` in BOTH `preview` and live `decide`.
+        let rw_route = skill_route("writer", ".claude/skills/writer/SKILL.md");
+        let rw_live = decide_for(
+            &rt,
+            &codex_manual_session(None),
+            &rw_route,
+            "$writer",
+            &ws,
+            Some("g"),
+        );
+        assert_eq!(reason(&rw_live), "codex_manual");
+        assert_eq!(
+            rw_live.record().unwrap(),
+            json!({"decision": "miss", "reason": "codex_manual"})
+        );
+        let rw_prev = preview(&rt, &codex_manual_session(None), &rw_route, "$writer", &ws);
+        assert_eq!(rw_prev["decision"], "miss");
+        assert_eq!(rw_prev["reason"], "codex_manual");
+
+        // 5. Pinned capsule must NEVER hijack `route.mode == "native"` CLI commands (`/compact`, `/clear`).
+        let claude_pinned = json!({
+            "id": "sess-pin",
+            "project_id": project_id,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "bypass",
+            "skillcache": {"mode": "warm_only", "capsule_id": "cap-ro"},
+        });
+        let native_empty = ResolvedCommand {
+            mode: "native".into(),
+            text: "/compact".into(),
+            requests: vec![],
+            notice: None,
+        };
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/compact",
+                &ws,
+                Some("g")
+            )),
+            "native_route"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/clear",
+                &ws,
+                Some("g")
+            )),
+            "native_route"
+        );
+        // Native slash invocation naming the pinned skill STILL hits, while naming another skill misses with `no_capsule`.
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/audit invoices",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/notes",
+                &ws,
+                Some("g")
+            )),
+            "no_capsule"
+        );
+
+        let _ = package::remove(&dir_ro);
+        let _ = package::remove(&dir_rw);
+        let _ = package::remove(&dir_txt);
     }
 }

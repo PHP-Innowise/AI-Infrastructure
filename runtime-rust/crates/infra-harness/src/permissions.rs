@@ -1023,10 +1023,17 @@ fn is_skillcache_run_command(
         let cmd_path = Path::new(cmd);
         cmd_path.is_absolute()
             && cmd_path.file_name().and_then(|n| n.to_str()) == Some("skillcache-run")
-            && infra_core::fs::canonicalize(cmd_path)
-                .ok()
-                .zip(infra_core::fs::canonicalize(&store.state).ok())
-                .is_some_and(|(bin, state)| bin.starts_with(&state) && !bin.starts_with(ws_canon))
+            && std::fs::symlink_metadata(cmd_path).is_ok()
+            && cmd_path
+                .parent()
+                .and_then(|p| infra_core::fs::canonicalize(p).ok())
+                .zip(infra_core::fs::canonicalize(store.state.join("skillcache/bin")).ok())
+                .is_some_and(|(parent, state_bin)| {
+                    parent.starts_with(&state_bin)
+                        && !infra_core::fs::canonicalize(cmd_path)
+                            .ok()
+                            .is_some_and(|target| target.starts_with(ws_canon))
+                })
     } else {
         false
     };
@@ -1058,6 +1065,12 @@ fn check_read_only_capsule_program(
         return Ok(false);
     };
     let is_runner = is_skillcache_run_command(&ws_canon, store, tokens);
+    let first_is_abs = tokens
+        .first()
+        .is_some_and(|cmd| cmd.starts_with('/') || cmd.starts_with('\\'));
+    if first_is_abs && !is_runner {
+        return Ok(false);
+    }
     let rel_refs: Vec<String> = tokens
         .iter()
         .skip(1)
@@ -1359,6 +1372,7 @@ pub fn classify_read_only_program_command_in_store(
     if runtime.is_empty() {
         return Ok(None);
     }
+    let mut first_is_abs = false;
     for (idx, arg) in tokens.iter().enumerate() {
         let lower = arg.to_ascii_lowercase();
         if lower.ends_with(".cmd") || lower.ends_with(".bat") {
@@ -1376,7 +1390,13 @@ pub fn classify_read_only_program_command_in_store(
             return Err("argv_parent_traversal: parent or home traversal is not admitted".into());
         }
         if path_part.starts_with('/') || path_part.starts_with('\\') {
-            return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
+            if idx == 0 {
+                first_is_abs = true;
+            } else {
+                return Err(
+                    "argv_absolute_path: absolute paths are not admitted in auto rules".into(),
+                );
+            }
         }
     }
 
@@ -1384,6 +1404,9 @@ pub fn classify_read_only_program_command_in_store(
         && check_read_only_capsule_program(ws, store, &tokens)?
     {
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
+    }
+    if first_is_abs {
+        return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
     }
     if has_mutating_flag(&tokens) || has_cli_output_or_exec_override(&tokens) {
         return Ok(None);
@@ -2428,6 +2451,78 @@ mod tests {
         );
 
         let _ = infra_skillcache::package::remove(&warm_dir_rw);
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn abs_path_staged_skillcache_run_reaches_read_only_capsule_check_while_other_abs_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let prog_bytes = b"print('ro check')\n";
+        std::fs::write(ws.join("programs/check.py"), prog_bytes).unwrap();
+        let state_dir = root.join("state");
+        let store = crate::store::SessionStore::open(&state_dir).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-ro-abs",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        let fake_engine = root.join("infra-engine-bin");
+        std::fs::write(&fake_engine, b"#!/bin/sh\nexit 0\n").unwrap();
+        let bin_dir = state_dir.join("skillcache/bin/abc123def456");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let staged_runner = bin_dir.join("skillcache-run");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&fake_engine, &staged_runner).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&fake_engine, &staged_runner).unwrap();
+
+        let staged_cmd = format!(
+            "{} run '{{\"input_dir\":\"invoices\"}}'",
+            staged_runner.display()
+        );
+        assert!(
+            classify_read_only_program_command_in_store(Some(&ws), Some(&store), &staged_cmd)
+                .unwrap()
+                .is_some(),
+            "staged symlinked skillcache-run should verify sealed all_read_only capsule"
+        );
+
+        // Unstaged / arbitrary absolute path binary MUST still fail with argv_absolute_path.
+        let evil_runner = root.join("skillcache-run");
+        std::fs::write(&evil_runner, b"#!/bin/sh\nexit 0\n").unwrap();
+        let evil_cmd = format!("{} run", evil_runner.display());
+        let err = classify_read_only_program_command_in_store(Some(&ws), Some(&store), &evil_cmd)
+            .unwrap_err();
+        assert!(err.starts_with("argv_absolute_path:"), "{err}");
+
+        // Regular absolute path CLI and idx>0 absolute path argument still fail with argv_absolute_path.
+        let cat_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "/bin/cat programs/check.py",
+        )
+        .unwrap_err();
+        assert!(cat_err.starts_with("argv_absolute_path:"), "{cat_err}");
+        let arg_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "skillcache-run run /etc/passwd",
+        )
+        .unwrap_err();
+        assert!(arg_err.starts_with("argv_absolute_path:"), "{arg_err}");
+
         let _ = infra_skillcache::package::remove(&warm_dir);
     }
 }
