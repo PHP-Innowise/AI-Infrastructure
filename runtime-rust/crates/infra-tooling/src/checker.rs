@@ -4,7 +4,7 @@ use infra_core::{Result, RuntimeError, fs as safe};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
     sync::{
@@ -321,29 +321,31 @@ struct GateContext<'a> {
     base: &'a str,
     group: &'a Group,
     strict: bool,
+    no_cache: bool,
     oracle_allowed: bool,
     logs: &'a Path,
     cancel: Arc<AtomicBool>,
 }
 
 const CHECKER_RACY_NS: i128 = 2_000_000_000;
+const MAX_CHECK_RECEIPTS: usize = 512;
+const MAX_CLOSURE_FILES: usize = 4000;
 
 fn time_to_unix_ns(time: std::time::SystemTime) -> Option<i128> {
-    match time.duration_since(std::time::UNIX_EPOCH) {
-        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
-        Err(err) => i128::try_from(err.duration().as_nanos())
-            .ok()
-            .and_then(|ns| ns.checked_neg()),
-    }
+    crate::mirrors::check_receipts::time_to_unix_ns(time)
 }
 
 fn now_unix_ns() -> i128 {
-    time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
+    crate::mirrors::check_receipts::now_unix_ns()
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CheckReceiptStore {
+    #[serde(default)]
+    next_seq: u64,
     entries: std::collections::BTreeMap<String, CheckReceiptEntry>,
+    #[serde(skip)]
+    dirty: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -351,6 +353,8 @@ struct CheckReceiptEntry {
     group: String,
     gate: String,
     cached_at: String,
+    #[serde(default)]
+    last_used: u64,
 }
 
 fn load_receipt_store(path: &Path) -> CheckReceiptStore {
@@ -360,11 +364,43 @@ fn load_receipt_store(path: &Path) -> CheckReceiptStore {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+fn evict_oldest_receipts(store: &mut CheckReceiptStore) {
+    if store.entries.len() <= MAX_CHECK_RECEIPTS {
+        return;
+    }
+    let mut by_age: Vec<(u64, String)> = store
+        .entries
+        .iter()
+        .map(|(k, v)| (v.last_used, k.clone()))
+        .collect();
+    by_age.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let excess = store.entries.len().saturating_sub(MAX_CHECK_RECEIPTS);
+    for (_, evict_key) in by_age.into_iter().take(excess) {
+        store.entries.remove(&evict_key);
+    }
+}
+
 fn save_receipt_store(path: &Path, store: &CheckReceiptStore) {
+    static SAVE_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = SAVE_LOCK.get_or_init(|| Mutex::new(())).lock();
     if let Some(parent) = path.parent() {
         let _ = safe::ensure_directory(parent, true);
     }
-    if let Ok(bytes) = serde_json::to_vec(store) {
+    let mut merged = load_receipt_store(path);
+    merged.next_seq = merged.next_seq.max(store.next_seq);
+    for (key, entry) in &store.entries {
+        merged
+            .entries
+            .entry(key.clone())
+            .and_modify(|existing| {
+                if entry.last_used > existing.last_used {
+                    *existing = entry.clone();
+                }
+            })
+            .or_insert_with(|| entry.clone());
+    }
+    evict_oldest_receipts(&mut merged);
+    if let Ok(bytes) = serde_json::to_vec(&merged) {
         let _ = safe::atomic_write(path, &bytes);
     }
 }
@@ -390,18 +426,596 @@ fn resolve_tool_binary_stamp(program: &str, root: &Path) -> Option<String> {
     Some(format!("{}:{}:{mtime}", found.display(), meta.len()))
 }
 
-fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i128)> {
-    const MAX_CLOSURE_FILES: usize = 4000;
-    let mut queue = VecDeque::from([root.to_path_buf()]);
-    let mut entries = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut max_mtime_ns = root
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(time_to_unix_ns)
-        .unwrap_or(0);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ScopeKind {
+    ScopedDirs,
+    GitTrackedGlobs,
+    FullRepo,
+}
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ClosureScope {
+    kind: ScopeKind,
+    dirs: Vec<String>,
+    globs: Vec<String>,
+    extra_files: Vec<String>,
+    git_base: Option<String>,
+    ir_revision_hint: Option<u64>,
+    graph_ir_db: Option<PathBuf>,
+}
+
+fn normalize_rel_path(root: &Path, path: &Path) -> Option<String> {
+    let rel = if path.is_absolute() {
+        path.strip_prefix(root).ok()?
+    } else {
+        path
+    };
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        Some(".".into())
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn request_editions(req: &Value) -> Option<Vec<String>> {
+    let raw = if let Some(arr) = req.get("editions").and_then(Value::as_array) {
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else if let Some(one) = req.get("edition").and_then(Value::as_str) {
+        vec![one.to_string()]
+    } else {
+        let arr = req.get("edition").and_then(Value::as_array)?;
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let mut resolved = Vec::new();
+    for item in raw {
+        let edition = common::edition(&item).ok()?.to_string();
+        if !resolved.contains(&edition) {
+            resolved.push(edition);
+        }
+    }
+    (!resolved.is_empty()).then_some(resolved)
+}
+
+fn cargo_package_scope(
+    root: &Path,
+    manifest_rel: &str,
+    package: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let manifest_path = root.join(manifest_rel);
+    let manifest_dir = Path::new(manifest_rel)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let manifest_text = std::fs::read_to_string(&manifest_path).ok()?;
+    let doc = manifest_text.parse::<toml_edit::DocumentMut>().ok()?;
+    let members = doc
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())?;
+
+    let mut member_dirs = Vec::new();
+    for entry in members.iter().filter_map(|v| v.as_str()) {
+        if let Some(prefix) = entry.strip_suffix("/*") {
+            let parent = root.join(manifest_dir).join(prefix);
+            if let Ok(read_dir) = std::fs::read_dir(&parent) {
+                for child in read_dir.flatten() {
+                    let path = child.path();
+                    if path.join("Cargo.toml").is_file() {
+                        member_dirs.push(path);
+                    }
+                }
+            }
+        } else {
+            let path = root.join(manifest_dir).join(entry);
+            if path.join("Cargo.toml").is_file() {
+                member_dirs.push(path);
+            }
+        }
+    }
+
+    let mut by_name = BTreeMap::new();
+    for dir in member_dirs {
+        if let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml"))
+            && let Ok(pkg_doc) = text.parse::<toml_edit::DocumentMut>()
+            && let Some(name) = pkg_doc
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+        {
+            by_name.insert(name.to_string(), dir);
+        }
+    }
+    let start = by_name.get(package)?.clone();
+    let mut queue = VecDeque::from([start]);
+    let mut seen_dirs = BTreeSet::new();
+    let mut dirs = Vec::new();
+    while let Some(dir) = queue.pop_front() {
+        let canonical_dir = infra_core::fs::canonicalize(&dir).ok()?;
+        let rel = normalize_rel_path(root, &canonical_dir)?;
+        if !seen_dirs.insert(rel.clone()) {
+            continue;
+        }
+        dirs.push(rel);
+        let text = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+        let pkg_doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+        for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(table) = pkg_doc.get(table_name).and_then(|v| v.as_table_like()) {
+                for (_, val) in table.iter() {
+                    if let Some(dep_path) = val.get("path").and_then(|p| p.as_str()) {
+                        let next = dir.join(dep_path);
+                        if next.join("Cargo.toml").is_file() {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(targets) = pkg_doc.get("target").and_then(|v| v.as_table_like()) {
+            for (_, target_item) in targets.iter() {
+                for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(table) = target_item.get(table_name).and_then(|v| v.as_table_like())
+                    {
+                        for (_, val) in table.iter() {
+                            if let Some(dep_path) = val.get("path").and_then(|p| p.as_str()) {
+                                let next = dir.join(dep_path);
+                                if next.join("Cargo.toml").is_file() {
+                                    queue.push_back(next);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let manifest_prefix = normalize_rel_path(root, &root.join(manifest_dir))?;
+    let mut extra = vec![manifest_rel.to_string()];
+    for suffix in ["Cargo.lock", ".cargo/config.toml", ".config"] {
+        let candidate = if manifest_prefix == "." {
+            suffix.to_string()
+        } else {
+            format!("{manifest_prefix}/{suffix}")
+        };
+        extra.push(candidate);
+    }
+    Some((dirs, extra))
+}
+
+fn discover_graph_ir_cue(root: &Path, request: &Value) -> (Option<u64>, Option<PathBuf>) {
+    let ir_revision_hint = request["ir_revision"]
+        .as_u64()
+        .or_else(|| request["graph_ir_revision"].as_u64())
+        .or_else(|| {
+            std::env::var("INFRA_GRAPH_IR_REVISION")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        });
+    let explicit_db = request["graph_ir_db"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let p = PathBuf::from(s);
+            if p.is_absolute() { p } else { root.join(p) }
+        });
+    let graph_ir_db = explicit_db.or_else(|| {
+        let local = root.join(".infra-graph/graph_ir.sqlite3");
+        if local.is_file() {
+            return Some(local);
+        }
+        infra_core::git::GitFrame::discover(root)
+            .ok()
+            .flatten()
+            .map(|frame| frame.admin.join("graph_ir.sqlite3"))
+            .filter(|p| p.is_file())
+    });
+    (ir_revision_hint, graph_ir_db)
+}
+
+fn scope_for_gate(
+    root: &Path,
+    request: &Value,
+    base: &str,
+    group: &Group,
+    gate: &Gate,
+) -> ClosureScope {
+    let (ir_revision_hint, graph_ir_db) = discover_graph_ir_cue(root, request);
+    let mut extra_files = vec!["install/check-catalog.json".to_string()];
+    match gate {
+        Gate::Tool {
+            operation,
+            request: gate_req,
+            ..
+        } => {
+            let req = interpolate(gate_req, root, base);
+            match operation.as_str() {
+                "mirrors" | "policy-lock" => {
+                    let dirs = request_editions(&req).unwrap_or_else(|| {
+                        common::EDITIONS.iter().map(|s| (*s).to_string()).collect()
+                    });
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs,
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "core-sync" => {
+                    extra_files.push("install/core-manifest.json".into());
+                    let dirs = crate::manifests::CoreManifest::load(root)
+                        .map(|m| {
+                            let mut d = vec![m.canonical];
+                            for ed in m.editions.into_values() {
+                                if !d.contains(&ed) {
+                                    d.push(ed);
+                                }
+                            }
+                            d
+                        })
+                        .unwrap_or_else(|_| {
+                            common::EDITIONS.iter().map(|s| (*s).to_string()).collect()
+                        });
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs,
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "assets" | "asset-parity" => {
+                    extra_files.push(
+                        "runtime-rust/crates/infra-generator/resources/native-runtime-contract.json"
+                            .into(),
+                    );
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs: vec![
+                            "PHP Core/memory-bank".into(),
+                            "PHP Core/project-brain".into(),
+                            "Infrastructure-Creator/.agents/skills/memory-seed/assets".into(),
+                        ],
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "inventory-check" | "inventory-write" => {
+                    let mut dirs = vec!["install/inventories".to_string()];
+                    let eds = request_editions(&req).unwrap_or_else(|| {
+                        common::PHP_EDITIONS
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect()
+                    });
+                    dirs.extend(eds);
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs,
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "budget" | "context-budget" => {
+                    extra_files.push("scripts/token_budget.json".into());
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs: common::EDITIONS.iter().map(|s| (*s).to_string()).collect(),
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "php-snippets" => ClosureScope {
+                    kind: ScopeKind::GitTrackedGlobs,
+                    dirs: vec![],
+                    globs: vec!["*.md".into(), ":(glob,exclude)**/Task/**".into()],
+                    extra_files,
+                    git_base: None,
+                    ir_revision_hint,
+                    graph_ir_db,
+                },
+                "json-syntax" => ClosureScope {
+                    kind: ScopeKind::GitTrackedGlobs,
+                    dirs: vec![],
+                    globs: vec!["*.json".into()],
+                    extra_files,
+                    git_base: None,
+                    ir_revision_hint,
+                    graph_ir_db,
+                },
+                "stabilization" | "routes" | "registry" => {
+                    let mut dirs = vec!["install".into(), "docs".into(), "scripts".into()];
+                    dirs.extend(common::EDITIONS.iter().map(|s| (*s).to_string()));
+                    ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs,
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    }
+                }
+                "changelog" => ClosureScope {
+                    kind: ScopeKind::FullRepo,
+                    dirs: vec![],
+                    globs: vec![],
+                    extra_files,
+                    git_base: Some(base.to_string()),
+                    ir_revision_hint,
+                    graph_ir_db,
+                },
+                _ => ClosureScope {
+                    kind: ScopeKind::FullRepo,
+                    dirs: vec![],
+                    globs: vec![],
+                    extra_files,
+                    git_base: None,
+                    ir_revision_hint,
+                    graph_ir_db,
+                },
+            }
+        }
+        Gate::Process {
+            program,
+            arguments,
+            cwd,
+            paths,
+            ..
+        } => {
+            let expand = |value: &str| process_argument(value, root, base, &group.rust_toolchain);
+            let expanded_prog = expand(program);
+            let expanded_args: Vec<String> = arguments.iter().map(|v| expand(v)).collect();
+            let expanded_cwd = expand(cwd);
+            for path in paths {
+                let expanded = expand(path);
+                if let Some(rel) = normalize_rel_path(root, Path::new(&expanded))
+                    && !extra_files.contains(&rel)
+                {
+                    extra_files.push(rel);
+                }
+            }
+            if let Some(rel_cwd) = normalize_rel_path(root, Path::new(&expanded_cwd))
+                && rel_cwd != "."
+            {
+                return ClosureScope {
+                    kind: ScopeKind::ScopedDirs,
+                    dirs: vec![rel_cwd],
+                    globs: vec![],
+                    extra_files,
+                    git_base: None,
+                    ir_revision_hint,
+                    graph_ir_db,
+                };
+            }
+            if expanded_prog == "cargo" {
+                let manifest_arg = expanded_args
+                    .windows(2)
+                    .find(|w| w[0] == "--manifest-path")
+                    .and_then(|w| normalize_rel_path(root, Path::new(&w[1])));
+                let pkg_arg = expanded_args
+                    .windows(2)
+                    .find(|w| w[0] == "--package" || w[0] == "-p")
+                    .map(|w| w[1].as_str());
+                if let (Some(manifest_rel), Some(pkg)) = (manifest_arg.as_deref(), pkg_arg)
+                    && let Some((dirs, pkg_extra)) = cargo_package_scope(root, manifest_rel, pkg)
+                {
+                    for item in pkg_extra {
+                        if !extra_files.contains(&item) {
+                            extra_files.push(item);
+                        }
+                    }
+                    return ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs,
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    };
+                }
+                if expanded_args.first().map(String::as_str) == Some("fmt")
+                    && let Some(manifest_rel) = manifest_arg
+                {
+                    let manifest_dir = Path::new(&manifest_rel)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(".");
+                    extra_files.push("rustfmt.toml".into());
+                    extra_files.push(".rustfmt.toml".into());
+                    return ClosureScope {
+                        kind: ScopeKind::ScopedDirs,
+                        dirs: vec![manifest_dir.to_string()],
+                        globs: vec![],
+                        extra_files,
+                        git_base: None,
+                        ir_revision_hint,
+                        graph_ir_db,
+                    };
+                }
+            }
+            ClosureScope {
+                kind: ScopeKind::FullRepo,
+                dirs: vec![],
+                globs: vec![],
+                extra_files,
+                git_base: None,
+                ir_revision_hint,
+                graph_ir_db,
+            }
+        }
+    }
+}
+
+fn should_skip_walk_entry(name: &str, inside_rust: bool) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".phpunit.cache" | ".c2p"
+    ) || (!inside_rust && name == "vendor")
+}
+
+fn path_has_ignored_component(rel: &str) -> bool {
+    let mut parts = rel.split('/').peekable();
+    let first = parts.peek().copied();
+    let inside_rust = first == Some("runtime-rust");
+    rel.split('/')
+        .any(|part| should_skip_walk_entry(part, inside_rust))
+}
+
+fn stat_file_entry(path: &Path) -> Option<(u64, i128, i128, u32)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink()
+        || safe::linked_at(path, &meta).unwrap_or(true)
+        || !meta.is_file()
+    {
+        return None;
+    }
+    let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+    #[cfg(unix)]
+    let (ctime, mode) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            meta.mode(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ctime, mode) = (mtime, 0u32);
+    Some((meta.len(), mtime, ctime, mode))
+}
+
+fn git_head_cue(frame: &infra_core::git::GitFrame, max_mtime_ns: &mut i128) -> String {
+    let head_path = frame.admin.join("HEAD");
+    if let Ok(meta) = std::fs::symlink_metadata(&head_path)
+        && let Ok(modified) = meta.modified()
+        && let Some(mtime) = time_to_unix_ns(modified)
+    {
+        *max_mtime_ns = (*max_mtime_ns).max(mtime);
+    }
+    let head_txt = std::fs::read_to_string(&head_path).unwrap_or_default();
+    let trimmed = head_txt.trim();
+    let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
+        let ref_rel = ref_name.trim();
+        frame
+            .common_dir()
+            .ok()
+            .and_then(|common| {
+                let ref_path = common.join(ref_rel);
+                if let Ok(meta) = std::fs::symlink_metadata(&ref_path)
+                    && let Ok(modified) = meta.modified()
+                    && let Some(mtime) = time_to_unix_ns(modified)
+                {
+                    *max_mtime_ns = (*max_mtime_ns).max(mtime);
+                }
+                std::fs::read_to_string(ref_path).ok()
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    format!("git_head:{trimmed}:{}", resolved.trim())
+}
+
+fn graph_ir_db_cue(db_path: &Path, max_mtime_ns: &mut i128) -> Option<String> {
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(db_path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+    *max_mtime_ns = (*max_mtime_ns).max(mtime);
+    let mut header = [0u8; 100];
+    let header_cue = if meta.len() >= 100
+        && let Ok(mut file) = std::fs::File::open(db_path)
+        && file.read_exact(&mut header).is_ok()
+    {
+        let change_counter = u32::from_be_bytes([header[24], header[25], header[26], header[27]]);
+        let valid_for = u32::from_be_bytes([header[92], header[93], header[94], header[95]]);
+        format!("{change_counter}:{valid_for}")
+    } else {
+        "nohdr".into()
+    };
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let wal_cue = if let Ok(wal_meta) = std::fs::symlink_metadata(&wal_path)
+        && wal_meta.is_file()
+        && let Ok(wal_mod) = wal_meta.modified()
+        && let Some(wal_mtime) = time_to_unix_ns(wal_mod)
+    {
+        *max_mtime_ns = (*max_mtime_ns).max(wal_mtime);
+        format!("{}:{wal_mtime}", wal_meta.len())
+    } else {
+        "none".into()
+    };
+    Some(format!(
+        "graph_ir_db:{}:{mtime}:{header_cue}:{wal_cue}",
+        meta.len()
+    ))
+}
+
+fn walk_dir_closure(
+    root: &Path,
+    start_dir: &Path,
+    inside_rust: bool,
+    entries: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    max_mtime_ns: &mut i128,
+) -> Option<()> {
+    let start_meta = std::fs::symlink_metadata(start_dir).ok()?;
+    if start_meta.file_type().is_symlink() {
+        return None;
+    }
+    if let Ok(modified) = start_meta.modified()
+        && let Some(mtime) = time_to_unix_ns(modified)
+    {
+        *max_mtime_ns = (*max_mtime_ns).max(mtime);
+    }
+    if start_meta.is_file() {
+        let (len, mtime, ctime, mode) = stat_file_entry(start_dir)?;
+        *max_mtime_ns = (*max_mtime_ns).max(mtime).max(ctime);
+        let rel = start_dir
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if seen.insert(rel.clone()) {
+            entries.push(format!("{rel}:{len}:{mtime}:{ctime}:{mode}"));
+            if entries.len() >= MAX_CLOSURE_FILES {
+                return None;
+            }
+        }
+        return Some(());
+    }
+    if !start_meta.is_dir() {
+        return None;
+    }
+    let mut queue = VecDeque::from([start_dir.to_path_buf()]);
     while let Some(dir) = queue.pop_front() {
         let mut children: Vec<_> = std::fs::read_dir(&dir)
             .ok()?
@@ -411,10 +1025,8 @@ fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i
         for entry in children {
             let name = entry.file_name();
             let name_s = name.to_string_lossy();
-            if matches!(
-                name_s.as_ref(),
-                ".git" | "target" | "vendor" | "node_modules" | ".phpunit.cache" | ".c2p"
-            ) {
+            let child_inside_rust = inside_rust || name_s.as_ref() == "runtime-rust";
+            if should_skip_walk_entry(name_s.as_ref(), child_inside_rust) {
                 continue;
             }
             let path = entry.path();
@@ -423,17 +1035,22 @@ fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i
                 return None;
             }
             if meta.is_dir() {
+                if let Ok(modified) = meta.modified()
+                    && let Some(mtime) = time_to_unix_ns(modified)
+                {
+                    *max_mtime_ns = (*max_mtime_ns).max(mtime);
+                }
                 queue.push_back(path);
             } else if meta.is_file() {
-                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
-                max_mtime_ns = max_mtime_ns.max(mtime);
+                let (len, mtime, ctime, mode) = stat_file_entry(&path)?;
+                *max_mtime_ns = (*max_mtime_ns).max(mtime).max(ctime);
                 let rel = path
                     .strip_prefix(root)
                     .ok()?
                     .to_string_lossy()
                     .replace('\\', "/");
                 if seen.insert(rel.clone()) {
-                    entries.push(format!("{rel}:{}:{mtime}", meta.len()));
+                    entries.push(format!("{rel}:{len}:{mtime}:{ctime}:{mode}"));
                     if entries.len() >= MAX_CLOSURE_FILES {
                         return None;
                     }
@@ -441,38 +1058,293 @@ fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i
             }
         }
     }
-    for rel in extra_paths {
-        if !seen.contains(rel) {
-            let candidate = root.join(rel);
-            if let Ok(meta) = std::fs::symlink_metadata(&candidate)
-                && !meta.file_type().is_symlink()
-                && meta.is_file()
-            {
-                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
-                max_mtime_ns = max_mtime_ns.max(mtime);
-                entries.push(format!("{rel}:{}:{mtime}", meta.len()));
+    Some(())
+}
+
+fn git_status_entries(
+    root: &Path,
+    frame: &infra_core::git::GitFrame,
+    pathspecs: &[String],
+    include_untracked: bool,
+    entries: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> Option<()> {
+    let mut args: Vec<String> = vec![
+        "status".into(),
+        "--porcelain=v1".into(),
+        "-z".into(),
+        if include_untracked {
+            "-uall".into()
+        } else {
+            "-uno".into()
+        },
+    ];
+    if !pathspecs.is_empty() {
+        args.push("--".into());
+        args.extend(pathspecs.iter().cloned());
+    }
+    let raw = common::git_ok(
+        root,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        None,
+    )
+    .ok()?;
+    let mut dirty_count = 0usize;
+    let mut parts = raw.split(|byte| *byte == 0);
+    while let Some(item) = parts.next() {
+        if item.is_empty() {
+            continue;
+        }
+        if item.len() < 4 {
+            return None;
+        }
+        let status = std::str::from_utf8(&item[..2]).ok()?;
+        let from_top = std::str::from_utf8(&item[3..]).ok()?;
+        if status.starts_with('R')
+            || status.starts_with('C')
+            || status.ends_with('R')
+            || status.ends_with('C')
+        {
+            let _ = parts.next();
+        }
+        let rel = from_top.strip_prefix(&frame.prefix).unwrap_or(from_top);
+        if path_has_ignored_component(rel) {
+            continue;
+        }
+        dirty_count += 1;
+        if dirty_count >= MAX_CLOSURE_FILES {
+            return None;
+        }
+        let target = frame.top.join(from_top);
+        match std::fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return None;
+                }
+                if meta.is_file() {
+                    let (len, mtime, ctime, mode) = stat_file_entry(&target)?;
+                    *max_mtime_ns = (*max_mtime_ns).max(mtime).max(ctime);
+                    entries.push(format!(
+                        "git_dirty:{status}:{rel}:{len}:{mtime}:{ctime}:{mode}"
+                    ));
+                } else {
+                    if let Ok(modified) = meta.modified()
+                        && let Some(mtime) = time_to_unix_ns(modified)
+                    {
+                        *max_mtime_ns = (*max_mtime_ns).max(mtime);
+                    }
+                    entries.push(format!("git_dirty:{status}:{rel}:dir"));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                entries.push(format!("git_dirty:{status}:{rel}:absent"));
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(())
+}
+
+fn record_git_index_stamp(
+    frame: &infra_core::git::GitFrame,
+    include_digest: bool,
+    entries: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> Option<()> {
+    let index_path = frame.admin.join("index");
+    match std::fs::symlink_metadata(&index_path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return None;
+            }
+            let (len, mtime, ctime, mode) = stat_file_entry(&index_path)?;
+            *max_mtime_ns = (*max_mtime_ns).max(mtime).max(ctime);
+            if include_digest {
+                let bytes = safe::read_regular(&index_path).ok()?;
+                entries.push(format!(
+                    "git_index:{}:{len}:{mtime}:{ctime}:{mode}",
+                    common::sha256(&bytes)
+                ));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if include_digest {
+                entries.push("git_index:absent".into());
+            }
+        }
+        Err(_) => return None,
+    }
+    Some(())
+}
+
+fn compute_closure_stamp(root: &Path, scope: &ClosureScope) -> Option<(String, i128)> {
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut max_mtime_ns = 0i128;
+    let git_frame = infra_core::git::GitFrame::discover(root).ok().flatten();
+
+    if let Some(rev) = scope.ir_revision_hint {
+        entries.push(format!("ir_rev:{rev}"));
+    }
+    if let Some(db_path) = &scope.graph_ir_db
+        && let Some(cue) = graph_ir_db_cue(db_path, &mut max_mtime_ns)
+    {
+        entries.push(cue);
+    }
+
+    match scope.kind {
+        ScopeKind::ScopedDirs => {
+            if let Some(frame) = &git_frame {
+                entries.push(git_head_cue(frame, &mut max_mtime_ns));
+                if !scope.dirs.is_empty() {
+                    let mut ls_args = vec!["ls-files", "--stage", "-z", "--"];
+                    ls_args.extend(scope.dirs.iter().map(String::as_str));
+                    if let Ok(stage_raw) = common::git_ok(root, &ls_args, None) {
+                        entries.push(format!("git_stage:{}", common::sha256(&stage_raw)));
+                    }
+                    record_git_index_stamp(frame, false, &mut entries, &mut max_mtime_ns)?;
+                }
+            }
+            let mut walked_ok = true;
+            let mut snapshot = entries.clone();
+            let mut snapshot_mtime = max_mtime_ns;
+            for dir_rel in &scope.dirs {
+                let target = root.join(dir_rel);
+                if target.exists() {
+                    let inside_rust =
+                        dir_rel == "runtime-rust" || dir_rel.starts_with("runtime-rust/");
+                    if walk_dir_closure(
+                        root,
+                        &target,
+                        inside_rust,
+                        &mut entries,
+                        &mut seen,
+                        &mut max_mtime_ns,
+                    )
+                    .is_none()
+                    {
+                        walked_ok = false;
+                        break;
+                    }
+                } else {
+                    entries.push(format!("dir:{dir_rel}:absent"));
+                }
+            }
+            if !walked_ok {
+                let frame = git_frame.as_ref()?;
+                entries = std::mem::take(&mut snapshot);
+                max_mtime_ns = snapshot_mtime;
+                git_status_entries(
+                    root,
+                    frame,
+                    &scope.dirs,
+                    true,
+                    &mut entries,
+                    &mut max_mtime_ns,
+                )?;
+                let _ = &mut snapshot_mtime;
+            }
+        }
+        ScopeKind::GitTrackedGlobs => {
+            if let Some(frame) = &git_frame {
+                entries.push(git_head_cue(frame, &mut max_mtime_ns));
+                record_git_index_stamp(frame, false, &mut entries, &mut max_mtime_ns)?;
+                let mut ls_args = vec!["ls-files", "--stage", "-z", "--"];
+                ls_args.extend(scope.globs.iter().map(String::as_str));
+                let stage_raw = common::git_ok(root, &ls_args, None).ok()?;
+                entries.push(format!("git_stage:{}", common::sha256(&stage_raw)));
+                git_status_entries(
+                    root,
+                    frame,
+                    &scope.globs,
+                    false,
+                    &mut entries,
+                    &mut max_mtime_ns,
+                )?;
             } else {
-                entries.push(format!("{rel}:absent"));
+                walk_dir_closure(
+                    root,
+                    root,
+                    false,
+                    &mut entries,
+                    &mut seen,
+                    &mut max_mtime_ns,
+                )?;
+            }
+        }
+        ScopeKind::FullRepo => {
+            if let Ok(meta) = root.metadata()
+                && let Ok(modified) = meta.modified()
+                && let Some(mtime) = time_to_unix_ns(modified)
+            {
+                max_mtime_ns = max_mtime_ns.max(mtime);
+            }
+            if let Some(frame) = &git_frame {
+                entries.push(git_head_cue(frame, &mut max_mtime_ns));
+                if let Some(base) = &scope.git_base {
+                    let rev = common::git_ok(root, &["rev-parse", "--verify", base], None)
+                        .map(|raw| String::from_utf8_lossy(&raw).trim().to_string())
+                        .unwrap_or_else(|_| "missing".into());
+                    entries.push(format!("git_base:{base}:{rev}"));
+                }
+                record_git_index_stamp(frame, true, &mut entries, &mut max_mtime_ns)?;
+                git_status_entries(root, frame, &[], true, &mut entries, &mut max_mtime_ns)?;
+            } else {
+                walk_dir_closure(
+                    root,
+                    root,
+                    false,
+                    &mut entries,
+                    &mut seen,
+                    &mut max_mtime_ns,
+                )?;
             }
         }
     }
-    entries.sort();
-    if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(root) {
-        let head_txt = std::fs::read_to_string(frame.admin.join("HEAD")).unwrap_or_default();
-        let trimmed = head_txt.trim();
-        let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
-            let ref_rel = ref_name.trim();
-            frame
-                .common_dir()
-                .ok()
-                .and_then(|common| std::fs::read_to_string(common.join(ref_rel)).ok())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        entries.push(format!("git_head:{trimmed}:{}", resolved.trim()));
+
+    for rel in &scope.extra_files {
+        if !seen.contains(rel) {
+            let candidate = root.join(rel);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return None;
+                    }
+                    if meta.is_file() {
+                        let (len, mtime, ctime, mode) = stat_file_entry(&candidate)?;
+                        max_mtime_ns = max_mtime_ns.max(mtime).max(ctime);
+                        entries.push(format!("extra:{rel}:{len}:{mtime}:{ctime}:{mode}"));
+                    } else {
+                        entries.push(format!("extra:{rel}:nonfile"));
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    entries.push(format!("extra:{rel}:absent"));
+                }
+                Err(_) => return None,
+            }
+        }
     }
+
+    entries.sort();
     Some((common::sha256(entries.join("\n").as_bytes()), max_mtime_ns))
+}
+
+#[cfg(test)]
+fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i128)> {
+    let (ir_revision_hint, graph_ir_db) = discover_graph_ir_cue(root, &json!({}));
+    compute_closure_stamp(
+        root,
+        &ClosureScope {
+            kind: ScopeKind::FullRepo,
+            dirs: vec![],
+            globs: vec![],
+            extra_files: extra_paths.to_vec(),
+            git_base: None,
+            ir_revision_hint,
+            graph_ir_db,
+        },
+    )
 }
 
 fn gate_receipt_key(
@@ -485,11 +1357,12 @@ fn gate_receipt_key(
         base,
         group,
         strict,
+        no_cache,
         oracle_allowed: _,
         logs: _,
         cancel: _,
     } = context;
-    if *strict {
+    if *strict || *no_cache {
         return None;
     }
     match gate_spec {
@@ -499,6 +1372,11 @@ fn gate_receipt_key(
             request,
         } => {
             let interpolated = interpolate(request, root, base);
+            let tool_stamp = if operation == "php-snippets" {
+                resolve_tool_binary_stamp("php", root)
+            } else {
+                None
+            };
             Some(common::sha256(
                 json!({
                     "kind": "tool",
@@ -506,6 +1384,7 @@ fn gate_receipt_key(
                     "name": name,
                     "operation": operation,
                     "request": interpolated,
+                    "tool": tool_stamp,
                     "base": base,
                     "closure": closure_digest,
                 })
@@ -518,8 +1397,8 @@ fn gate_receipt_key(
             program,
             arguments,
             cwd,
-            tools: _,
-            fallback: _,
+            tools,
+            fallback,
             paths,
             timeout_seconds: _,
             oracle,
@@ -532,6 +1411,19 @@ fn gate_receipt_key(
             let expanded_args: Vec<String> = arguments.iter().map(|v| expand(v)).collect();
             let expanded_cwd = expand(cwd);
             let tool_stamp = resolve_tool_binary_stamp(&expanded_prog, root).unwrap_or_default();
+            let required_tools: Vec<(String, Option<String>)> = tools
+                .iter()
+                .map(|tool| (tool.clone(), resolve_tool_binary_stamp(tool, root)))
+                .collect();
+            let fallback_stamp = fallback.as_ref().map(|fb| {
+                let fb_prog = expand(&fb.program);
+                let fb_args: Vec<String> = fb.arguments.iter().map(|v| expand(v)).collect();
+                (
+                    fb_prog.clone(),
+                    fb_args,
+                    resolve_tool_binary_stamp(&fb_prog, root),
+                )
+            });
             Some(common::sha256(
                 json!({
                     "kind": "process",
@@ -542,6 +1434,8 @@ fn gate_receipt_key(
                     "cwd": expanded_cwd,
                     "paths": paths,
                     "tool": tool_stamp,
+                    "tools": required_tools,
+                    "fallback": fallback_stamp,
                     "toolchain": group.rust_toolchain,
                     "base": base,
                     "closure": closure_digest,
@@ -568,14 +1462,20 @@ fn gate_with_receipts(
     let gate_cache_key = if let (Some(store), Some((closure_digest, max_mtime))) =
         (receipt_store, closure)
         && !context.strict
+        && !context.no_cache
         && *max_mtime > 0
         && now_ns > CHECKER_RACY_NS
         && *max_mtime <= now_ns - CHECKER_RACY_NS
     {
         if let Some(key) = gate_receipt_key(&context, gate, closure_digest) {
-            if let Ok(guard) = store.lock()
+            if let Ok(mut guard) = store.lock()
                 && guard.entries.contains_key(&key)
             {
+                let seq = guard.next_seq;
+                guard.next_seq = guard.next_seq.saturating_add(1);
+                if let Some(entry) = guard.entries.get_mut(&key) {
+                    entry.last_used = seq;
+                }
                 return Outcome {
                     group: context.group.name.clone(),
                     name: gate.name().into(),
@@ -600,6 +1500,7 @@ fn gate_with_receipts(
         base,
         group,
         strict,
+        no_cache,
         oracle_allowed,
         logs,
         cancel,
@@ -641,8 +1542,15 @@ fn gate_with_receipts(
                     .as_object_mut()
                     .ok_or_else(|| RuntimeError::invalid("Tool check request must be an object"))?
                     .insert("root".into(), json!(root));
-                let report =
-                    process::with_cancel(cancel.clone(), || crate::execute(operation, &request))?;
+                let bypass_inner_caches = strict || no_cache;
+                let report = process::with_cancel(cancel.clone(), || {
+                    crate::php::with_cache_bypass(bypass_inner_caches, || {
+                        crate::mirrors::check_receipts::with_cache_bypass(
+                            bypass_inner_caches,
+                            || crate::execute(operation, &request),
+                        )
+                    })
+                })?;
                 if report["status"] == "skipped" {
                     outcome.status = "skipped".into();
                     outcome.reason = Some(
@@ -769,17 +1677,19 @@ fn gate_with_receipts(
         && let (Some(store), Some(key)) = (receipt_store, gate_cache_key)
         && let Ok(mut guard) = store.lock()
     {
-        if guard.entries.len() >= 512 {
-            guard.entries.clear();
-        }
+        let seq = guard.next_seq;
+        guard.next_seq = guard.next_seq.saturating_add(1);
         guard.entries.insert(
             key,
             CheckReceiptEntry {
                 group: group.name.clone(),
                 gate: gate.name().into(),
                 cached_at: infra_core::domain::utc_now(),
+                last_used: seq,
             },
         );
+        evict_oldest_receipts(&mut guard);
+        guard.dirty = true;
     }
     outcome
 }
@@ -860,7 +1770,8 @@ fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
     let no_cache = strict
         || request["no_cache"] == true
         || request["cache"] == false
-        || std::env::var("INFRA_CHECK_NO_CACHE").as_deref() == Ok("1");
+        || std::env::var("INFRA_CHECK_NO_CACHE").as_deref() == Ok("1")
+        || std::env::var("INFRA_NO_CACHE").as_deref() == Ok("1");
     let use_cache = !no_cache
         && (request["cache"] == true || std::env::var("INFRA_CHECK_CACHE").as_deref() == Ok("1"));
     let receipt_path = use_cache.then(|| {
@@ -881,24 +1792,21 @@ fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
                 ))
             })
     });
-    let extra_paths: Vec<String> = if use_cache {
-        groups
-            .iter()
-            .flat_map(|g| g.gates.iter())
-            .flat_map(|g| match g {
-                Gate::Process { paths, .. } => paths.clone(),
-                Gate::Tool { .. } => vec![],
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-    let closure_stamp = use_cache
-        .then(|| input_closure_stamp(&root, &extra_paths))
-        .flatten();
+    let mut closure_stamps =
+        std::collections::BTreeMap::<ClosureScope, Option<(String, i128)>>::new();
+    if use_cache {
+        for group in &groups {
+            for gate_spec in &group.gates {
+                let scope = scope_for_gate(&root, request, &base, group, gate_spec);
+                closure_stamps
+                    .entry(scope.clone())
+                    .or_insert_with(|| compute_closure_stamp(&root, &scope));
+            }
+        }
+    }
     let receipt_store = receipt_path
         .as_ref()
-        .filter(|_| closure_stamp.is_some())
+        .filter(|_| closure_stamps.values().any(Option::is_some))
         .map(|path| Arc::new(Mutex::new(load_receipt_store(path))));
 
     let queue = Arc::new(Mutex::new(VecDeque::from(groups)));
@@ -941,7 +1849,7 @@ fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
             let base = &base;
             let logs = &logs;
             let receipt_store = receipt_store.as_ref();
-            let closure_stamp = closure_stamp.as_ref();
+            let closure_stamps = &closure_stamps;
             scope.spawn(move || {
                 loop {
                     if INTERRUPTED.load(Ordering::Acquire) {
@@ -952,19 +1860,26 @@ fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
                         break;
                     };
                     for check in &group.gates {
+                        let gate_closure = if use_cache {
+                            let gate_scope = scope_for_gate(root, request, base, &group, check);
+                            closure_stamps.get(&gate_scope).and_then(Option::as_ref)
+                        } else {
+                            None
+                        };
                         let result = gate_with_receipts(
                             GateContext {
                                 root,
                                 base,
                                 group: &group,
                                 strict,
+                                no_cache,
                                 oracle_allowed: oracle,
                                 logs,
                                 cancel: cancelled.clone(),
                             },
                             check,
                             receipt_store,
-                            closure_stamp,
+                            gate_closure,
                             now_ns,
                         );
                         if fail_fast && result.status == "fail" {
@@ -980,6 +1895,7 @@ fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
     });
     if let (Some(path), Some(store)) = (receipt_path.as_ref(), receipt_store.as_ref())
         && let Ok(guard) = store.lock()
+        && guard.dirty
     {
         save_receipt_store(path, &guard);
     }
@@ -1942,6 +2858,7 @@ mod failure_report_tests {
                 base: "origin/main",
                 group: &group,
                 strict: true,
+                no_cache: true,
                 oracle_allowed: false,
                 logs: temporary.path(),
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -2021,6 +2938,7 @@ mod fallback_tests {
                 base: "origin/main",
                 group: &group,
                 strict: true,
+                no_cache: true,
                 oracle_allowed: false,
                 logs: temporary.path(),
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -2192,5 +3110,309 @@ mod fallback_tests {
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xxxxx");
 
         let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn scoped_closures_isolate_unrelated_edits_survive_over_4000_files_and_track_ir_cues() {
+        // Non-Git repo with >4000 files in an unrelated directory still allows scoped checks to cache!
+        let temporary = Temporary::new("infra-check-scoped-4k").unwrap();
+        let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+        let marker_a =
+            std::env::temp_dir().join(format!("infra-check-scope-a-{}.txt", uuid::Uuid::new_v4()));
+        let marker_b =
+            std::env::temp_dir().join(format!("infra-check-scope-b-{}.txt", uuid::Uuid::new_v4()));
+
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::write(root.join(".github/workflows/probe.yml"), b"name: probe\n").unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::create_dir_all(root.join("sub_a")).unwrap();
+        std::fs::create_dir_all(root.join("sub_b")).unwrap();
+        std::fs::create_dir_all(root.join("bulk")).unwrap();
+        std::fs::write(root.join("sub_a/in.txt"), b"a1\n").unwrap();
+        std::fs::write(root.join("sub_b/in.txt"), b"b1\n").unwrap();
+        // >4000 files in bulk/ would break an unconditional root walk.
+        for i in 0..4050 {
+            let bucket = i / 200;
+            let dir = root.join(format!("bulk/d{bucket}"));
+            if i % 200 == 0 {
+                std::fs::create_dir_all(&dir).unwrap();
+            }
+            std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        std::fs::write(
+            root.join("install/check-catalog.json"),
+            serde_json::to_vec(&json!({"schema_version":1,"groups":[
+                {
+                    "name":"scope_a","workflow":"probe.yml","job":"scope_a","timeout_minutes":1,
+                    "gates":[{"kind":"process","name":"a probe","program":"sh","cwd":"sub_a","paths":["sub_a/in.txt"],
+                        "arguments":["-c",&format!("printf a >> '{}'", marker_a.display())]}]
+                },
+                {
+                    "name":"scope_b","workflow":"probe.yml","job":"scope_b","timeout_minutes":1,
+                    "gates":[{"kind":"process","name":"b probe","program":"sh","cwd":"sub_b","paths":["sub_b/in.txt"],
+                        "arguments":["-c",&format!("printf b >> '{}'", marker_b.display())]}]
+                }
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let catalog = load_catalog(&root, true).unwrap();
+        let scope_a = scope_for_gate(
+            &root,
+            &json!({}),
+            "origin/main",
+            &catalog.groups[0],
+            &catalog.groups[0].gates[0],
+        );
+        assert_eq!(scope_a.kind, ScopeKind::ScopedDirs);
+        assert_eq!(scope_a.dirs, vec!["sub_a".to_string()]);
+        let (_d_a, mtime_a) = compute_closure_stamp(&root, &scope_a).unwrap();
+        let scope_b = scope_for_gate(
+            &root,
+            &json!({}),
+            "origin/main",
+            &catalog.groups[1],
+            &catalog.groups[1].gates[0],
+        );
+        let (_d_b, mtime_b) = compute_closure_stamp(&root, &scope_b).unwrap();
+        let settled_now = mtime_a.max(mtime_b) + CHECKER_RACY_NS + 100;
+
+        let cache_dir = Temporary::new("infra-check-scoped-cache").unwrap();
+        let cache_file = cache_dir.path().join("receipts.json");
+
+        // Run 1 populates receipts; run 2 hits cached receipts for both scopes despite >4000 files in bulk/.
+        let run1 = execute_at(
+            &json!({"root":&root,"groups":["scope_a","scope_b"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            settled_now,
+        )
+        .unwrap();
+        assert_eq!(run1["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&marker_b).unwrap(), "b");
+
+        let run2 = execute_at(
+            &json!({"root":&root,"groups":["scope_a","scope_b"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            settled_now + 10,
+        )
+        .unwrap();
+        assert_eq!(run2["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&marker_b).unwrap(), "b");
+
+        // Editing sub_b invalidates ONLY scope_b, leaving scope_a cached!
+        std::fs::write(root.join("sub_b/in.txt"), b"b2\n").unwrap();
+        let (_d_b2, mtime_b2) = compute_closure_stamp(&root, &scope_b).unwrap();
+        let run3 = execute_at(
+            &json!({"root":&root,"groups":["scope_a","scope_b"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            mtime_b2 + CHECKER_RACY_NS + 100,
+        )
+        .unwrap();
+        assert_eq!(run3["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&marker_b).unwrap(), "bb");
+
+        // Bumping Graph-IR revision cue invalidates even unchanged scope_a.
+        let run4 = execute_at(
+            &json!({"root":&root,"groups":["scope_a"],"strict":false,"cache":true,"ir_revision":7,"cache_file":&cache_file}),
+            mtime_b2 + CHECKER_RACY_NS + 200,
+        )
+        .unwrap();
+        assert_eq!(run4["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "aa");
+
+        let run5 = execute_at(
+            &json!({"root":&root,"groups":["scope_a"],"strict":false,"cache":true,"ir_revision":7,"cache_file":&cache_file}),
+            mtime_b2 + CHECKER_RACY_NS + 250,
+        )
+        .unwrap();
+        assert_eq!(run5["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "aa");
+
+        // `--strict` and `no_cache: true` bypass receipts cleanly.
+        let strict_res = execute_at(
+            &json!({"root":&root,"groups":["scope_a"],"strict":true,"cache":true,"ir_revision":7,"cache_file":&cache_file}),
+            mtime_b2 + CHECKER_RACY_NS + 260,
+        )
+        .unwrap();
+        assert_eq!(strict_res["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "aaa");
+
+        let no_cache_res = execute_at(
+            &json!({"root":&root,"groups":["scope_a"],"strict":false,"cache":true,"no_cache":true,"ir_revision":7,"cache_file":&cache_file}),
+            mtime_b2 + CHECKER_RACY_NS + 270,
+        )
+        .unwrap();
+        assert_eq!(no_cache_res["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker_a).unwrap(), "aaaa");
+
+        // Now initialize Git in the >4000-file repo and verify FullRepo input_closure_stamp
+        // succeeds without hitting MAX_CLOSURE_FILES.
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "init"],
+        ] {
+            let st = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {:?} failed", args);
+        }
+        let full_stamp = input_closure_stamp(&root, &[]);
+        assert!(
+            full_stamp.is_some(),
+            "Git-backed full repo closure stamp must succeed on >4000-file repository"
+        );
+
+        let _ = std::fs::remove_file(&marker_a);
+        let _ = std::fs::remove_file(&marker_b);
+    }
+
+    #[test]
+    fn real_repo_catalog_narrows_scopes_and_computes_full_repo_git_stamp() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let root = infra_core::fs::canonicalize(root).unwrap();
+        let catalog = load_catalog(&root, true).unwrap();
+
+        let wasm = catalog.groups.iter().find(|g| g.name == "wasm").unwrap();
+        let wasm_scope = scope_for_gate(&root, &json!({}), "origin/main", wasm, &wasm.gates[0]);
+        assert_eq!(wasm_scope.kind, ScopeKind::ScopedDirs);
+        assert_eq!(
+            wasm_scope.dirs,
+            vec!["runtime-rust/crates/infra-ui".to_string()]
+        );
+        assert!(compute_closure_stamp(&root, &wasm_scope).is_some());
+
+        let mirrors = catalog.groups.iter().find(|g| g.name == "mirrors").unwrap();
+        let laravel_scope =
+            scope_for_gate(&root, &json!({}), "origin/main", mirrors, &mirrors.gates[0]);
+        assert_eq!(laravel_scope.kind, ScopeKind::ScopedDirs);
+        assert_eq!(laravel_scope.dirs, vec!["Laravel".to_string()]);
+        assert!(compute_closure_stamp(&root, &laravel_scope).is_some());
+
+        let lint = catalog.groups.iter().find(|g| g.name == "lint").unwrap();
+        let php_gate = lint
+            .gates
+            .iter()
+            .find(|g| g.name() == "PHP documentation snippets")
+            .unwrap();
+        let php_scope = scope_for_gate(&root, &json!({}), "origin/main", lint, php_gate);
+        assert_eq!(php_scope.kind, ScopeKind::GitTrackedGlobs);
+        assert!(compute_closure_stamp(&root, &php_scope).is_some());
+
+        // Full repo closure stamp (e.g. `rust` group) also succeeds on the 4000+ file monorepo!
+        assert!(input_closure_stamp(&root, &[]).is_some());
+    }
+
+    #[test]
+    fn strict_and_no_cache_propagate_bypass_to_inner_tool_gate_receipt_caches() {
+        let temporary = Temporary::new("infra-check-tool-bypass").unwrap();
+        let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::write(root.join(".github/workflows/ci.yml"), b"name: ci\n").unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::create_dir_all(root.join("PHP Core/memory-bank/config")).unwrap();
+        std::fs::create_dir_all(root.join("PHP Core/.agents/skills/demo")).unwrap();
+        std::fs::write(
+            root.join("PHP Core/memory-bank/config/mirror-rules.json"),
+            common::json_bytes(&json!({
+                "version": 1,
+                "classes": [{
+                    "name": "skills",
+                    "canonical": ".agents/skills",
+                    "mirrors": {
+                        ".claude/skills": {"transform": "copy"},
+                        ".cursor/skills": {"transform": "copy"}
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("PHP Core/.agents/skills/demo/SKILL.md"),
+            b"# Demo\n",
+        )
+        .unwrap();
+        crate::mirrors::process(&root, "PHP Core", true).unwrap();
+        std::fs::write(
+            root.join("install/check-catalog.json"),
+            serde_json::to_vec(&json!({"schema_version":1,"groups":[{
+                "name":"mirrors","workflow":"ci.yml","job":"mirrors","timeout_minutes":1,
+                "gates":[{"kind":"tool","name":"PHP Core mirrors","operation":"mirrors","request":{"edition":"PHP Core","write":false}}]
+            }]})).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "init"],
+        ] {
+            let st = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {:?} failed", args);
+        }
+        let mirror_receipt_path = root.join(".git/infra-mirror-receipts.json");
+        let check_cache_dir = Temporary::new("infra-check-tool-cache").unwrap();
+        let check_cache_file = check_cache_dir.path().join("receipts.json");
+
+        // `--strict` and `no_cache: true` must bypass inner mirrors receipt cache (neither reads nor creates it).
+        let strict_res = execute_at(
+            &json!({"root":&root,"groups":["mirrors"],"strict":true,"cache":true,"cache_file":&check_cache_file}),
+            now_unix_ns() + CHECKER_RACY_NS + 1000,
+        )
+        .unwrap();
+        assert_eq!(strict_res["result"]["exit_code"], 0);
+        assert!(!mirror_receipt_path.exists());
+        assert!(!check_cache_file.exists());
+
+        let no_cache_res = execute_at(
+            &json!({"root":&root,"groups":["mirrors"],"strict":false,"no_cache":true,"cache":true,"cache_file":&check_cache_file}),
+            now_unix_ns() + CHECKER_RACY_NS + 1000,
+        )
+        .unwrap();
+        assert_eq!(no_cache_res["result"]["exit_code"], 0);
+        assert!(!mirror_receipt_path.exists());
+        assert!(!check_cache_file.exists());
+
+        // Settled cached run populates both inner mirror receipt and outer check receipt, then hits outer receipt.
+        let catalog = load_catalog(&root, true).unwrap();
+        let scope = scope_for_gate(
+            &root,
+            &json!({}),
+            "origin/main",
+            &catalog.groups[0],
+            &catalog.groups[0].gates[0],
+        );
+        let (_digest, max_mtime) = compute_closure_stamp(&root, &scope).unwrap();
+        let settled = max_mtime + CHECKER_RACY_NS + 100;
+        let run1 = execute_at(
+            &json!({"root":&root,"groups":["mirrors"],"strict":false,"cache":true,"cache_file":&check_cache_file}),
+            settled,
+        )
+        .unwrap();
+        assert_eq!(run1["result"]["exit_code"], 0);
+        assert!(mirror_receipt_path.exists());
+        assert!(check_cache_file.exists());
+
+        let run2 = execute_at(
+            &json!({"root":&root,"groups":["mirrors"],"strict":false,"cache":true,"cache_file":&check_cache_file}),
+            settled + 10,
+        )
+        .unwrap();
+        assert_eq!(run2["result"]["exit_code"], 0);
+        assert_eq!(
+            run2["result"]["results"][0]["reason"],
+            "cached local receipt"
+        );
     }
 }
