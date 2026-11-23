@@ -1,31 +1,15 @@
 use super::usage::LIMIT;
 use anyhow::{Context, Result, bail};
+use infra_core::strict_json::{canonical_sha256, seal_envelope};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-fn canonical_sha256(value: &Value) -> Result<String> {
-    let encoded = infra_core::domain::json::canonical(value)?;
-    Ok(Sha256::digest(encoded.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
-}
-
-fn attach_sealed_envelope(mut report: Value, input_digest: &str) -> Result<Value> {
-    let mut envelope = report.clone();
-    if let Some(obj) = envelope.as_object_mut() {
-        obj.insert("schema".into(), json!("memory-incremental-comparison-v1"));
-        obj.insert("input_digest".into(), json!(input_digest));
-        obj.insert(
-            "sealed_at".into(),
-            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        );
-        let seal_sha256 = canonical_sha256(&Value::Object(obj.clone()))?;
-        obj.insert("seal_sha256".into(), json!(seal_sha256));
-    }
-    report["sealed_envelope"] = envelope;
-    Ok(report)
+fn seal_comparison_report(report: Value, input_digest: &str) -> Result<Value> {
+    Ok(seal_envelope(
+        "memory-incremental-comparison-v1",
+        report,
+        input_digest,
+    )?)
 }
 const DIMENSIONS: [(&str, &str); 3] = [
     ("tokens", "tokens"),
@@ -249,5 +233,89 @@ pub fn compare_incremental(
         "acquisition_baseline": acquisition_baseline,
         "acquisition_treatment": acquisition_treatment,
     }))?;
-    attach_sealed_envelope(report, &input_digest)
+    seal_comparison_report(report, &input_digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use infra_core::strict_json::verify_sealed_digest;
+
+    fn sample_ledger(tokens: u64, horizon: u64) -> Value {
+        let mut phases = serde_json::Map::new();
+        for phase in ["build", "query", "reader", "judge"] {
+            let expected = if phase == "build" { 1 } else { horizon };
+            phases.insert(
+                phase.into(),
+                json!({
+                    "attempts": expected,
+                    "expected_units": expected,
+                    "closed_units": expected,
+                    "finished_attempts": expected,
+                    "overflow": false,
+                    "outcomes": {
+                        "succeeded": expected,
+                        "failed": 0,
+                        "cancelled": 0,
+                        "pending": 0,
+                        "conflict": 0
+                    },
+                    "complete": {
+                        "coverage": true,
+                        "tokens": true,
+                        "billing": true,
+                        "timing": true
+                    },
+                    "input_tokens": tokens,
+                    "output_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "tokens": tokens,
+                    "usd_micros": tokens * 10,
+                    "component_ns": tokens * 100
+                }),
+            );
+        }
+        json!({
+            "horizon": horizon,
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1",
+            "grading": {
+                "observed": horizon,
+                "known_correct": 1,
+                "correct": 1,
+                "complete": true,
+                "conflicting": 0
+            },
+            "phases": phases
+        })
+    }
+
+    #[test]
+    fn compare_incremental_seals_top_level_report_and_detects_tampering() {
+        let base_acq = json!({
+            "scope": "memory-only",
+            "common_task_excluded": true,
+            "ledger": sample_ledger(10, 2)
+        });
+        let trt_acq = json!({
+            "scope": "memory-only",
+            "common_task_excluded": true,
+            "ledger": sample_ledger(12, 2)
+        });
+        let base_later = sample_ledger(20, 2);
+        let trt_later = sample_ledger(15, 2);
+
+        let mut sealed = compare_incremental(&base_later, &trt_later, &base_acq, &trt_acq).unwrap();
+
+        assert!(sealed.get("sealed_envelope").is_none());
+        assert_eq!(sealed["schema"], "memory-incremental-comparison-v1");
+        assert!(sealed["seal_sha256"].is_string());
+        assert!(sealed["input_digest"].is_string());
+        verify_sealed_digest(&sealed, "comparison tamper check").unwrap();
+
+        // Top-level and nested tampering invalidate the root seal.
+        sealed["metrics"]["tokens"]["savings"] = json!(999_999);
+        assert!(verify_sealed_digest(&sealed, "comparison tamper check").is_err());
+    }
 }

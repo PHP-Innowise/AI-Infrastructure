@@ -753,6 +753,12 @@ fn initialize(conn: &Connection, require_write: bool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS document_links(path TEXT NOT NULL,ref_path TEXT NOT NULL,ref_kind TEXT NOT NULL,PRIMARY KEY(path,ref_path,ref_kind));
         CREATE TABLE IF NOT EXISTS index_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS identifier_terms(path TEXT NOT NULL,identifier TEXT NOT NULL,expansion TEXT NOT NULL,PRIMARY KEY(path,identifier,expansion));
+        CREATE TABLE IF NOT EXISTS document_sections(
+            path TEXT PRIMARY KEY,
+            source_hash TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            payload TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS query_plan_cache(
             plan_key TEXT PRIMARY KEY,
             word_tokens TEXT NOT NULL,
@@ -1042,6 +1048,12 @@ pub struct CachedQueryPlan {
     pub required_terms: Option<usize>,
     #[serde(default)]
     pub funnel_events: Option<Value>,
+    #[serde(default)]
+    pub trace_records: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    pub trace_order: Vec<String>,
+    #[serde(default)]
+    pub trace_truncated: bool,
     pub candidates: Vec<CachedCandidateSpan>,
 }
 
@@ -1052,6 +1064,9 @@ pub struct CachedQueryHit {
     pub evidence_terms: usize,
     pub required_terms: Option<usize>,
     pub funnel_events: Option<Value>,
+    pub trace_records: Option<BTreeMap<String, Value>>,
+    pub trace_order: Vec<String>,
+    pub trace_truncated: bool,
 }
 
 fn document_cache_stamp(doc: &crate::index::Document) -> String {
@@ -1180,6 +1195,9 @@ impl QueryPlanCache {
             evidence_terms: plan.evidence_terms,
             required_terms: plan.required_terms,
             funnel_events: plan.funnel_events,
+            trace_records: plan.trace_records,
+            trace_order: plan.trace_order,
+            trace_truncated: plan.trace_truncated,
         })
     }
 
@@ -1218,6 +1236,9 @@ impl QueryPlanCache {
             evidence_terms: trace.map(|t| t.evidence_terms).unwrap_or(0),
             required_terms: trace.and_then(|t| t.required_terms),
             funnel_events: trace.map(|t| t.funnel["events"].clone()),
+            trace_records: trace.map(|t| t.records.clone()),
+            trace_order: trace.map(|t| t.order.clone()).unwrap_or_default(),
+            trace_truncated: trace.is_some_and(|t| t.truncated),
             candidates: spans,
         };
         let Ok(payload) = serde_json::to_string(&plan) else {

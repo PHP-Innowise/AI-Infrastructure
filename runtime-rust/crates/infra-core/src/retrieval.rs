@@ -1055,7 +1055,7 @@ fn retrieve_inner(
         request.task_id.as_deref().unwrap_or(""),
         &profile,
         task.as_ref(),
-        !request.trace_paths.is_empty(),
+        &request.trace_paths,
         &mut trace,
     )?;
     let mut graph_anchor_count = 0usize;
@@ -2215,40 +2215,49 @@ fn cached_or_rank_candidates(
     task_id: &str,
     capsule_profile: &str,
     task: Option<&Value>,
-    has_watched_paths: bool,
+    trace_paths: &[String],
     trace: &mut crate::observability::Trace,
 ) -> Result<(Vec<Candidate>, Diagnostics)> {
-    let plan_key = if !has_watched_paths {
-        crate::storage::index_generation(&store.conn)
-            .ok()
-            .map(|index_generation| {
-                let scope_digest = scope
-                    .map(|paths| {
-                        serde_json::to_vec(paths)
-                            .map(|bytes| query::sha256(&bytes))
-                            .unwrap_or_default()
-                    })
-                    .unwrap_or_else(|| "all".into());
-                let task_rev = task
-                    .and_then(|record| record["revision"].as_u64())
-                    .unwrap_or(0);
-                let task_updated = task
-                    .and_then(|record| record["updated_at"].as_str())
-                    .unwrap_or("");
-                let today = crate::domain::clock::today().to_string();
-                crate::storage::QueryPlanKey {
-                    word_tokens: query::word_tokens(query),
-                    task_id: task_id.to_owned(),
-                    capsule_profile: capsule_profile.to_owned(),
-                    index_generation,
-                    working_rev: format!(
-                        "{task_rev}:{task_updated}:{limit}:{scope_digest}:{today}"
-                    ),
-                }
-            })
-    } else {
-        None
-    };
+    let plan_key = crate::storage::index_generation(&store.conn)
+        .ok()
+        .map(|index_generation| {
+            let scope_digest = scope
+                .map(|paths| {
+                    serde_json::to_vec(paths)
+                        .map(|bytes| query::sha256(&bytes))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_else(|| "all".into());
+            let trace_paths_digest = if trace_paths.is_empty() {
+                "none".into()
+            } else {
+                serde_json::to_vec(trace_paths)
+                    .map(|bytes| query::sha256(&bytes))
+                    .unwrap_or_default()
+            };
+            let trace_policy_digest = serde_json::to_vec(&(
+                &trace.config.value["allowed_privacy"],
+                &trace.config.value["owners"],
+            ))
+            .map(|bytes| query::sha256(&bytes))
+            .unwrap_or_default();
+            let task_rev = task
+                .and_then(|record| record["revision"].as_u64())
+                .unwrap_or(0);
+            let task_updated = task
+                .and_then(|record| record["updated_at"].as_str())
+                .unwrap_or("");
+            let today = crate::domain::clock::today().to_string();
+            crate::storage::QueryPlanKey {
+                word_tokens: query::word_tokens(query),
+                task_id: task_id.to_owned(),
+                capsule_profile: capsule_profile.to_owned(),
+                index_generation,
+                working_rev: format!(
+                    "{task_rev}:{task_updated}:{limit}:{scope_digest}:{trace_paths_digest}:{trace_policy_digest}:{today}"
+                ),
+            }
+        });
 
     if let Some(key) = &plan_key
         && let Some(hit) = crate::storage::QueryPlanCache::lookup(&store.conn, key)
@@ -2259,6 +2268,11 @@ fn cached_or_rank_candidates(
         trace.required_terms = hit.required_terms;
         if let Some(events) = hit.funnel_events {
             trace.funnel["events"] = events;
+        }
+        if let Some(records) = hit.trace_records {
+            trace.records = records;
+            trace.order = hit.trace_order;
+            trace.truncated = hit.trace_truncated;
         }
         return Ok((hit.candidates, hit.diagnostics));
     }
@@ -2334,7 +2348,7 @@ mod query_plan_cache_tests {
             "TASK-1",
             "full",
             None,
-            false,
+            &[],
             &mut t1,
         )
         .unwrap();
@@ -2354,7 +2368,7 @@ mod query_plan_cache_tests {
             "TASK-1",
             "full",
             None,
-            false,
+            &[],
             &mut t2,
         )
         .unwrap();
@@ -2384,7 +2398,7 @@ mod query_plan_cache_tests {
             "TASK-1",
             "full",
             None,
-            false,
+            &[],
             &mut t3,
         )
         .unwrap();
@@ -2407,7 +2421,7 @@ mod query_plan_cache_tests {
                 Ok(())
             })
             .unwrap();
-        let mut t4 = crate::observability::Trace::new(config, &[]).unwrap();
+        let mut t4 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
         let (fourth, _) = cached_or_rank_candidates(
             &mut store,
             "invoice numbering",
@@ -2416,7 +2430,7 @@ mod query_plan_cache_tests {
             "TASK-1",
             "full",
             None,
-            false,
+            &[],
             &mut t4,
         )
         .unwrap();
@@ -2425,5 +2439,74 @@ mod query_plan_cache_tests {
             before_misses + 3
         );
         assert_eq!(fourth.len(), 1);
+
+        // Trace-scoped calls hit the cache when trace_paths match and miss when they differ.
+        let watched = vec!["memory-bank/chunks/MEM-20260101-abcd1234-invoice.md".to_string()];
+        let mut tw1 = crate::observability::Trace::new(config.clone(), &watched).unwrap();
+        let _ = tw1.watch(&store.conn);
+        let hits_before_trace = QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed);
+        let misses_before_trace = QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed);
+        let (trace_first, _) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            &watched,
+            &mut tw1,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
+            misses_before_trace + 1
+        );
+        assert_eq!(trace_first.len(), 1);
+
+        let mut tw2 = crate::observability::Trace::new(config.clone(), &watched).unwrap();
+        let _ = tw2.watch(&store.conn);
+        let (trace_second, _) = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            &watched,
+            &mut tw2,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed),
+            hits_before_trace + 1
+        );
+        assert_eq!(trace_second.len(), 1);
+        assert_eq!(tw2.records, tw1.records);
+        assert_eq!(tw2.order, tw1.order);
+        assert_eq!(tw2.funnel["events"], tw1.funnel["events"]);
+
+        let other_watched = vec!["docs/other.md".to_string()];
+        let mut tw3 = crate::observability::Trace::new(config, &other_watched).unwrap();
+        let _ = tw3.watch(&store.conn);
+        let _ = cached_or_rank_candidates(
+            &mut store,
+            "invoice numbering",
+            30,
+            None,
+            "TASK-1",
+            "full",
+            None,
+            &other_watched,
+            &mut tw3,
+        )
+        .unwrap();
+        assert_eq!(
+            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
+            misses_before_trace + 2
+        );
+        assert!(tw3.records.contains_key("docs/other.md"));
+        assert_eq!(tw3.records["docs/other.md"]["state"], "unavailable");
     }
 }

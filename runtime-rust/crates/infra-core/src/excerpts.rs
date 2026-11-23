@@ -4,9 +4,26 @@ use crate::{
     capsule::Capsule,
     query::{self, Candidate},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+const PREPARSED_SECTION_VERSION: u32 = 1;
+const MARK_SEPARATOR: &str = "\n\u{1f}\n";
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_SECTION_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PREPARSED_CACHE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn bump_live_section_parses() {
+    LIVE_SECTION_PARSES.with(|cell| cell.set(cell.get() + 1));
+}
+#[cfg(test)]
+fn bump_preparsed_cache_hits() {
+    PREPARSED_CACHE_HITS.with(|cell| cell.set(cell.get() + 1));
+}
 pub const OPEN: char = '\u{2}';
 pub const CLOSE: char = '\u{3}';
 pub const MARKED_LIMIT: usize = 65536;
@@ -105,7 +122,54 @@ fn heading(line: &str) -> Option<(usize, String)> {
         None
     }
 }
-pub fn sections(text: &str) -> Vec<(String, Vec<String>)> {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CitationLineRef {
+    pub raw: String,
+    pub base: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PreparsedSection {
+    pub heading: String,
+    pub folded_heading: String,
+    pub slug: String,
+    pub shown: String,
+    pub units: Vec<String>,
+    pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_refs: Option<Vec<CitationLineRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PreparsedFirstBody {
+    pub heading: String,
+    pub slug: String,
+    pub shown: String,
+    pub units: Vec<String>,
+    pub hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PreparsedLinkedTask {
+    pub goal: String,
+    pub files_text: String,
+    pub sources_text: String,
+    pub files: Vec<String>,
+    pub sources: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PreparsedDocument {
+    pub version: u32,
+    pub title_folded: String,
+    pub sections: Vec<PreparsedSection>,
+    pub first_body: Option<PreparsedFirstBody>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_task: Option<PreparsedLinkedTask>,
+    pub section_digest: String,
+}
+
+fn sections_raw(text: &str) -> Vec<(String, Vec<String>)> {
     let body = text
         .strip_prefix("---\n")
         .and_then(|tail| tail.split_once("\n---\n").map(|(_, body)| body))
@@ -119,6 +183,12 @@ pub fn sections(text: &str) -> Vec<(String, Vec<String>)> {
         }
     }
     output
+}
+
+pub fn sections(text: &str) -> Vec<(String, Vec<String>)> {
+    #[cfg(test)]
+    bump_live_section_parses();
+    sections_raw(text)
 }
 pub fn units(lines: &[String]) -> Vec<String> {
     fn flush(block: &mut Vec<String>, output: &mut Vec<String>) {
@@ -264,7 +334,7 @@ fn payload(heading: &str, lines: &[String], title: &str) -> Section {
         units,
     }
 }
-fn first_body(text: &str) -> Option<(String, Vec<String>)> {
+fn first_body_raw(text: &str) -> Option<(String, Vec<String>)> {
     let body = text
         .strip_prefix("---\n")
         .and_then(|tail| tail.split_once("\n---\n").map(|(_, body)| body))
@@ -323,6 +393,449 @@ fn first_body(text: &str) -> Option<(String, Vec<String>)> {
     } else {
         None
     }
+}
+fn first_body(text: &str) -> Option<(String, Vec<String>)> {
+    #[cfg(test)]
+    bump_live_section_parses();
+    first_body_raw(text)
+}
+fn extract_citation_refs(heading: &str, lines: &[String]) -> Option<Vec<CitationLineRef>> {
+    if !["sources", "references"].contains(&query::folded(&unmarked(heading)).as_str()) {
+        return None;
+    }
+    let mut refs = Vec::new();
+    for line in lines.iter().filter(|line| !line.trim().is_empty()) {
+        let plain = unmarked(line);
+        let line = plain.trim();
+        if !line.starts_with(['-', '*', '+'])
+            || !line.chars().nth(1).is_some_and(char::is_whitespace)
+        {
+            return None;
+        }
+        let reference = line[1..].trim().trim_matches('`');
+        let base = reference
+            .split_once('#')
+            .filter(|(_, fragment)| {
+                !fragment.is_empty()
+                    && !fragment.chars().any(char::is_whitespace)
+                    && !fragment.contains('`')
+            })
+            .map(|(base, _)| base.to_string());
+        refs.push(CitationLineRef {
+            raw: reference.to_string(),
+            base,
+        });
+    }
+    (!refs.is_empty()).then_some(refs)
+}
+fn citation_refs_only(refs: Option<&[CitationLineRef]>, sources: &BTreeSet<String>) -> bool {
+    let Some(refs) = refs else {
+        return false;
+    };
+    !refs.is_empty()
+        && refs.iter().all(|item| {
+            sources.contains(&item.raw)
+                || item
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| sources.contains(base))
+        })
+}
+fn compute_section_digest(
+    sections: &[PreparsedSection],
+    first_body: &Option<PreparsedFirstBody>,
+) -> String {
+    serde_json::to_vec(&(PREPARSED_SECTION_VERSION, sections, first_body))
+        .map(|bytes| query::sha256(&bytes))
+        .unwrap_or_default()
+}
+fn linked_task_entries_pattern() -> Option<&'static regex::Regex> {
+    static ENTRIES: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    ENTRIES
+        .get_or_init(|| {
+            let grave = char::from(96);
+            regex::Regex::new(&format!("^- {grave}?([^{grave}\\n]+?){grave}?\\s*$"))
+        })
+        .as_ref()
+        .ok()
+}
+fn preparse_linked_task_raw(content: &str) -> PreparsedLinkedTask {
+    let mut sections = BTreeMap::<String, String>::new();
+    let mut active = None::<String>;
+    let mut lines = Vec::<String>::new();
+    for line in content.lines() {
+        if let Some(title) = line.strip_prefix("## ") {
+            if let Some(previous) = active.take() {
+                sections.insert(previous, lines.join("\n").trim().into());
+                lines.clear();
+            }
+            active = Some(title.trim().into());
+        } else if active.is_some() {
+            lines.push(line.into());
+        }
+    }
+    if let Some(previous) = active {
+        sections.insert(previous, lines.join("\n").trim().into());
+    }
+    let goal = sections
+        .get("Goal")
+        .and_then(|goal| goal.split("\n\n").find(|part| !part.trim().is_empty()))
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let files_text = sections.get("Files").cloned().unwrap_or_default();
+    let sources_text = sections.get("Sources").cloned().unwrap_or_default();
+    let pattern = linked_task_entries_pattern();
+    let collect = |text: &str| {
+        text.lines()
+            .filter_map(|line| {
+                pattern
+                    .as_ref()
+                    .and_then(|pattern| pattern.captures(line.trim()))
+                    .map(|captures| captures[1].trim().to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+    PreparsedLinkedTask {
+        goal,
+        files: collect(&files_text),
+        sources: collect(&sources_text),
+        files_text,
+        sources_text,
+    }
+}
+fn linked_task_excerpt_from_preparsed(
+    parsed: &PreparsedLinkedTask,
+    via: &str,
+    limit: usize,
+) -> (String, String) {
+    let heading = if !via.is_empty()
+        && !parsed.sources_text.is_empty()
+        && parsed.sources_text.contains(via)
+        && !parsed.files_text.contains(via)
+    {
+        "Sources"
+    } else {
+        "Files"
+    };
+    let entries = if heading == "Sources" {
+        &parsed.sources
+    } else {
+        &parsed.files
+    };
+    let mut ordered = Vec::new();
+    if entries.iter().any(|entry| entry == via) {
+        ordered.push(via.to_string());
+    }
+    ordered.extend(entries.iter().rev().filter(|entry| *entry != via).cloned());
+    let mut parts = Vec::new();
+    if !parsed.goal.is_empty() {
+        parts.push(format!("Goal: {}.", collapse(&parsed.goal)));
+    }
+    if !ordered.is_empty() {
+        parts.push(format!(
+            "{heading}: {}",
+            ordered.into_iter().take(6).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    (
+        crate::capsule::bounded(&parts.join(" "), limit),
+        heading.into(),
+    )
+}
+pub(crate) fn preparse_document(title: &str, kind: &str, content: &str) -> PreparsedDocument {
+    let raw_sections = sections_raw(content);
+    let mut sections = Vec::with_capacity(raw_sections.len());
+    for (heading, lines) in raw_sections {
+        let citation_refs = extract_citation_refs(&heading, &lines);
+        let parsed = payload(&heading, &lines, title);
+        let folded_heading = query::folded(&parsed.heading);
+        sections.push(PreparsedSection {
+            heading: parsed.heading,
+            folded_heading,
+            slug: parsed.slug,
+            shown: parsed.shown,
+            units: parsed.units,
+            hash: parsed.hash,
+            citation_refs,
+        });
+    }
+    let first_body = first_body_raw(content).map(|(heading, lines)| {
+        let parsed = payload(&heading, &lines, title);
+        PreparsedFirstBody {
+            heading: parsed.heading,
+            slug: parsed.slug,
+            shown: parsed.shown,
+            units: parsed.units,
+            hash: parsed.hash,
+        }
+    });
+    let linked_task = (kind == "brain-task").then(|| preparse_linked_task_raw(content));
+    let section_digest = compute_section_digest(&sections, &first_body);
+    PreparsedDocument {
+        version: PREPARSED_SECTION_VERSION,
+        title_folded: query::folded(title),
+        sections,
+        first_body,
+        linked_task,
+        section_digest,
+    }
+}
+fn load_preparsed(
+    conn: &Connection,
+    item: &Candidate,
+    image: &IndexedImage,
+) -> Option<PreparsedDocument> {
+    if image.content.chars().count() > MARKED_LIMIT {
+        return None;
+    }
+    let expected_source_hash = item
+        .held_source_hash
+        .as_deref()
+        .unwrap_or(&item.document.source_hash);
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT source_hash, content_sha256, payload FROM document_sections WHERE path=?1",
+            [&item.document.path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let (stored_source_hash, stored_content_hash, raw) = row?;
+    if stored_source_hash != expected_source_hash {
+        return None;
+    }
+    if stored_content_hash != query::sha256(image.content.as_bytes()) {
+        return None;
+    }
+    let parsed: PreparsedDocument = serde_json::from_str(&raw).ok()?;
+    if parsed.version != PREPARSED_SECTION_VERSION
+        || parsed.title_folded != query::folded(&image.title)
+        || parsed.section_digest != compute_section_digest(&parsed.sections, &parsed.first_body)
+    {
+        return None;
+    }
+    #[cfg(test)]
+    bump_preparsed_cache_hits();
+    Some(parsed)
+}
+struct MarkedPreparsedSection<'a> {
+    meta: &'a PreparsedSection,
+    marked_heading: String,
+    marked_units: Vec<String>,
+}
+fn mark_preparsed_sections<'a>(
+    preparsed: &'a PreparsedDocument,
+    tokens: &[String],
+) -> Option<Vec<MarkedPreparsedSection<'a>>> {
+    if tokens.is_empty() {
+        return Some(
+            preparsed
+                .sections
+                .iter()
+                .map(|meta| MarkedPreparsedSection {
+                    meta,
+                    marked_heading: meta.heading.clone(),
+                    marked_units: meta.units.clone(),
+                })
+                .collect(),
+        );
+    }
+    let mut parts = Vec::new();
+    for sec in &preparsed.sections {
+        if sec.units.is_empty() {
+            continue;
+        }
+        if sec.heading.contains('\u{1f}') || sec.units.iter().any(|u| u.contains('\u{1f}')) {
+            return None;
+        }
+        parts.push(sec.heading.as_str());
+        for unit in &sec.units {
+            parts.push(unit.as_str());
+        }
+    }
+    if parts.is_empty() {
+        return Some(Vec::new());
+    }
+    let joined = parts.join(MARK_SEPARATOR);
+    let highlighted = held_marked(
+        &IndexedImage {
+            title: String::new(),
+            summary: String::new(),
+            content: joined,
+        },
+        tokens,
+    )
+    .ok()?;
+    let split: Vec<&str> = highlighted.split(MARK_SEPARATOR).collect();
+    if split.len() != parts.len() {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let mut out = Vec::with_capacity(preparsed.sections.len());
+    for meta in &preparsed.sections {
+        if meta.units.is_empty() {
+            out.push(MarkedPreparsedSection {
+                meta,
+                marked_heading: meta.heading.clone(),
+                marked_units: Vec::new(),
+            });
+            continue;
+        }
+        let marked_heading = split[cursor].to_string();
+        cursor += 1;
+        let end = cursor + meta.units.len();
+        let marked_units = split[cursor..end]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        cursor = end;
+        out.push(MarkedPreparsedSection {
+            meta,
+            marked_heading,
+            marked_units,
+        });
+    }
+    Some(out)
+}
+fn quoted_section_from_preparsed(
+    preparsed: &PreparsedDocument,
+    marked: &[MarkedPreparsedSection<'_>],
+    weights: &BTreeMap<String, f64>,
+    sources: Option<&BTreeSet<String>>,
+    requested: &BTreeSet<String>,
+    prefer_head: bool,
+) -> Option<Section> {
+    if prefer_head && sources.is_none() && requested.is_empty() {
+        return preparsed.first_body.as_ref().map(|fb| Section {
+            heading: fb.heading.clone(),
+            slug: fb.slug.clone(),
+            units: fb.units.clone(),
+            hash: fb.hash.clone(),
+            shown: fb.shown.clone(),
+        });
+    }
+    let mut best = None;
+    let mut requested_best = None;
+    let mut first = None;
+    for (index, item) in marked.iter().enumerate() {
+        let is_requested = requested.contains(&item.meta.folded_heading);
+        if !is_requested
+            && sources.is_some_and(|sources| {
+                citation_refs_only(item.meta.citation_refs.as_deref(), sources)
+            })
+        {
+            continue;
+        }
+        if item.marked_units.is_empty() {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(index);
+        }
+        let mut all = Vec::with_capacity(1 + item.marked_units.len());
+        all.push(item.marked_heading.clone());
+        all.extend(item.marked_units.iter().cloned());
+        let key = (score(&all, weights), score(&item.marked_units, weights));
+        if best.as_ref().is_none_or(|(previous, _)| key > *previous) {
+            best = Some((key, index));
+        }
+        if is_requested
+            && requested_best
+                .as_ref()
+                .is_none_or(|(previous, _)| key > *previous)
+        {
+            requested_best = Some((key, index));
+        }
+    }
+    let index = if let Some((_, index)) = requested_best {
+        index
+    } else if prefer_head {
+        return preparsed.first_body.as_ref().map(|fb| Section {
+            heading: fb.heading.clone(),
+            slug: fb.slug.clone(),
+            units: fb.units.clone(),
+            hash: fb.hash.clone(),
+            shown: fb.shown.clone(),
+        });
+    } else {
+        let (key, index) = best?;
+        if key.0.0 > 0 { index } else { first? }
+    };
+    let chosen = &marked[index];
+    Some(Section {
+        heading: chosen.meta.heading.clone(),
+        slug: chosen.meta.slug.clone(),
+        units: chosen.marked_units.clone(),
+        hash: chosen.meta.hash.clone(),
+        shown: chosen.meta.shown.clone(),
+    })
+}
+fn section_from_preparsed(
+    conn: &Connection,
+    item: &Candidate,
+    preparsed: &PreparsedDocument,
+    marked: &[MarkedPreparsedSection<'_>],
+    weights: &BTreeMap<String, f64>,
+    query: &str,
+) -> Option<Section> {
+    let linked = matches!(
+        item.selection.as_deref(),
+        Some("path-link" | "source-link" | "source-hint" | "prompt-link" | "touch-link")
+    );
+    let prefer_head = item.document.kind == "changelog";
+    if linked && item.document.kind != "brain-task" || item.document.kind == "memory" {
+        let words = query::word_tokens(query);
+        let requested = ["sources", "references"]
+            .into_iter()
+            .filter(|heading| words.iter().any(|word| word == heading))
+            .map(String::from)
+            .collect::<BTreeSet<_>>();
+        if !requested.is_empty() {
+            return quoted_section_from_preparsed(
+                preparsed,
+                marked,
+                weights,
+                None,
+                &requested,
+                prefer_head,
+            );
+        }
+        let sources = document_source_links(conn, &item.document.path);
+        if !sources.is_empty()
+            && sources.len() <= 32
+            && let Some(found) = quoted_section_from_preparsed(
+                preparsed,
+                marked,
+                weights,
+                Some(&sources.into_iter().collect()),
+                &BTreeSet::new(),
+                false,
+            )
+        {
+            return Some(found);
+        }
+    }
+    quoted_section_from_preparsed(
+        preparsed,
+        marked,
+        weights,
+        None,
+        &BTreeSet::new(),
+        prefer_head,
+    )
+}
+fn document_source_links(conn: &Connection, path: &str) -> Vec<String> {
+    (|| -> rusqlite::Result<Vec<String>> {
+        let mut statement = conn.prepare_cached(
+            "SELECT ref_path FROM document_links WHERE path=?1 AND ref_kind='source' ORDER BY ref_path LIMIT 33",
+        )?;
+        let rows = statement.query_map([path], |row| row.get(0))?;
+        rows.collect()
+    })()
+    .unwrap_or_default()
 }
 fn citation_only(heading: &str, lines: &[String], sources: &BTreeSet<String>) -> bool {
     if !["sources", "references"].contains(&query::folded(&unmarked(heading)).as_str()) {
@@ -890,6 +1403,32 @@ pub fn quote_candidate_with(
     terms: &QueryTerms,
 ) -> Result<String> {
     let image = item.image();
+    if let Some(preparsed) = load_preparsed(conn, item, &image) {
+        let tokens = if item.document.kind == "changelog" {
+            &[][..]
+        } else {
+            terms.evidence.as_slice()
+        };
+        if let Some(marked_sections) = mark_preparsed_sections(&preparsed, tokens) {
+            return Ok(section_from_preparsed(
+                conn,
+                item,
+                &preparsed,
+                &marked_sections,
+                &terms.weights,
+                query,
+            )
+            .map(|section| {
+                window(
+                    &section.units,
+                    limit,
+                    &terms.weights,
+                    item.document.kind == "changelog",
+                )
+            })
+            .unwrap_or_else(|| query::body_excerpt(&image.content, limit, &[], false)));
+        }
+    }
     let marked = marked_with(item, &terms.evidence);
     let text = if item.document.kind == "changelog" {
         &image.content
@@ -937,28 +1476,92 @@ pub fn delivery_identity_with(
             }
         };
         let image = item.image();
-        let marked = marked_with(item, &terms.evidence);
-        let text = if item.document.kind == "changelog" {
-            &image.content
-        } else {
-            &marked
-        };
-        if let Some(selected) = section(conn, item, text, &terms.weights, query) {
-            let ordinary = quoted_section(
-                &marked,
-                &item.document.title,
-                &terms.weights,
-                None,
-                &BTreeSet::new(),
-                false,
-            );
-            if !(matches!(
-                item.selection.as_deref(),
-                Some("prompt-link" | "touch-link")
-            ) && ordinary.is_some_and(|ordinary| ordinary.hash == selected.hash))
-            {
-                key = format!("{key}#{}", selected.slug);
-                revision = selected.hash;
+        let mut resolved_from_cache = false;
+        if let Some(preparsed) = load_preparsed(conn, item, &image) {
+            let tokens = if item.document.kind == "changelog" {
+                &[][..]
+            } else {
+                terms.evidence.as_slice()
+            };
+            if let Some(marked_sections) = mark_preparsed_sections(&preparsed, tokens) {
+                let ordinary_sections = if item.document.kind == "changelog"
+                    && matches!(
+                        item.selection.as_deref(),
+                        Some("prompt-link" | "touch-link")
+                    ) {
+                    mark_preparsed_sections(&preparsed, &terms.evidence)
+                } else {
+                    None
+                };
+                if ordinary_sections.is_some()
+                    || item.document.kind != "changelog"
+                    || !matches!(
+                        item.selection.as_deref(),
+                        Some("prompt-link" | "touch-link")
+                    )
+                {
+                    resolved_from_cache = true;
+                    if let Some(selected) = section_from_preparsed(
+                        conn,
+                        item,
+                        &preparsed,
+                        &marked_sections,
+                        &terms.weights,
+                        query,
+                    ) {
+                        let ordinary = if matches!(
+                            item.selection.as_deref(),
+                            Some("prompt-link" | "touch-link")
+                        ) {
+                            let ord_slice =
+                                ordinary_sections.as_deref().unwrap_or(&marked_sections);
+                            quoted_section_from_preparsed(
+                                &preparsed,
+                                ord_slice,
+                                &terms.weights,
+                                None,
+                                &BTreeSet::new(),
+                                false,
+                            )
+                        } else {
+                            None
+                        };
+                        if !(matches!(
+                            item.selection.as_deref(),
+                            Some("prompt-link" | "touch-link")
+                        ) && ordinary.is_some_and(|ordinary| ordinary.hash == selected.hash))
+                        {
+                            key = format!("{key}#{}", selected.slug);
+                            revision = selected.hash;
+                        }
+                    }
+                }
+            }
+        }
+        if !resolved_from_cache {
+            let marked = marked_with(item, &terms.evidence);
+            let text = if item.document.kind == "changelog" {
+                &image.content
+            } else {
+                &marked
+            };
+            if let Some(selected) = section(conn, item, text, &terms.weights, query) {
+                let ordinary = quoted_section(
+                    &marked,
+                    &item.document.title,
+                    &terms.weights,
+                    None,
+                    &BTreeSet::new(),
+                    false,
+                );
+                if !(matches!(
+                    item.selection.as_deref(),
+                    Some("prompt-link" | "touch-link")
+                ) && ordinary.is_some_and(|ordinary| ordinary.hash == selected.hash))
+                {
+                    key = format!("{key}#{}", selected.slug);
+                    revision = selected.hash;
+                }
             }
         }
     }
@@ -968,87 +1571,26 @@ pub fn delivery_identity_with(
     (key, revision)
 }
 pub fn linked_task_excerpt(content: &str, via: &str, limit: usize) -> (String, String) {
-    let mut sections = BTreeMap::<String, String>::new();
-    let mut active = None::<String>;
-    let mut lines = Vec::<String>::new();
-    for line in content.lines() {
-        if let Some(title) = line.strip_prefix("## ") {
-            if let Some(previous) = active.take() {
-                sections.insert(previous, lines.join("\n").trim().into());
-                lines.clear();
-            }
-            active = Some(title.trim().into());
-        } else if active.is_some() {
-            lines.push(line.into());
-        }
-    }
-    if let Some(previous) = active {
-        sections.insert(previous, lines.join("\n").trim().into());
-    }
-    let goal = sections
-        .get("Goal")
-        .and_then(|goal| goal.split("\n\n").find(|part| !part.trim().is_empty()))
-        .map(str::trim)
-        .unwrap_or("");
-    let heading = if !via.is_empty()
-        && sections
-            .get("Sources")
-            .is_some_and(|text| text.contains(via))
-        && !sections.get("Files").is_some_and(|text| text.contains(via))
-    {
-        "Sources"
-    } else {
-        "Files"
-    };
-    static ENTRIES: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
-        std::sync::OnceLock::new();
-    let pattern = ENTRIES
-        .get_or_init(|| {
-            let grave = char::from(96);
-            regex::Regex::new(&format!("^- {grave}?([^{grave}\\n]+?){grave}?\\s*$"))
-        })
-        .as_ref()
-        .ok();
-    let entries = sections
-        .get(heading)
-        .into_iter()
-        .flat_map(|text| text.lines())
-        .filter_map(|line| {
-            pattern
-                .as_ref()
-                .and_then(|pattern| pattern.captures(line.trim()))
-                .map(|captures| captures[1].trim().to_string())
-        })
-        .collect::<Vec<_>>();
-    let mut ordered = Vec::new();
-    if entries.iter().any(|entry| entry == via) {
-        ordered.push(via.to_string());
-    }
-    ordered.extend(entries.into_iter().rev().filter(|entry| entry != via));
-    let mut parts = Vec::new();
-    if !goal.is_empty() {
-        parts.push(format!("Goal: {}.", collapse(goal)));
-    }
-    if !ordered.is_empty() {
-        parts.push(format!(
-            "{heading}: {}",
-            ordered.into_iter().take(6).collect::<Vec<_>>().join(", ")
-        ));
-    }
-    (
-        crate::capsule::bounded(&parts.join(" "), limit),
-        heading.into(),
-    )
+    #[cfg(test)]
+    bump_live_section_parses();
+    let parsed = preparse_linked_task_raw(content);
+    linked_task_excerpt_from_preparsed(&parsed, via, limit)
 }
-fn prepare_base(
+fn prepare_base_with_memo(
     conn: &Connection,
     capsule: &Capsule,
     selected: &[Candidate],
     limits: &BTreeMap<String, usize>,
+    memo: &mut BTreeMap<String, Option<PreparsedDocument>>,
 ) -> Result<PreparedRender> {
     let mut prepared = PreparedRender::default();
     let query = capsule.0["query"].as_str().unwrap_or("");
     let term_weights = weights(conn, query);
+    let evidence = if query.is_empty() {
+        Vec::new()
+    } else {
+        evidence_words(conn, query)
+    };
     let mut rank = 0;
     for candidate in selected {
         prepared
@@ -1083,11 +1625,12 @@ fn prepare_base(
             else {
                 continue;
             };
-            let held_content = prepared
+            let image = prepared
                 .images
                 .get(path)
-                .map(|image| image.content.as_str())
-                .unwrap_or("");
+                .cloned()
+                .unwrap_or_else(|| candidate.image());
+            let held_content = image.content.as_str();
             let linked = matches!(
                 candidate.selection.as_deref(),
                 Some("prompt-link" | "touch-link")
@@ -1099,12 +1642,21 @@ fn prepare_base(
             };
             let limit = limits.get(path).copied().unwrap_or(default);
             rank += 1;
+            let preparsed = memo
+                .entry(path.to_string())
+                .or_insert_with(|| load_preparsed(conn, candidate, &image));
             if linked {
-                let (text, heading) = linked_task_excerpt(
-                    held_content,
-                    candidate.via.as_deref().unwrap_or(""),
-                    limit,
-                );
+                let (text, heading) = if let Some(Some(parsed)) =
+                    preparsed.as_ref().map(|p| p.linked_task.as_ref())
+                {
+                    linked_task_excerpt_from_preparsed(
+                        parsed,
+                        candidate.via.as_deref().unwrap_or(""),
+                        limit,
+                    )
+                } else {
+                    linked_task_excerpt(held_content, candidate.via.as_deref().unwrap_or(""), limit)
+                };
                 if !text.is_empty() {
                     let cut = text.chars().count() >= limit.saturating_sub(40);
                     prepared.excerpts.insert(
@@ -1119,17 +1671,47 @@ fn prepare_base(
                 }
                 continue;
             }
-            let marked = if query.is_empty() {
-                held_content.to_string()
+            let section = if let Some(parsed) = preparsed.as_ref() {
+                let tokens = if query.is_empty() || candidate.document.kind == "changelog" {
+                    &[][..]
+                } else {
+                    evidence.as_slice()
+                };
+                if let Some(marked_sections) = mark_preparsed_sections(parsed, tokens) {
+                    section_from_preparsed(
+                        conn,
+                        candidate,
+                        parsed,
+                        &marked_sections,
+                        &term_weights,
+                        query,
+                    )
+                } else {
+                    let marked = if query.is_empty() {
+                        held_content.to_string()
+                    } else {
+                        marked_with(candidate, &evidence)
+                    };
+                    let text = if candidate.document.kind == "changelog" {
+                        held_content
+                    } else {
+                        &marked
+                    };
+                    section(conn, candidate, text, &term_weights, query)
+                }
             } else {
-                marked(conn, candidate, query)
+                let marked = if query.is_empty() {
+                    held_content.to_string()
+                } else {
+                    marked_with(candidate, &evidence)
+                };
+                let text = if candidate.document.kind == "changelog" {
+                    held_content
+                } else {
+                    &marked
+                };
+                section(conn, candidate, text, &term_weights, query)
             };
-            let text = if candidate.document.kind == "changelog" {
-                held_content
-            } else {
-                &marked
-            };
-            let section = section(conn, candidate, text, &term_weights, query);
             let mut body = section
                 .as_ref()
                 .map(|section| {
@@ -1167,12 +1749,13 @@ fn prepare_base(
     }
     Ok(prepared)
 }
-pub fn prepare(
+fn prepare_with_memo(
     conn: &Connection,
     capsule: &Capsule,
     selected: &[Candidate],
+    memo: &mut BTreeMap<String, Option<PreparsedDocument>>,
 ) -> Result<PreparedRender> {
-    let initial = prepare_base(conn, capsule, selected, &BTreeMap::new())?;
+    let initial = prepare_base_with_memo(conn, capsule, selected, &BTreeMap::new(), memo)?;
     let reserve =
         1200 + if capsule.0["recent_files"]
             .as_array()
@@ -1216,8 +1799,16 @@ pub fn prepare(
     if grown.is_empty() {
         Ok(initial)
     } else {
-        prepare_base(conn, capsule, selected, &grown)
+        prepare_base_with_memo(conn, capsule, selected, &grown, memo)
     }
+}
+pub fn prepare(
+    conn: &Connection,
+    capsule: &Capsule,
+    selected: &[Candidate],
+) -> Result<PreparedRender> {
+    let mut memo = BTreeMap::new();
+    prepare_with_memo(conn, capsule, selected, &mut memo)
 }
 fn packed_membership(capsule: &Capsule) -> Vec<(String, String)> {
     ["procedural", "semantic", "episodic"]
@@ -1246,10 +1837,16 @@ pub fn prepare_with(
     profile: crate::capsule::DeliveryProfile,
     preparer: &mut dyn ExcerptPreparer,
 ) -> Result<bool> {
-    let lexical = prepare(conn, capsule, selected)?;
+    let mut memo = BTreeMap::new();
+    let lexical = prepare_with_memo(conn, capsule, selected, &mut memo)?;
     capsule.1 = Some(lexical.clone());
     let query = capsule.0["query"].as_str().unwrap_or("");
     let term_weights = weights(conn, query);
+    let evidence = if query.is_empty() {
+        Vec::new()
+    } else {
+        evidence_words(conn, query)
+    };
     let mut offered = Vec::new();
     for item in selected.iter() {
         let Some(excerpt) = lexical.excerpts.get(&item.document.path) else {
@@ -1275,51 +1872,106 @@ pub fn prepare_with(
                     Some("prompt-link" | "touch-link")
                 ))
         {
-            let held = marked(conn, item, query);
-            let sources = {
-                let mut statement=conn.prepare("SELECT ref_path FROM document_links WHERE path=?1 AND ref_kind='source' ORDER BY ref_path LIMIT 33")?;
-                let rows =
-                    statement.query_map([&item.document.path], |row| row.get::<_, String>(0))?;
-                rows.collect::<std::result::Result<BTreeSet<_>, _>>()?
-            };
-            for (heading, lines) in sections(&held).into_iter().take(64) {
-                if sources.len() <= 32 && citation_only(&heading, &lines, &sources) {
-                    continue;
+            let sources = document_source_links(conn, &item.document.path)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let image = lexical
+                .images
+                .get(&item.document.path)
+                .cloned()
+                .unwrap_or_else(|| item.image());
+            let preparsed = memo
+                .entry(item.document.path.clone())
+                .or_insert_with(|| load_preparsed(conn, item, &image));
+            let mut handled_from_cache = false;
+            if let Some(parsed) = preparsed.as_ref()
+                && let Some(marked_sections) = mark_preparsed_sections(parsed, &evidence)
+            {
+                handled_from_cache = true;
+                for sec in marked_sections.into_iter().take(64) {
+                    if sources.len() <= 32
+                        && citation_refs_only(sec.meta.citation_refs.as_deref(), &sources)
+                    {
+                        continue;
+                    }
+                    if sec.marked_units.is_empty() {
+                        continue;
+                    }
+                    let text = window(
+                        &sec.marked_units,
+                        excerpt.limit,
+                        &term_weights,
+                        item.document.kind == "changelog",
+                    );
+                    if text.is_empty()
+                        || alternatives.iter().any(|alternative| {
+                            alternative.text == text && alternative.heading == sec.meta.shown
+                        })
+                    {
+                        continue;
+                    }
+                    let mut revision = sec.meta.hash.clone();
+                    if !item.document.conflicts.is_empty() {
+                        revision =
+                            query::sha256(format!("recorded-conflict\0{revision}").as_bytes());
+                    }
+                    alternatives.push(PreparedAlternative {
+                        text,
+                        heading: sec.meta.shown.clone(),
+                        key: format!("{}#{}", item.document.path, sec.meta.slug),
+                        revision,
+                        limit: excerpt.limit,
+                        cut: sec
+                            .marked_units
+                            .iter()
+                            .map(|unit| unmarked(unit).chars().count() + 1)
+                            .sum::<usize>()
+                            > excerpt.limit,
+                    });
                 }
-                let section = payload(&heading, &lines, &item.document.title);
-                if section.units.is_empty() {
-                    continue;
+            }
+            if !handled_from_cache {
+                let held = marked_with(item, &evidence);
+                for (heading, lines) in sections(&held).into_iter().take(64) {
+                    if sources.len() <= 32 && citation_only(&heading, &lines, &sources) {
+                        continue;
+                    }
+                    let section = payload(&heading, &lines, &item.document.title);
+                    if section.units.is_empty() {
+                        continue;
+                    }
+                    let text = window(
+                        &section.units,
+                        excerpt.limit,
+                        &term_weights,
+                        item.document.kind == "changelog",
+                    );
+                    if text.is_empty()
+                        || alternatives.iter().any(|alternative| {
+                            alternative.text == text && alternative.heading == section.shown
+                        })
+                    {
+                        continue;
+                    }
+                    let mut revision = section.hash;
+                    if !item.document.conflicts.is_empty() {
+                        revision =
+                            query::sha256(format!("recorded-conflict\0{revision}").as_bytes());
+                    }
+                    alternatives.push(PreparedAlternative {
+                        text,
+                        heading: section.shown,
+                        key: format!("{}#{}", item.document.path, section.slug),
+                        revision,
+                        limit: excerpt.limit,
+                        cut: section
+                            .units
+                            .iter()
+                            .map(|unit| unmarked(unit).chars().count() + 1)
+                            .sum::<usize>()
+                            > excerpt.limit,
+                    });
                 }
-                let text = window(
-                    &section.units,
-                    excerpt.limit,
-                    &term_weights,
-                    item.document.kind == "changelog",
-                );
-                if text.is_empty()
-                    || alternatives.iter().any(|alternative| {
-                        alternative.text == text && alternative.heading == section.shown
-                    })
-                {
-                    continue;
-                }
-                let mut revision = section.hash;
-                if !item.document.conflicts.is_empty() {
-                    revision = query::sha256(format!("recorded-conflict\0{revision}").as_bytes());
-                }
-                alternatives.push(PreparedAlternative {
-                    text,
-                    heading: section.shown,
-                    key: format!("{}#{}", item.document.path, section.slug),
-                    revision,
-                    limit: excerpt.limit,
-                    cut: section
-                        .units
-                        .iter()
-                        .map(|unit| unmarked(unit).chars().count() + 1)
-                        .sum::<usize>()
-                        > excerpt.limit,
-                });
             }
         }
         offered.push(PreparationCandidate {
@@ -1506,5 +2158,162 @@ mod held_marker_tests {
             held_marked(&images[0], &queries[0]).unwrap(),
             fresh(&images[0], &queries[0]).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod preparsed_section_digest_tests {
+    use super::*;
+    use crate::{
+        Roots, RuntimeContext,
+        capsule::DeliveryProfile,
+        domain::uuid4,
+        index::refresh_index,
+        retrieval::{RetrievalRequest, retrieve},
+        storage::{OpenOptions, Store},
+    };
+    use std::path::PathBuf;
+
+    struct OwnedDir(PathBuf);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn reset_counters() {
+        LIVE_SECTION_PARSES.with(|cell| cell.set(0));
+        PREPARSED_CACHE_HITS.with(|cell| cell.set(0));
+    }
+
+    fn live_parses() -> usize {
+        LIVE_SECTION_PARSES.with(|cell| cell.get())
+    }
+
+    fn cache_hits() -> usize {
+        PREPARSED_CACHE_HITS.with(|cell| cell.get())
+    }
+
+    #[test]
+    fn refresh_index_persists_preparsed_sections_and_retrieve_skips_live_parses() {
+        let root = std::env::temp_dir().join(format!("infra-preparsed-{}", uuid4()));
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        std::fs::create_dir_all(root.join("memory-bank/local")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/tasks")).unwrap();
+        std::fs::create_dir_all(root.join("specs")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let _dir = OwnedDir(root.clone());
+
+        std::fs::write(
+            root.join("docs/invoice.md"),
+            "# Invoice Docs\n\n## Sequence\nYearly invoice sequence resets cleanly under lock.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/invoice.md"),
+            "# Invoice Spec\n\n## Sequence\nYearly invoice sequence resets cleanly.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/MANIFEST.md"),
+            "# Manifest\n\n- `specs/invoice.md` — Invoice spec\n",
+        )
+        .unwrap();
+        let metadata = serde_json::json!({
+            "id": "MEM-20260101-abcd1234",
+            "title": "Invoice Rules",
+            "type": "convention",
+            "status": "active",
+            "scope": ["application"],
+            "tags": ["project-brain", "promoted"],
+            "created": "2026-01-01",
+            "last_verified": "2026-01-01",
+            "review_after": "9999-12-31",
+            "sources": ["specs/invoice.md", "docs/invoice.md"],
+            "supersedes": [],
+            "superseded_by": null
+        });
+        let body = "## Context\nYearly invoice numbering uses tenant locks.\n\n## Decision\nAlways allocate invoice sequence under advisory lock.\n";
+        let chunk_bytes = crate::bank::codec::render_chunk(&metadata, body).unwrap();
+        std::fs::write(
+            root.join("memory-bank/chunks/MEM-20260101-abcd1234-invoice.md"),
+            chunk_bytes,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("project-brain/tasks/TASK-001.md"),
+            "# TASK-001\n\n## Goal\nMaintain invoice sequence integrity\n\n## Files\n- `specs/invoice.md`\n\n## Sources\n- `specs/invoice.md`\n",
+        )
+        .unwrap();
+
+        let roots = Roots::installed(&root).unwrap();
+        let context = RuntimeContext::new(roots, "tester", "governed").unwrap();
+        let mut store = Store::open(
+            root.join("memory-bank/local/context.db"),
+            OpenOptions::refresh(None),
+        )
+        .unwrap();
+        refresh_index(&mut store, &context, false).unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM document_sections", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            count >= 3,
+            "expected >= 3 document_sections rows, got {count}"
+        );
+
+        let request = RetrievalRequest {
+            query: "invoice sequence lock".into(),
+            task_id: None,
+            limit: 5,
+            refresh_index: false,
+            delivery_profile: DeliveryProfile::Ordinary,
+            ..RetrievalRequest::default()
+        };
+
+        reset_counters();
+        let cached = retrieve(&mut store, &context, &request).unwrap();
+        assert_eq!(live_parses(), 0, "cached retrieve must not re-parse files");
+        assert!(cache_hits() > 0, "expected document_sections cache hits");
+        assert!(
+            !cached.0["semantic"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .is_empty(),
+            "expected semantic retrieval hits: {}",
+            cached.0
+        );
+
+        // Compare against uncached live parsing (document_sections cleared): output must match exactly.
+        store
+            .transaction(|conn| {
+                conn.execute("DELETE FROM document_sections", [])?;
+                Ok(())
+            })
+            .unwrap();
+        reset_counters();
+        let uncached = retrieve(&mut store, &context, &request).unwrap();
+        assert!(live_parses() > 0);
+        assert_eq!(cache_hits(), 0);
+        assert_eq!(cached.0["semantic"], uncached.0["semantic"]);
+        assert_eq!(cached.0["episodic"], uncached.0["episodic"]);
+
+        // Re-refresh repopulates document_sections; corrupt payload falls back cleanly.
+        refresh_index(&mut store, &context, false).unwrap();
+        store
+            .transaction(|conn| {
+                conn.execute("UPDATE document_sections SET payload='{corrupt'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        reset_counters();
+        let recovered = retrieve(&mut store, &context, &request).unwrap();
+        assert_eq!(cache_hits(), 0);
+        assert!(live_parses() > 0);
+        assert_eq!(recovered.0["semantic"], cached.0["semantic"]);
     }
 }

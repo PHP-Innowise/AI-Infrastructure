@@ -11,6 +11,16 @@ use std::{
 const UNSAVED: &str = "Previous native memory result was not saved completely.";
 const HOOK_PREFLIGHT_RACY_NS: i128 = 2_000_000_000;
 const HOOK_PREFLIGHT_CACHE_FILE: &str = "memory-bank/local/hook-refresh-preflight.json";
+const HOOK_WRITE_PREFLIGHT_CACHE_FILE: &str = "memory-bank/local/hook-write-preflight.json";
+const HOOK_CONTINUITY_PREFLIGHT_CACHE_FILE: &str =
+    "memory-bank/local/hook-continuity-preflight.json";
+
+fn session_id_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z0-9._:-]{1,128}$").expect("constant session regex")
+    })
+}
 
 fn time_to_unix_ns(time: SystemTime) -> Option<i128> {
     match time.duration_since(UNIX_EPOCH) {
@@ -116,35 +126,8 @@ fn preflight_key_snapshot(
     let chunks_mtime = max_dir_mtime_ns(&scope.roots.state.join("memory-bank/chunks"), &mut budget);
     let brain_mtime = max_dir_mtime_ns(&scope.roots.brain_root(), &mut budget);
     let mut tree_max_mtime_ns = chunks_mtime.max(brain_mtime).max(db_mtime_ns);
-    let git_head =
-        if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(&scope.roots.project) {
-            if let Some(git_idx_mtime) = std::fs::symlink_metadata(frame.admin.join("index"))
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(time_to_unix_ns)
-            {
-                tree_max_mtime_ns = tree_max_mtime_ns.max(git_idx_mtime);
-            }
-            let head_txt = std::fs::read_to_string(frame.admin.join("HEAD")).unwrap_or_default();
-            let trimmed = head_txt.trim();
-            let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
-                let ref_rel = ref_name.trim();
-                frame
-                    .common_dir()
-                    .ok()
-                    .and_then(|common| {
-                        std::fs::read_to_string(common.join(ref_rel))
-                            .ok()
-                            .or_else(|| std::fs::read_to_string(common.join("packed-refs")).ok())
-                    })
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            format!("{trimmed}:{}", resolved.trim())
-        } else {
-            String::new()
-        };
+    let (git_head, git_idx_mtime) = git_head_and_index_mtime(&scope.roots.project);
+    tree_max_mtime_ns = tree_max_mtime_ns.max(git_idx_mtime);
     if tree_max_mtime_ns == i128::MAX || !settled_mtime(tree_max_mtime_ns, now_ns) {
         return None;
     }
@@ -170,13 +153,7 @@ fn preflight_key_snapshot(
         )
         .unwrap_or_default();
 
-    let transcript_stamp = valid_path(scope.payload["transcript_path"].as_str(), 4096)
-        .and_then(|p| std::fs::symlink_metadata(p).ok())
-        .and_then(|m| {
-            let mt = m.modified().ok().and_then(time_to_unix_ns)?;
-            Some(format!("{}:{mt}", m.len()))
-        })
-        .unwrap_or_default();
+    let transcript_stamp = transcript_stamp(scope, None).unwrap_or_default();
 
     Some(RefreshPreflightRecord {
         task_id,
@@ -211,18 +188,88 @@ fn preflight_cache_matches(
         && cached.transcript_stamp == current.transcript_stamp
 }
 
-fn load_preflight_cache(scope: &Context) -> Option<RefreshPreflightRecord> {
-    let path = scope.roots.state.join(HOOK_PREFLIGHT_CACHE_FILE);
+fn load_json_cache<T: for<'de> Deserialize<'de>>(scope: &Context, relative: &str) -> Option<T> {
+    let path = scope.roots.state.join(relative);
     let bytes = infra_core::fs::read_regular(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-fn save_preflight_cache(scope: &Context, mut record: RefreshPreflightRecord, stdout: Vec<u8>) {
-    record.stdout = stdout;
-    let path = scope.roots.state.join(HOOK_PREFLIGHT_CACHE_FILE);
-    if let Ok(bytes) = serde_json::to_vec(&record) {
+fn save_json_cache<T: Serialize>(scope: &Context, relative: &str, record: &T) {
+    let path = scope.roots.state.join(relative);
+    if let Ok(bytes) = serde_json::to_vec(record) {
         let _ = infra_core::fs::atomic_write(&path, &bytes);
     }
+}
+
+fn git_head_and_index_mtime(project: &Path) -> (String, i128) {
+    if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(project) {
+        let idx_mtime = std::fs::symlink_metadata(frame.admin.join("index"))
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(time_to_unix_ns)
+            .unwrap_or(0);
+        let head_txt = std::fs::read_to_string(frame.admin.join("HEAD")).unwrap_or_default();
+        let trimmed = head_txt.trim();
+        let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
+            let ref_rel = ref_name.trim();
+            frame
+                .common_dir()
+                .ok()
+                .and_then(|common| {
+                    std::fs::read_to_string(common.join(ref_rel))
+                        .ok()
+                        .or_else(|| std::fs::read_to_string(common.join("packed-refs")).ok())
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        (format!("{trimmed}:{}", resolved.trim()), idx_mtime)
+    } else {
+        (String::new(), 0)
+    }
+}
+
+fn transcript_stamp(scope: &Context, require_settled_now: Option<i128>) -> Option<String> {
+    let Some(path) = valid_path(scope.payload["transcript_path"].as_str(), 4096) else {
+        return Some(String::new());
+    };
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mt = meta.modified().ok().and_then(time_to_unix_ns)?;
+    if let Some(now_ns) = require_settled_now
+        && !settled_mtime(mt, now_ns)
+    {
+        return None;
+    }
+    Some(format!("{}:{mt}", meta.len()))
+}
+
+fn file_stamp_if_present(path: &Path, now_ns: i128) -> Option<String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some("missing".into()),
+        Err(_) => return None,
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mt = meta.modified().ok().and_then(time_to_unix_ns)?;
+    if !settled_mtime(mt, now_ns) {
+        return None;
+    }
+    Some(format!("{}:{mt}", meta.len()))
+}
+
+fn load_preflight_cache(scope: &Context) -> Option<RefreshPreflightRecord> {
+    load_json_cache(scope, HOOK_PREFLIGHT_CACHE_FILE)
+}
+
+fn save_preflight_cache(scope: &Context, mut record: RefreshPreflightRecord, stdout: Vec<u8>) {
+    record.stdout = stdout;
+    save_json_cache(scope, HOOK_PREFLIGHT_CACHE_FILE, &record);
 }
 fn task_args(scope: &Context) -> Vec<String> {
     scope
@@ -397,10 +444,9 @@ where
         ]);
         args.extend(scope.branch_args());
         if !cursor_host {
-            let session = scope.payload["session_id"].as_str().filter(|id| {
-                regex::Regex::new(r"^[A-Za-z0-9._:-]{1,128}$")
-                    .is_ok_and(|pattern| pattern.is_match(id))
-            });
+            let session = scope.payload["session_id"]
+                .as_str()
+                .filter(|id| session_id_re().is_match(id));
             if let Some(session) = session {
                 args.extend(["--session-id".into(), session.into()]);
                 if let Some(transcript) =
@@ -496,7 +542,212 @@ where
     }
     Ok(Output::text(rendered))
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WritePreflightRecord {
+    task_id: String,
+    host: String,
+    entered: bool,
+    recovery: bool,
+    delivered: bool,
+    flush_after: String,
+    index_gen: String,
+    git_head: String,
+    git_dirty_digest: String,
+    db_mtime_ns: i128,
+    db_len: u64,
+    pending_deltas: i64,
+    task_updated_at: String,
+    tree_max_mtime_ns: i128,
+    cursor_rule_stamp: String,
+    transcript_stamp: String,
+    payload_sha256: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn git_dirty_settled_digest(project: &Path, now_ns: i128) -> Option<String> {
+    let ok_frame = infra_core::git::GitFrame::discover(project).ok()?;
+    let Some(_) = ok_frame else {
+        return Some(String::from("no-git"));
+    };
+    let output = std::process::Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "-uall",
+        ])
+        .current_dir(project)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut parts = Vec::<String>::new();
+    let entries = output.stdout.split(|b| *b == 0);
+    let mut skip_next = false;
+    for raw_entry in entries {
+        if raw_entry.is_empty() {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let Ok(entry_str) = std::str::from_utf8(raw_entry) else {
+            return None;
+        };
+        if entry_str.len() < 4 {
+            return None;
+        }
+        let status_code = &entry_str[..2];
+        if status_code.starts_with('R') || status_code.starts_with('C') {
+            skip_next = true;
+        }
+        let rel = entry_str[3..].trim_end_matches('/');
+        if rel == "memory-bank/local" || rel.starts_with("memory-bank/local/") {
+            continue;
+        }
+        let full = project.join(rel);
+        let stamp = match std::fs::symlink_metadata(&full) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return None;
+                }
+                let mt = meta.modified().ok().and_then(time_to_unix_ns)?;
+                if !settled_mtime(mt, now_ns) {
+                    return None;
+                }
+                format!("{status_code}:{rel}:{}:{mt}", meta.len())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                format!("{status_code}:{rel}:deleted")
+            }
+            Err(_) => return None,
+        };
+        parts.push(stamp);
+    }
+    parts.sort();
+    Some(infra_core::query::sha256(parts.join("\n").as_bytes()))
+}
+
+fn write_preflight_snapshot(
+    scope: &Context,
+    recovery: bool,
+    delivered: bool,
+    flush_after: &str,
+    now_ns: i128,
+) -> Option<WritePreflightRecord> {
+    if std::env::var("HARNESS_DISABLE_HOOK_PREFLIGHT").as_deref() == Ok("1") {
+        return None;
+    }
+    let task_id = scope.task.as_deref().filter(|t| !t.is_empty())?.to_owned();
+    let db_path = infra_core::storage::default_database(&scope.roots).ok()?;
+    let db_meta = std::fs::symlink_metadata(&db_path).ok()?;
+    if db_meta.file_type().is_symlink() || !db_meta.is_file() {
+        return None;
+    }
+    let db_mtime_ns = db_meta.modified().ok().and_then(time_to_unix_ns)?;
+    if !settled_mtime(db_mtime_ns, now_ns) {
+        return None;
+    }
+    let mut budget = 1500usize;
+    let chunks_mtime = max_dir_mtime_ns(&scope.roots.state.join("memory-bank/chunks"), &mut budget);
+    let brain_mtime = max_dir_mtime_ns(&scope.roots.brain_root(), &mut budget);
+    let (git_head, git_idx_mtime) = git_head_and_index_mtime(&scope.roots.project);
+    let tree_max_mtime_ns = chunks_mtime
+        .max(brain_mtime)
+        .max(db_mtime_ns)
+        .max(git_idx_mtime);
+    if tree_max_mtime_ns == i128::MAX || !settled_mtime(tree_max_mtime_ns, now_ns) {
+        return None;
+    }
+    let git_dirty_digest = git_dirty_settled_digest(&scope.roots.project, now_ns)?;
+    let transcript_stamp = transcript_stamp(scope, Some(now_ns))?;
+    let cursor_rule_stamp = if scope.host == "cursor" && scope.roots.state == scope.roots.tooling {
+        file_stamp_if_present(
+            &scope.roots.tooling.join(".cursor/rules/working-memory.mdc"),
+            now_ns,
+        )?
+    } else {
+        "n/a".into()
+    };
+
+    let store = Store::open_read_only(&db_path, Duration::from_millis(250))
+        .or_else(|_| Store::open(&db_path, OpenOptions::default()))
+        .ok()?;
+    let index_gen = infra_core::storage::index_generation(&store.conn).ok()?;
+    let pending_deltas: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM turn_deltas WHERE task_id=?1",
+            [&task_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let task_updated_at: String = store
+        .conn
+        .query_row(
+            "SELECT COALESCE(MAX(updated_at), '') FROM working_tasks WHERE task_id=?1",
+            [&task_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+
+    Some(WritePreflightRecord {
+        task_id,
+        host: scope.host.clone(),
+        entered: scope.entered,
+        recovery,
+        delivered,
+        flush_after: flush_after.to_string(),
+        index_gen,
+        git_head,
+        git_dirty_digest,
+        db_mtime_ns,
+        db_len: db_meta.len(),
+        pending_deltas,
+        task_updated_at,
+        tree_max_mtime_ns,
+        cursor_rule_stamp,
+        transcript_stamp,
+        payload_sha256: infra_core::query::sha256(&scope.raw),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
+fn write_preflight_matches(cached: &WritePreflightRecord, current: &WritePreflightRecord) -> bool {
+    cached.task_id == current.task_id
+        && cached.host == current.host
+        && cached.entered == current.entered
+        && cached.recovery == current.recovery
+        && cached.delivered == current.delivered
+        && cached.flush_after == current.flush_after
+        && cached.index_gen == current.index_gen
+        && cached.git_head == current.git_head
+        && cached.git_dirty_digest == current.git_dirty_digest
+        && cached.db_mtime_ns == current.db_mtime_ns
+        && cached.db_len == current.db_len
+        && cached.pending_deltas == current.pending_deltas
+        && cached.task_updated_at == current.task_updated_at
+        && cached.tree_max_mtime_ns == current.tree_max_mtime_ns
+        && cached.cursor_rule_stamp == current.cursor_rule_stamp
+        && cached.transcript_stamp == current.transcript_stamp
+        && cached.payload_sha256 == current.payload_sha256
+}
+
 pub fn write(scope: &Context) -> Result<Output> {
+    write_with_runner(scope, now_unix_ns(), |ctx, operation, args, input| {
+        ctx.call(operation, args, input, ctx.budget)
+    })
+}
+
+fn write_with_runner<F>(scope: &Context, now_ns: i128, mut call_runner: F) -> Result<Output>
+where
+    F: FnMut(&Context, &str, &[String], &[u8]) -> Result<Output>,
+{
     if scope.other_worktree || scope.task.is_none() {
         return Ok(Output::default());
     }
@@ -507,8 +758,26 @@ pub fn write(scope: &Context) -> Result<Output> {
     } else {
         scope.payload["stop_hook_active"] == true
     };
+    let flush = std::env::var("CONTEXT_FLUSH_AFTER").unwrap_or_else(|_| "5".into());
+    let delivered = std::env::var("CONTEXT_CAPSULE_DELIVERED").as_deref() == Ok("1");
+
+    let preflight = write_preflight_snapshot(scope, recovery, delivered, &flush, now_ns);
+    if let Some(current) = &preflight
+        && let Some(cached) =
+            load_json_cache::<WritePreflightRecord>(scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE)
+        && write_preflight_matches(&cached, current)
+    {
+        scope.append("native-results.ndjson",&json!({"at":infra_core::domain::clock::proof_now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),"host":scope.host,"stage":"stop-hook","event":"preflight-cache","status":0}));
+        return Ok(Output {
+            code: 0,
+            stdout: cached.stdout,
+            stderr: cached.stderr,
+            ..Default::default()
+        });
+    }
+
+    let mut all_ok = true;
     if !recovery {
-        let flush = std::env::var("CONTEXT_FLUSH_AFTER").unwrap_or_else(|_| "5".into());
         let mut args = task_args(scope);
         args.extend(["--flush-after".into(), flush]);
         if let Some(transcript) = valid_path(scope.payload["transcript_path"].as_str(), 4096)
@@ -519,9 +788,10 @@ pub fn write(scope: &Context) -> Result<Output> {
                 transcript.to_string_lossy().into_owned(),
             ]);
         }
-        let _ = scope.call("turn", &args, &[], scope.budget);
+        if !call_runner(scope, "turn", &args, &[]).is_ok_and(|output| output.code == 0) {
+            all_ok = false;
+        }
     }
-    let delivered = std::env::var("CONTEXT_CAPSULE_DELIVERED").as_deref() == Ok("1");
     let mut response = Output::default();
     if !delivered {
         let mut args = vec!["--host".into(), scope.host.clone()];
@@ -529,7 +799,7 @@ pub fn write(scope: &Context) -> Result<Output> {
         if scope.entered {
             args.push("--entered".into());
         }
-        let native = scope.call("native-stop", &args, &scope.raw, scope.budget);
+        let native = call_runner(scope, "native-stop", &args, &scope.raw);
         let output = match native {
             Ok(output) => output,
             Err(_) => Output {
@@ -539,17 +809,32 @@ pub fn write(scope: &Context) -> Result<Output> {
         };
         if output.code == 0 {
             response.stdout = output.stdout;
+        } else {
+            all_ok = false;
         }
         scope.append("native-results.ndjson",&json!({"at":infra_core::domain::clock::proof_now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),"host":scope.host,"stage":"stop-hook","event":"exited","status":output.code}));
     } else {
         scope.append("native-results.ndjson",&json!({"at":infra_core::domain::clock::proof_now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),"host":scope.host,"stage":"stop-hook","event":"skipped","code":"capsule-delivered"}));
     }
     if scope.host != "cursor" || scope.roots.state != scope.roots.tooling {
+        if all_ok && let Some(mut record) = preflight {
+            record.stdout = response.stdout.clone();
+            record.stderr = response.stderr.clone();
+            save_json_cache(scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE, &record);
+        }
         return Ok(response);
     }
     if delivered {
         let (stderr, _) = cursor(scope, &["cursor-rule-retire".into()], &[]);
         response.stderr.extend(stderr);
+        if all_ok
+            && response.stderr.is_empty()
+            && let Some(mut record) = preflight
+        {
+            record.stdout = response.stdout.clone();
+            record.stderr = response.stderr.clone();
+            save_json_cache(scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE, &record);
+        }
         return Ok(response);
     }
     let mut held = vec![
@@ -560,6 +845,11 @@ pub fn write(scope: &Context) -> Result<Output> {
     held.extend(task_args(scope));
     let (_, report) = cursor(scope, &held, &[]);
     if report.is_some_and(|report| report["state"] == "kept") {
+        if all_ok && let Some(mut record) = preflight {
+            record.stdout = response.stdout.clone();
+            record.stderr = response.stderr.clone();
+            save_json_cache(scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE, &record);
+        }
         return Ok(response);
     }
     let mut arguments = vec![
@@ -570,7 +860,7 @@ pub fn write(scope: &Context) -> Result<Output> {
     ];
     arguments.extend(task_args(scope));
     arguments.extend(scope.branch_args());
-    let capsule = scope.call("hook-context", &arguments, &[], scope.budget);
+    let capsule = call_runner(scope, "hook-context", &arguments, &[]);
     let mut maintenance = vec![];
     let input = match &capsule {
         Ok(output) if output.code == 3 => {
@@ -589,6 +879,7 @@ pub fn write(scope: &Context) -> Result<Output> {
             output.stdout.as_slice()
         }
         _ => {
+            all_ok = false;
             maintenance.extend(["cursor-rule".into(), "--action".into(), "keep".into()]);
             maintenance.extend(task_args(scope));
             &[][..]
@@ -596,7 +887,190 @@ pub fn write(scope: &Context) -> Result<Output> {
     };
     let (stderr, _) = cursor(scope, &maintenance, input);
     response.stderr.extend(stderr);
+    if all_ok
+        && response.stderr.is_empty()
+        && let Some(mut record) = preflight
+    {
+        record.stdout = response.stdout.clone();
+        record.stderr = response.stderr.clone();
+        save_json_cache(scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE, &record);
+    }
     Ok(response)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ContinuityPreflightRecord {
+    host: String,
+    owner: String,
+    env_digest: String,
+    git_head: String,
+    config_stamp: String,
+    handoff_tree_digest: String,
+    handoff_max_mtime_ns: i128,
+    transcript_stamp: String,
+    payload_sha256: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn handoff_settled_fingerprint(handoff: &Path, now_ns: i128) -> Option<(i128, String)> {
+    let meta = std::fs::symlink_metadata(handoff).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return None;
+    }
+    let mut max_mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+    let mut files = Vec::<String>::new();
+    let mut stack = vec![handoff.to_path_buf()];
+    let mut remaining = 512usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return None;
+        };
+        for entry in entries.flatten() {
+            if remaining == 0 {
+                return None;
+            }
+            remaining -= 1;
+            let path = entry.path();
+            let Ok(m) = std::fs::symlink_metadata(&path) else {
+                return None;
+            };
+            if m.file_type().is_symlink() {
+                return None;
+            }
+            let mt = m.modified().ok().and_then(time_to_unix_ns)?;
+            max_mtime = max_mtime.max(mt);
+            let rel = path
+                .strip_prefix(handoff)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if m.is_dir() {
+                files.push(format!("D:{rel}:{mt}"));
+                stack.push(path);
+            } else {
+                files.push(format!("F:{rel}:{}:{mt}", m.len()));
+            }
+        }
+    }
+    if !settled_mtime(max_mtime, now_ns) {
+        return None;
+    }
+    files.sort();
+    Some((
+        max_mtime,
+        infra_core::query::sha256(files.join("\n").as_bytes()),
+    ))
+}
+
+fn continuity_preflight_snapshot(
+    scope: &Context,
+    now_ns: i128,
+) -> Option<ContinuityPreflightRecord> {
+    if std::env::var("HARNESS_DISABLE_HOOK_PREFLIGHT").as_deref() == Ok("1") {
+        return None;
+    }
+    let handoff = scope.roots.state.join(".context-handoff");
+    let (handoff_max_mtime_ns, handoff_tree_digest) =
+        handoff_settled_fingerprint(&handoff, now_ns)?;
+    let (git_head, git_idx_mtime) = git_head_and_index_mtime(&scope.roots.project);
+    if git_idx_mtime > 0 && !settled_mtime(git_idx_mtime, now_ns) {
+        return None;
+    }
+    let config_stamp = file_stamp_if_present(
+        &scope.roots.brain_root().join("config/runtime.json"),
+        now_ns,
+    )?;
+    let transcript_stamp = transcript_stamp(scope, Some(now_ns))?;
+    let owner = std::env::var("PROJECT_BRAIN_OWNER").unwrap_or_else(|_| "local".into());
+    let env_digest = infra_core::query::sha256(
+        format!(
+            "{}:{}:{}",
+            std::env::var("CONTEXT_CONTINUITY_DISABLED").unwrap_or_default(),
+            std::env::var("CONTEXT_CONTINUITY_CAPTURE_DISABLED").unwrap_or_default(),
+            std::env::var("CONTEXT_CONTINUITY_RESTORE_DISABLED").unwrap_or_default(),
+        )
+        .as_bytes(),
+    );
+
+    Some(ContinuityPreflightRecord {
+        host: scope.host.clone(),
+        owner,
+        env_digest,
+        git_head,
+        config_stamp,
+        handoff_tree_digest,
+        handoff_max_mtime_ns,
+        transcript_stamp,
+        payload_sha256: infra_core::query::sha256(&scope.raw),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
+fn continuity_preflight_matches(
+    cached: &ContinuityPreflightRecord,
+    current: &ContinuityPreflightRecord,
+) -> bool {
+    cached.host == current.host
+        && cached.owner == current.owner
+        && cached.env_digest == current.env_digest
+        && cached.git_head == current.git_head
+        && cached.config_stamp == current.config_stamp
+        && cached.handoff_tree_digest == current.handoff_tree_digest
+        && cached.handoff_max_mtime_ns == current.handoff_max_mtime_ns
+        && cached.transcript_stamp == current.transcript_stamp
+        && cached.payload_sha256 == current.payload_sha256
+}
+
+pub fn continuity(context: &Context) -> Result<Output> {
+    continuity_with_runner(context, now_unix_ns(), |ctx| {
+        let value = infra_core::chat_continuity::execute(
+            &infra_core::RuntimeContext::new(
+                ctx.roots.clone(),
+                std::env::var("PROJECT_BRAIN_OWNER").unwrap_or_else(|_| "local".into()),
+                infra_core::RuntimeConfig::load(&ctx.roots)?.mode(None)?,
+            )?,
+            &ctx.host,
+            "hook",
+            &ctx.raw,
+            &json!({}),
+        )?;
+        Output::envelope(value)
+    })
+}
+
+fn continuity_with_runner<F>(context: &Context, now_ns: i128, mut runner: F) -> Result<Output>
+where
+    F: FnMut(&Context) -> Result<Output>,
+{
+    if context.other_worktree {
+        return Ok(Output::default());
+    }
+    let preflight = continuity_preflight_snapshot(context, now_ns);
+    if let Some(current) = &preflight
+        && let Some(cached) = load_json_cache::<ContinuityPreflightRecord>(
+            context,
+            HOOK_CONTINUITY_PREFLIGHT_CACHE_FILE,
+        )
+        && continuity_preflight_matches(&cached, current)
+    {
+        return Ok(Output {
+            code: 0,
+            stdout: cached.stdout,
+            stderr: cached.stderr,
+            ..Default::default()
+        });
+    }
+    let output = runner(context)?;
+    if output.code == 0
+        && let Some(mut record) = preflight
+    {
+        record.stdout = output.stdout.clone();
+        record.stderr = output.stderr.clone();
+        save_json_cache(context, HOOK_CONTINUITY_PREFLIGHT_CACHE_FILE, &record);
+    }
+    Ok(output)
 }
 pub fn session_cursor(scope: &Context) -> Result<Vec<u8>> {
     if scope.host != "cursor" || scope.roots.state != scope.roots.tooling {
@@ -758,5 +1232,196 @@ mod hook_preflight_tests {
         .unwrap();
         assert_eq!(calls, 2, "changed git_head must trigger fresh refresh");
         assert_eq!(String::from_utf8_lossy(&third.stdout), "CAPSULE v2\n");
+    }
+
+    #[test]
+    fn memory_write_preflight_respects_racy_window_settled_cache_and_git_dirty_drift() {
+        let (_dir, root, db_path) = test_git_project();
+        let roots = Roots::discover(&root, &root).unwrap();
+        let payload = json!({"session_id": "write-s1", "stop_hook_active": false});
+        let scope = Context {
+            roots,
+            host: "claude".into(),
+            payload: payload.clone(),
+            raw: serde_json::to_vec(&payload).unwrap(),
+            task: Some("TASK-42".into()),
+            inferred: false,
+            entered: false,
+            other_worktree: false,
+            outside: None,
+            budget: Duration::from_secs(3),
+        };
+
+        assert!(session_id_re().is_match("sess_1.abc:def-9"));
+        assert!(!session_id_re().is_match("bad/id"));
+
+        let db_mtime = std::fs::symlink_metadata(&db_path)
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(time_to_unix_ns)
+            .unwrap();
+        assert!(
+            write_preflight_snapshot(
+                &scope,
+                false,
+                false,
+                "5",
+                db_mtime + HOOK_PREFLIGHT_RACY_NS - 1
+            )
+            .is_none()
+        );
+
+        let settled = db_mtime + HOOK_PREFLIGHT_RACY_NS + 500_000_000;
+        let snap1 = write_preflight_snapshot(&scope, false, false, "5", settled)
+            .expect("settled write preflight snapshot must build");
+        let mut calls = 0usize;
+        let first = write_with_runner(&scope, settled, |_s, op, _args, _in| {
+            calls += 1;
+            if op == "native-stop" {
+                Ok(Output::text("STOP CHECK OK\n"))
+            } else {
+                Ok(Output::default())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2); // turn + native-stop
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "STOP CHECK OK\n");
+        let cached =
+            load_json_cache::<WritePreflightRecord>(&scope, HOOK_WRITE_PREFLIGHT_CACHE_FILE)
+                .expect("write preflight cache file must exist");
+        let snap2 = write_preflight_snapshot(&scope, false, false, "5", settled + 1000)
+            .expect("second settled write preflight snapshot must build");
+        assert_eq!(snap1, snap2);
+        assert!(write_preflight_matches(&cached, &snap2));
+
+        // Second call with unchanged workspace & payload skips spawning both `turn` and `native-stop`.
+        let second = write_with_runner(&scope, settled + 1000, |_s, _op, _args, _in| {
+            calls += 1;
+            Ok(Output::text("UNEXPECTED\n"))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "STOP CHECK OK\n");
+
+        // Modifying a working-tree file outside racy window invalidates preflight cache.
+        std::fs::write(root.join("README.md"), "dirty edit\n").unwrap();
+        let file_mt = std::fs::symlink_metadata(root.join("README.md"))
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(time_to_unix_ns)
+            .unwrap();
+        assert!(
+            write_preflight_snapshot(
+                &scope,
+                false,
+                false,
+                "5",
+                file_mt + HOOK_PREFLIGHT_RACY_NS - 1
+            )
+            .is_none(),
+            "dirty file inside 2s racy window must bypass cache"
+        );
+        let third = write_with_runner(
+            &scope,
+            file_mt + HOOK_PREFLIGHT_RACY_NS + 500_000_000,
+            |_s, op, _args, _in| {
+                calls += 1;
+                if op == "native-stop" {
+                    Ok(Output::text("STOP CHECK v2\n"))
+                } else {
+                    Ok(Output::default())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(String::from_utf8_lossy(&third.stdout), "STOP CHECK v2\n");
+    }
+
+    #[test]
+    fn continuity_preflight_caches_settled_handoff_without_touching_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::python_realpath(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+        std::fs::write(
+            root.join(".git/refs/heads/main"),
+            format!("{}\n", "a".repeat(40)),
+        )
+        .unwrap();
+        let handoff = root.join(".context-handoff");
+        std::fs::create_dir_all(&handoff).unwrap();
+        let snap = handoff.join("snap.json");
+        std::fs::write(&snap, "{\"ok\":true}\n").unwrap();
+
+        let roots = Roots::discover(&root, &root).unwrap();
+        let payload = json!({"session_id": "cont-1", "hook_event_name": "SessionStart"});
+        let scope = Context {
+            roots,
+            host: "claude".into(),
+            payload: payload.clone(),
+            raw: serde_json::to_vec(&payload).unwrap(),
+            task: None,
+            inferred: false,
+            entered: false,
+            other_worktree: false,
+            outside: None,
+            budget: Duration::from_secs(3),
+        };
+
+        let snap_mt = std::fs::symlink_metadata(&snap)
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(time_to_unix_ns)
+            .unwrap();
+        assert!(
+            continuity_preflight_snapshot(&scope, snap_mt + HOOK_PREFLIGHT_RACY_NS - 1).is_none()
+        );
+
+        let settled = snap_mt + HOOK_PREFLIGHT_RACY_NS + 500_000_000;
+        let mut calls = 0usize;
+        let first = continuity_with_runner(&scope, settled, |_ctx| {
+            calls += 1;
+            Ok(Output::text("RESTORED v1\n"))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "RESTORED v1\n");
+        assert!(
+            !root.join("memory-bank/local/context.db").exists(),
+            "continuity preflight must never create SQLite"
+        );
+
+        let second = continuity_with_runner(&scope, settled + 100, |_ctx| {
+            calls += 1;
+            Ok(Output::text("SHOULD_NOT_RUN\n"))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "RESTORED v1\n");
+
+        // Touching handoff state inside racy window and beyond invalidates cache cleanly.
+        std::fs::write(&snap, "{\"ok\":true,\"n\":2}\n").unwrap();
+        let new_mt = std::fs::symlink_metadata(&snap)
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(time_to_unix_ns)
+            .unwrap();
+        let third = continuity_with_runner(
+            &scope,
+            new_mt + HOOK_PREFLIGHT_RACY_NS + 500_000_000,
+            |_ctx| {
+                calls += 1;
+                Ok(Output::text("RESTORED v2\n"))
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(String::from_utf8_lossy(&third.stdout), "RESTORED v2\n");
     }
 }
