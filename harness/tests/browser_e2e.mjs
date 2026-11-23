@@ -641,14 +641,15 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     await clickAt(box.cx, box.cy, options);
   }
 
-  async function pressKey({ key, code, keyCode, modifiers = 0 }) {
+  async function pressKey({ key, code, keyCode, modifiers = 0, shift = false }) {
+    const mods = modifiers || (shift ? 8 : 0);
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyDown',
       key,
       code,
       windowsVirtualKeyCode: keyCode,
       nativeVirtualKeyCode: keyCode,
-      modifiers,
+      modifiers: mods,
     });
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyUp',
@@ -656,7 +657,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
       code,
       windowsVirtualKeyCode: keyCode,
       nativeVirtualKeyCode: keyCode,
-      modifiers,
+      modifiers: mods,
     });
   }
 
@@ -2157,6 +2158,7 @@ async function suite4LiveSseAndStyling(driver, cdp, opts) {
             kind: 'tool',
             tool: 'Bash',
             call: 'call-before-dedup',
+            state: 'completed',
             ok: true,
             text: 'completed output line',
             command: 'echo dedup',
@@ -5205,7 +5207,7 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
       `Expected #main + .skip inert and #sidebar active when mobile drawer opens: ${JSON.stringify(mobileInertOpen)}`,
     );
     await mobileDriver.callFn(() => document.getElementById('project-switcher')?.focus());
-    await mobileDriver.pressKey({ key: 'Tab', code: 'Tab', keyCode: 9, shift: true });
+    await mobileDriver.pressKey({ key: 'Tab', code: 'Tab', keyCode: 9, modifiers: 8 /* Shift */ });
     const afterShiftTab = await mobileDriver.callFn(() => {
       const sb = document.getElementById('sidebar');
       const active = document.activeElement;
@@ -6175,7 +6177,7 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
               compiles: gammaSkillcacheCompiled
                 ? [{ source_generation: 'g-sse-1', status: 'completed', capsule_id: 'cap-sse-1', outcome: 'Compiled via SSE!' }]
                 : [],
-              capsules: [],
+              capsules: gammaSkillcacheCompiled ? [{ capsule_id: 'cap-sse-1' }] : [],
               runs: [],
             };
           } else if (parsed.pathname === '/api/sessions/s-gamma-sse/results') {

@@ -57,7 +57,7 @@ pub const EXPANDED_WORKSPACE_IDS: [&str; 3] = [
     "system-change-map-workspace",
 ];
 const FALLBACK_RESTORE_SELECTOR: &str = "#view-tabs [aria-selected=\"true\"], #new-session";
-const MODAL_FOCUSABLE_SELECTOR: &str = "button:not([disabled]), a[href], input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled]), details > summary:not([tabindex=\"-1\"]), [tabindex]:not([tabindex=\"-1\"])";
+const MODAL_FOCUSABLE_SELECTOR: &str = "button:not([disabled]):not([tabindex=\"-1\"]), a[href]:not([tabindex=\"-1\"]), input:not([disabled]):not([type=\"hidden\"]):not([tabindex=\"-1\"]), select:not([disabled]):not([tabindex=\"-1\"]), textarea:not([disabled]):not([tabindex=\"-1\"]), details > summary:not([tabindex=\"-1\"]), [tabindex]:not([tabindex=\"-1\"]):not([disabled])";
 
 pub const MOBILE_BREAKPOINT_QUERY: &str = "(max-width: 920px)";
 
@@ -267,9 +267,19 @@ fn set_inert_attr(id: &str, inert: bool) {
     }
 }
 
+fn is_standalone_body_sibling(el: &Element) -> bool {
+    el.parent_element()
+        .is_some_and(|p| p.tag_name().eq_ignore_ascii_case("BODY"))
+}
+
 fn set_selector_inert_attr(selector: &str, inert: bool) {
     for el in all(selector) {
-        set_element_inert(&el, inert);
+        let effective = if selector == "#graph-explain-action" {
+            inert && is_standalone_body_sibling(&el)
+        } else {
+            inert
+        };
+        set_element_inert(&el, effective);
     }
 }
 
@@ -443,9 +453,10 @@ pub fn sync_overlay_inert() {
         None
     };
 
-    for (selector, inert) in
-        standalone_body_inert_targets(false, (sidebar_open && mobile) || expanded_ws.is_some())
-    {
+    for (selector, mut inert) in standalone_body_inert_targets(false, sidebar_open && mobile) {
+        if selector == ".skip" && expanded_ws.is_some() {
+            inert = true;
+        }
         set_selector_inert_attr(selector, inert);
     }
     for (id, mut inert) in overlay_inert_targets(false, false, false, sidebar_open, mobile) {
@@ -525,9 +536,9 @@ pub fn hide_with_restore(e: &Element, v: bool, restore_focus: bool) {
             push_overlay_stack(&id);
         }
     }
-    if is_tracked_modal && !restored_already {
+    if (is_tracked_modal && !restored_already) || id == "graph-explain-action" {
         sync_overlay_inert();
-        if v && restore_focus && was_open {
+        if is_tracked_modal && v && restore_focus && was_open {
             restore_focus_for_overlay(&id);
         }
     }
@@ -2550,5 +2561,8 @@ mod tests {
         assert!(is_computed_hidden("block", "collapse", true));
         assert!(!is_computed_hidden("block", "hidden", false));
         assert!(!is_computed_hidden("block", "visible", true));
+        assert!(MODAL_FOCUSABLE_SELECTOR
+            .contains("input:not([disabled]):not([type=\"hidden\"]):not([tabindex=\"-1\"])"));
+        assert!(MODAL_FOCUSABLE_SELECTOR.contains("button:not([disabled]):not([tabindex=\"-1\"])"));
     }
 }

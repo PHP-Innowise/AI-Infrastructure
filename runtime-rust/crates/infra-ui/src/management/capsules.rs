@@ -580,8 +580,6 @@ fn compiler_controls_html(provider: &str, model: &str, disabled: bool) -> String
         ("", "Default compiler"),
         ("claude", "Claude"),
         ("codex", "Codex"),
-        ("cursor", "Cursor"),
-        ("gemini", "Gemini"),
     ] {
         let sel = if provider.eq_ignore_ascii_case(val) {
             " selected"
@@ -973,8 +971,16 @@ fn render_detail() {
     dom::hide(&pane, false);
 }
 
+pub(crate) fn should_clear_error_on_reload(preserve_error: bool) -> bool {
+    !preserve_error
+}
+
 /// Loads the project's capsules and, when one is open, that capsule.
 pub async fn load_capsules() {
+    load_capsules_preserving_error(false).await;
+}
+
+async fn load_capsules_preserving_error(preserve_error: bool) {
     ensure_search_input();
     let project = m::current_project();
     if project.is_empty() {
@@ -988,7 +994,9 @@ pub async fn load_capsules() {
         Ok((epoch, listed))
             if m::current("skill-capsules", epoch) && m::current_project() == project =>
         {
-            dom::error("skill-capsules-error", "");
+            if should_clear_error_on_reload(preserve_error) {
+                dom::error("skill-capsules-error", "");
+            }
             // A capsule of another project, or one that was deleted, closes.
             let open = m::string(&m::data("skill-capsule-open"));
             let filtered = !dom::value("skill-capsules-status").is_empty()
@@ -1009,7 +1017,7 @@ pub async fn load_capsules() {
             if open.is_empty() {
                 render_detail();
             } else {
-                load_capsule(&open).await;
+                load_capsule_preserving_error(&open, preserve_error).await;
             }
         }
         Ok(_) => {}
@@ -1019,6 +1027,10 @@ pub async fn load_capsules() {
 }
 
 async fn load_capsule(id: &str) {
+    load_capsule_preserving_error(id, false).await;
+}
+
+async fn load_capsule_preserving_error(id: &str, preserve_error: bool) {
     let project = m::current_project();
     let path = format!(
         "/api/projects/{}/skillcache/capsules/{}",
@@ -1029,7 +1041,9 @@ async fn load_capsule(id: &str) {
         Ok((epoch, detail))
             if m::current("skill-capsule-detail", epoch) && m::data("skill-capsule-open") == id =>
         {
-            dom::error("skill-capsules-error", "");
+            if should_clear_error_on_reload(preserve_error) {
+                dom::error("skill-capsules-error", "");
+            }
             m::set("skill-capsule-detail", detail);
             render_list();
             render_detail();
@@ -1070,14 +1084,9 @@ async fn act(action: &str, id: &str) {
         dom_provider.as_str()
     };
     let model_override = if dom_model.trim().is_empty() {
-        let saved_m = compiler_saved["model"].as_str().unwrap_or("");
-        if saved_m.trim().is_empty() {
-            dom::value("skillcache-compiler-model")
-        } else {
-            saved_m.to_owned()
-        }
+        compiler_saved["model"].as_str().unwrap_or("").to_owned()
     } else {
-        dom_model.clone()
+        dom_model
     };
     m::set("skill-capsule-pending", json!(true));
     m::take("skill-capsule-armed");
@@ -1098,7 +1107,7 @@ async fn act(action: &str, id: &str) {
         _ => api::post(&format!("{base}/{action}"), json!({})).await,
     };
     m::take("skill-capsule-pending");
-    match result {
+    let preserved_err = match result {
         Ok(_) => {
             dom::error("skill-capsules-error", "");
             m::take("skill-capsule-needs-trace");
@@ -1106,6 +1115,7 @@ async fn act(action: &str, id: &str) {
                 m::take("skill-capsule-open");
                 m::take("skill-capsule-detail");
             }
+            None
         }
         Err(error) => {
             if action == "recompile" && is_needs_trace_error(error.status, &error.message) {
@@ -1115,9 +1125,13 @@ async fn act(action: &str, id: &str) {
                 );
             }
             dom::error("skill-capsules-error", &error.message);
+            Some(error.message)
         }
+    };
+    load_capsules_preserving_error(preserved_err.is_some()).await;
+    if let Some(msg) = preserved_err {
+        dom::error("skill-capsules-error", &msg);
     }
-    load_capsules().await;
 }
 
 pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: &V) -> bool {
@@ -1443,7 +1457,13 @@ mod tests {
         assert_no_inline_hex_colors(&html);
         assert_eq!(payloads(&html, "skill-capsule-recompile"), [json!("c1")]);
         assert!(html.contains("id=\"skill-capsule-compiler-provider\""));
+        assert!(!html.contains("value=\"cursor\""));
+        assert!(!html.contains("value=\"gemini\""));
+        assert!(html.contains("value=\"claude\""));
+        assert!(html.contains("value=\"codex\""));
         assert!(html.contains("id=\"skill-capsule-compiler-model\""));
+        assert!(should_clear_error_on_reload(false));
+        assert!(!should_clear_error_on_reload(true));
         assert!(html.contains("value=\"gpt-5-codex\""));
         assert!(html.contains("skill-capsule-capture-trace"));
         assert_eq!(payloads(&html, "skill-capsule-capture-trace").len(), 1);
