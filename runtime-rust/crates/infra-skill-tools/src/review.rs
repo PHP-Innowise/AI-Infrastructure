@@ -5,11 +5,160 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use feedback::FeedbackStore;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    cell::Cell,
+    collections::{BTreeMap, HashMap},
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+const REVIEW_RACY_NS: i128 = 2_000_000_000;
+const EMBED_CACHE_CAP: usize = 1024;
+const RUN_WALK_CACHE_CAP: usize = 64;
+
+thread_local! {
+    static REVIEW_CACHE_BYPASS_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct ReviewBypassGuard;
+impl Drop for ReviewBypassGuard {
+    fn drop(&mut self) {
+        REVIEW_CACHE_BYPASS_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn with_cache_bypass<T>(bypass: bool, f: impl FnOnce() -> T) -> T {
+    if !bypass {
+        return f();
+    }
+    REVIEW_CACHE_BYPASS_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    let _guard = ReviewBypassGuard;
+    f()
+}
+
+fn is_cache_bypassed() -> bool {
+    REVIEW_CACHE_BYPASS_DEPTH.with(|depth| depth.get() > 0)
+        || std::env::var("INFRA_CHECK_NO_CACHE").as_deref() == Ok("1")
+        || std::env::var("INFRA_NO_CACHE").as_deref() == Ok("1")
+}
+
+fn review_now_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStatStamp {
+    len: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+    mode: u32,
+}
+
+impl FileStatStamp {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mtime_ns = (meta.mtime() as i128) * 1_000_000_000 + (meta.mtime_nsec() as i128);
+            let ctime_ns = (meta.ctime() as i128) * 1_000_000_000 + (meta.ctime_nsec() as i128);
+            Self {
+                len: meta.len(),
+                mtime_ns,
+                ctime_ns,
+                mode: meta.mode(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i128)
+                .unwrap_or(0);
+            Self {
+                len: meta.len(),
+                mtime_ns,
+                ctime_ns: mtime_ns,
+                mode: if meta.is_dir() { 0o40755 } else { 0o100644 },
+            }
+        }
+    }
+
+    fn is_settled(&self, now_ns: i128) -> bool {
+        self.mtime_ns > 0
+            && self.ctime_ns > 0
+            && now_ns >= self.mtime_ns + REVIEW_RACY_NS
+            && now_ns >= self.ctime_ns + REVIEW_RACY_NS
+    }
+}
+
+#[derive(Default)]
+struct EmbedFileCache {
+    seq: u64,
+    entries: HashMap<PathBuf, (FileStatStamp, Value, u64)>,
+}
+
+fn embed_file_cache() -> &'static Mutex<EmbedFileCache> {
+    static CACHE: OnceLock<Mutex<EmbedFileCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(EmbedFileCache::default()))
+}
+
+type RunWalkStamp = (String, bool, FileStatStamp);
+
+#[derive(Clone)]
+struct CachedRunWalk {
+    stamps: Vec<RunWalkStamp>,
+    runs: Vec<Value>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RunWalkCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedRunWalk>,
+}
+
+fn run_walk_cache() -> &'static Mutex<RunWalkCache> {
+    static CACHE: OnceLock<Mutex<RunWalkCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RunWalkCache::default()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_EMBED_READS: Cell<usize> = const { Cell::new(0) };
+    static TEST_FIND_RUNS_WALKS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_embed_reads() {
+    TEST_EMBED_READS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+fn embed_read_count() -> usize {
+    TEST_EMBED_READS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn bump_find_runs_walks() {
+    TEST_FIND_RUNS_WALKS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+fn find_runs_walk_count() -> usize {
+    TEST_FIND_RUNS_WALKS.with(Cell::get)
+}
+
+fn eval_prompt_re() -> &'static regex::Regex {
+    static EVAL_PROMPT_RE: OnceLock<regex::Regex> = OnceLock::new();
+    EVAL_PROMPT_RE
+        .get_or_init(|| regex::Regex::new(r"(?s)## Eval Prompt\n\n(.*?)(?:\n##|$)").unwrap())
+}
 const TEXT: [&str; 26] = [
     "txt", "md", "json", "csv", "py", "js", "ts", "tsx", "jsx", "yaml", "yml", "xml", "html",
     "css", "sh", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp", "sql", "r", "toml",
@@ -39,7 +188,9 @@ pub fn get_mime_type(path: &Path) -> &'static str {
         _ => "application/octet-stream",
     }
 }
-pub fn embed_file(path: &Path) -> Value {
+fn embed_file_uncached(path: &Path) -> Value {
+    #[cfg(test)]
+    bump_embed_reads();
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let ext = path
         .extension()
@@ -75,7 +226,62 @@ pub fn embed_file(path: &Path) -> Value {
         _ => json!({"name":name,"type":"binary","mime":mime,"data_uri":data_uri(&b64)}),
     }
 }
+
+pub fn embed_file_with_now(path: &Path, now_ns: i128, bypass: bool) -> Value {
+    if bypass {
+        return embed_file_uncached(path);
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return embed_file_uncached(path);
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return embed_file_uncached(path);
+    }
+    let Ok(canon) = infra_core::fs::canonicalize(path) else {
+        return embed_file_uncached(path);
+    };
+    let stamp = FileStatStamp::from_metadata(&meta);
+    if !stamp.is_settled(now_ns) {
+        return embed_file_uncached(path);
+    }
+    if let Ok(mut cache) = embed_file_cache().lock() {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if let Some((cached_stamp, value, last_used)) = cache.entries.get_mut(&canon)
+            && *cached_stamp == stamp
+        {
+            *last_used = seq;
+            return value.clone();
+        }
+    }
+    let embedded = embed_file_uncached(path);
+    if let Ok(mut cache) = embed_file_cache().lock() {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if cache.entries.len() >= EMBED_CACHE_CAP
+            && !cache.entries.contains_key(&canon)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(canon, (stamp, embedded.clone(), seq));
+    }
+    embedded
+}
+
+pub fn embed_file(path: &Path) -> Value {
+    embed_file_with_now(path, review_now_ns(), is_cache_bypassed())
+}
+
 pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
+    build_run_with_now(root, directory, review_now_ns(), is_cache_bypassed())
+}
+
+fn build_run_with_now(root: &Path, directory: &Path, now_ns: i128, bypass: bool) -> Result<Value> {
     let mut prompt = String::new();
     let mut eval_id = Value::Null;
     for file in [
@@ -94,9 +300,7 @@ pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
         }
     }
     if prompt.is_empty() {
-        static EVAL_PROMPT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let re = EVAL_PROMPT_RE
-            .get_or_init(|| regex::Regex::new(r"(?s)## Eval Prompt\n\n(.*?)(?:\n##|$)").unwrap());
+        let re = eval_prompt_re();
         for file in [
             directory.join("transcript.md"),
             directory.join("outputs/transcript.md"),
@@ -126,14 +330,14 @@ pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
             if let Some(name) = file.file_name().map(|n| n.to_string_lossy().into_owned()) {
                 seen_names.insert(name);
             }
-            outputs.push(embed_file(&file));
+            outputs.push(embed_file_with_now(&file, now_ns, bypass));
         }
     }
     for extra in ["transcript.md", "metrics.json", "user_notes.md"] {
         if !seen_names.contains(extra) {
             let candidate = directory.join(extra);
             if candidate.is_file() {
-                outputs.push(embed_file(&candidate));
+                outputs.push(embed_file_with_now(&candidate, now_ns, bypass));
             }
         }
     }
@@ -151,11 +355,123 @@ pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
     }
     Ok(json!({"id":id,"prompt":prompt,"eval_id":eval_id,"outputs":outputs,"grading":grading}))
 }
+fn record_run_file_stat(
+    p: &Path,
+    label: String,
+    stamps: &mut Vec<(String, bool, FileStatStamp)>,
+    saw_symlink: &mut bool,
+) {
+    if let Ok(m) = std::fs::symlink_metadata(p) {
+        if m.file_type().is_symlink() {
+            *saw_symlink = true;
+        } else {
+            stamps.push((label, false, FileStatStamp::from_metadata(&m)));
+        }
+    }
+}
+
+fn stat_run_snapshot(
+    root: &Path,
+    current: &Path,
+    stamps: &mut Vec<(String, bool, FileStatStamp)>,
+    seen: &mut std::collections::BTreeSet<PathBuf>,
+    saw_symlink: &mut bool,
+) -> Result<()> {
+    let Ok(root_canon) = infra_core::fs::canonicalize(root) else {
+        *saw_symlink = true;
+        return Ok(());
+    };
+    let Ok(dir_meta) = std::fs::symlink_metadata(current) else {
+        return Ok(());
+    };
+    if dir_meta.file_type().is_symlink() {
+        *saw_symlink = true;
+        return Ok(());
+    }
+    if !dir_meta.is_dir() {
+        return Ok(());
+    }
+    let Ok(canon) = infra_core::fs::canonicalize(current) else {
+        *saw_symlink = true;
+        return Ok(());
+    };
+    if !canon.starts_with(&root_canon) || !seen.insert(canon.clone()) {
+        return Ok(());
+    }
+    let rel = canon
+        .strip_prefix(&root_canon)
+        .unwrap_or(&canon)
+        .to_string_lossy()
+        .replace('\\', "/");
+    stamps.push((rel.clone(), true, FileStatStamp::from_metadata(&dir_meta)));
+
+    let outputs_dir = current.join("outputs");
+    if let Ok(out_meta) = std::fs::symlink_metadata(&outputs_dir) {
+        if out_meta.file_type().is_symlink() {
+            *saw_symlink = true;
+            return Ok(());
+        }
+        if out_meta.is_dir() {
+            stamps.push((
+                format!("{rel}/outputs"),
+                true,
+                FileStatStamp::from_metadata(&out_meta),
+            ));
+            for f in common::sorted(&outputs_dir)? {
+                let fname = f.file_name().unwrap_or_default().to_string_lossy();
+                record_run_file_stat(&f, format!("{rel}/outputs/{fname}"), stamps, saw_symlink);
+            }
+            for extra in [
+                "eval_metadata.json",
+                "transcript.md",
+                "metrics.json",
+                "user_notes.md",
+                "grading.json",
+            ] {
+                record_run_file_stat(
+                    &current.join(extra),
+                    format!("{rel}/{extra}"),
+                    stamps,
+                    saw_symlink,
+                );
+            }
+            if let Some(parent) = current.parent() {
+                for parent_extra in ["eval_metadata.json", "grading.json"] {
+                    record_run_file_stat(
+                        &parent.join(parent_extra),
+                        format!("{rel}/../{parent_extra}"),
+                        stamps,
+                        saw_symlink,
+                    );
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    for child in common::sorted(current)? {
+        let name = child.file_name().unwrap_or_default().to_string_lossy();
+        if ["node_modules", ".git", "__pycache__", "skill", "inputs"].contains(&name.as_ref()) {
+            continue;
+        }
+        if let Ok(cm) = std::fs::symlink_metadata(&child) {
+            if cm.file_type().is_symlink() {
+                *saw_symlink = true;
+            } else if cm.is_dir() {
+                stat_run_snapshot(root, &child, stamps, seen, saw_symlink)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn recurse(
     root: &Path,
     current: &Path,
     runs: &mut Vec<Value>,
     seen: &mut std::collections::BTreeSet<PathBuf>,
+    now_ns: i128,
+    bypass: bool,
 ) -> Result<()> {
     if !current.is_dir() {
         return Ok(());
@@ -165,7 +481,7 @@ fn recurse(
         return Ok(());
     }
     if current.join("outputs").is_dir() {
-        runs.push(build_run(root, current)?);
+        runs.push(build_run_with_now(root, current, now_ns, bypass)?);
         return Ok(());
     }
     for child in common::sorted(current)? {
@@ -178,23 +494,102 @@ fn recurse(
                     .as_ref(),
             )
         {
-            recurse(root, &child, runs, seen)?;
+            recurse(root, &child, runs, seen, now_ns, bypass)?;
         }
     }
     Ok(())
 }
-pub fn find_runs(workspace: &Path) -> Result<Vec<Value>> {
+
+pub fn find_runs_with_options(workspace: &Path, now_ns: i128, bypass: bool) -> Result<Vec<Value>> {
+    let mut snapshot = Vec::new();
+    let mut saw_symlink = false;
+    let canon = if !bypass {
+        infra_core::fs::canonicalize(workspace).ok()
+    } else {
+        None
+    };
+    if let Some(canon_ws) = canon.as_ref() {
+        stat_run_snapshot(
+            canon_ws,
+            canon_ws,
+            &mut snapshot,
+            &mut Default::default(),
+            &mut saw_symlink,
+        )?;
+        snapshot.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let settled = !saw_symlink && snapshot.iter().all(|(_, _, s)| s.is_settled(now_ns));
+        if settled && let Ok(mut cache) = run_walk_cache().lock() {
+            cache.seq = cache.seq.saturating_add(1);
+            let seq = cache.seq;
+            if let Some(hit) = cache.entries.get_mut(canon_ws)
+                && hit.stamps == snapshot
+            {
+                hit.last_used = seq;
+                return Ok(hit.runs.clone());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    bump_find_runs_walks();
     let mut runs = vec![];
-    recurse(workspace, workspace, &mut runs, &mut Default::default())?;
+    recurse(
+        workspace,
+        workspace,
+        &mut runs,
+        &mut Default::default(),
+        now_ns,
+        bypass,
+    )?;
     runs.sort_by(|a, b| {
         let a_id = a["eval_id"].as_f64().unwrap_or(f64::INFINITY);
         let b_id = b["eval_id"].as_f64().unwrap_or(f64::INFINITY);
         a_id.total_cmp(&b_id)
             .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
     });
+    if let Some(canon_ws) = canon
+        && !bypass
+        && !saw_symlink
+        && snapshot.iter().all(|(_, _, s)| s.is_settled(now_ns))
+        && let Ok(mut cache) = run_walk_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if cache.entries.len() >= RUN_WALK_CACHE_CAP
+            && !cache.entries.contains_key(&canon_ws)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(
+            canon_ws,
+            CachedRunWalk {
+                stamps: snapshot,
+                runs: runs.clone(),
+                last_used: seq,
+            },
+        );
+    }
     Ok(runs)
 }
+
+pub fn find_runs(workspace: &Path) -> Result<Vec<Value>> {
+    find_runs_with_options(workspace, review_now_ns(), is_cache_bypassed())
+}
+
 pub fn load_previous_iteration(workspace: &Path) -> Result<Value> {
+    load_previous_iteration_with_options(workspace, review_now_ns(), is_cache_bypassed())
+}
+
+fn load_previous_iteration_with_options(
+    workspace: &Path,
+    now_ns: i128,
+    bypass: bool,
+) -> Result<Value> {
     if !workspace.is_dir() {
         return Ok(json!({}));
     }
@@ -213,7 +608,7 @@ pub fn load_previous_iteration(workspace: &Path) -> Result<Value> {
         }
     }
     let mut previous = serde_json::Map::new();
-    for run in find_runs(workspace)? {
+    for run in find_runs_with_options(workspace, now_ns, bypass)? {
         let id = run["id"].as_str().unwrap();
         previous.insert(
             id.into(),
@@ -578,6 +973,7 @@ pub fn kill_port(port: u16, log: &mut String) -> Result<()> {
     Ok(())
 }
 pub fn execute(v: &Value) -> Result<Value> {
+    let bypass = common::flag(v, "strict") || common::flag(v, "no_cache") || is_cache_bypassed();
     let workspace = common::absolute(common::positional(v, "workspace", 0)?)?;
     if !workspace.is_dir() {
         return Ok(common::cli(
@@ -587,7 +983,7 @@ pub fn execute(v: &Value) -> Result<Value> {
             Value::Null,
         ));
     }
-    let runs = find_runs(&workspace)?;
+    let runs = find_runs_with_options(&workspace, review_now_ns(), bypass)?;
     if runs.is_empty() {
         return Ok(common::cli(
             1,
@@ -606,7 +1002,7 @@ pub fn execute(v: &Value) -> Result<Value> {
                 .replace("-workspace", "")
         });
     let previous = common::text(v, "previous_workspace")
-        .map(|p| load_previous_iteration(Path::new(p)))
+        .map(|p| load_previous_iteration_with_options(Path::new(p), review_now_ns(), bypass))
         .transpose()?
         .unwrap_or(json!({}));
     let benchmark = common::text(v, "benchmark").map(PathBuf::from);
@@ -682,16 +1078,20 @@ pub fn execute(v: &Value) -> Result<Value> {
             .iter()
             .find(|h| h.field.equiv("Content-Type"))
             .map(|h| h.value.as_str().to_owned());
-        let reply = match handle_request(
-            &method,
-            &raw_url,
-            content_type.as_deref(),
-            &mut request.as_reader(),
-            &mut ctx,
-        ) {
-            Ok(reply) => reply,
-            Err(error) => json_error_response(status_for_runtime_error(&error), error.to_string()),
-        };
+        let reply = with_cache_bypass(bypass, || {
+            match handle_request(
+                &method,
+                &raw_url,
+                content_type.as_deref(),
+                &mut request.as_reader(),
+                &mut ctx,
+            ) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    json_error_response(status_for_runtime_error(&error), error.to_string())
+                }
+            }
+        });
         let _ = request.respond(reply);
     }
     Ok(common::cli(
@@ -1165,5 +1565,79 @@ mod http_hardening_tests {
         );
         assert!(err_reply.status_code().0 >= 400);
         assert_security_headers(err_reply.headers());
+    }
+
+    #[test]
+    fn settled_racy_ns_caches_skip_redundant_walks_and_base64_reads_and_respect_bypass() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("ws");
+        let run1 = ws.join("eval-1/with_skill");
+        std::fs::create_dir_all(run1.join("outputs")).unwrap();
+        let img_path = run1.join("outputs/chart.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nAAAA").unwrap();
+        std::fs::write(
+            run1.join("outputs/transcript.md"),
+            "## Eval Prompt\n\nInspect invoice layout\n",
+        )
+        .unwrap();
+
+        let stamp_img =
+            FileStatStamp::from_metadata(&std::fs::symlink_metadata(&img_path).unwrap());
+        let stamp_tr = FileStatStamp::from_metadata(
+            &std::fs::symlink_metadata(run1.join("outputs/transcript.md")).unwrap(),
+        );
+        let max_mtime = stamp_img.mtime_ns.max(stamp_tr.mtime_ns);
+        let racy_now = stamp_img.mtime_ns + REVIEW_RACY_NS - 1;
+        let settled_now = max_mtime + REVIEW_RACY_NS + 10_000_000;
+
+        // Within REVIEW_RACY_NS: embed_file_with_now never reuses/populates cache.
+        let r_before = embed_read_count();
+        let _ = embed_file_with_now(&img_path, racy_now, false);
+        let _ = embed_file_with_now(&img_path, racy_now, false);
+        assert_eq!(embed_read_count(), r_before + 2);
+
+        // Settled beyond REVIEW_RACY_NS: first call warms, second skips disk read & base64 encoding.
+        let e1 = embed_file_with_now(&img_path, settled_now, false);
+        let e2 = embed_file_with_now(&img_path, settled_now + 5, false);
+        assert_eq!(e1, e2);
+        assert_eq!(embed_read_count(), r_before + 3);
+
+        // strict / no-cache bypasses settled cache cleanly.
+        let e_strict = embed_file_with_now(&img_path, settled_now + 10, true);
+        assert_eq!(e_strict, e1);
+        assert_eq!(embed_read_count(), r_before + 4);
+
+        // Workspace find_runs_with_options caches entire settled workspace walk & skips JSON/base64 walks.
+        let w_before = find_runs_walk_count();
+        let runs_racy = find_runs_with_options(&ws, racy_now, false).unwrap();
+        assert_eq!(runs_racy.len(), 1);
+        assert_eq!(find_runs_walk_count(), w_before + 1);
+
+        let runs1 = find_runs_with_options(&ws, settled_now, false).unwrap();
+        let reads_after_warm = embed_read_count();
+        let runs2 = find_runs_with_options(&ws, settled_now + 20, false).unwrap();
+        assert_eq!(runs1, runs2);
+        assert_eq!(find_runs_walk_count(), w_before + 2);
+        assert_eq!(embed_read_count(), reads_after_warm);
+
+        // strict/no_cache forces fresh walk even when workspace is settled.
+        let runs_bypass = find_runs_with_options(&ws, settled_now + 30, true).unwrap();
+        assert_eq!(runs_bypass, runs1);
+        assert_eq!(find_runs_walk_count(), w_before + 3);
+
+        // Same-length output edit invalidates settled run walk cache cleanly.
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nBBBB").unwrap();
+        let new_stamp =
+            FileStatStamp::from_metadata(&std::fs::symlink_metadata(&img_path).unwrap());
+        let runs_updated =
+            find_runs_with_options(&ws, new_stamp.mtime_ns + REVIEW_RACY_NS + 10_000, false)
+                .unwrap();
+        assert_ne!(runs_updated[0]["outputs"], runs1[0]["outputs"]);
+
+        // eval_prompt_re OnceLock returns stable instance.
+        assert_eq!(
+            eval_prompt_re() as *const regex::Regex,
+            eval_prompt_re() as *const regex::Regex
+        );
     }
 }

@@ -1,7 +1,7 @@
 use super::{Context, first, project_root, strings};
 use crate::TailTrim;
 use crate::{counters, output::Output, shell};
-use infra_core::{Result, Roots, RuntimeConfig};
+use infra_core::{Result, Roots, RuntimeConfig, RuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -25,10 +25,15 @@ const SKILL_CACHE_RACY_NS: i128 = 2_000_000_000;
 #[cfg(test)]
 thread_local! {
     static SKILL_DIR_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ROSTER_DIR_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
 fn bump_skill_dir_scans() {
     SKILL_DIR_SCANS.with(|cell| cell.set(cell.get() + 1));
+}
+#[cfg(test)]
+fn bump_roster_dir_scans() {
+    ROSTER_DIR_SCANS.with(|cell| cell.set(cell.get() + 1));
 }
 fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
     let tools = strings(payload, &["tool_name"]);
@@ -688,22 +693,135 @@ pub fn edit_loop(scope: &Context) -> Result<Output> {
         context("PostToolUse", &message)
     }
 }
-fn roster(scope: &Context) -> Result<BTreeMap<String, bool>> {
-    let path = scope.roots.tooling.join(if scope.host == "cursor" {
-        ".cursor/agents"
-    } else {
-        ".claude/agents"
-    });
-    let mut result = BTreeMap::new();
-    if !path.is_dir() {
-        return Ok(result);
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AgentFileStamp {
+    name: String,
+    stamp: SkillDirStamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AgentRosterCacheEntry {
+    agents_dir: String,
+    dir_stamp: SkillDirStamp,
+    files: Vec<AgentFileStamp>,
+    roster: BTreeMap<String, bool>,
+}
+
+fn entry_stamp(path: &Path, expect_dir: bool) -> Option<(SkillDirStamp, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink()
+        || (expect_dir && !meta.is_dir())
+        || (!expect_dir && !meta.is_file())
+    {
+        return None;
     }
-    for entry in std::fs::read_dir(path)?.filter_map(std::result::Result::ok) {
+    let mtime_ns = i128::try_from(
+        meta.modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    )
+    .ok()?;
+    #[cfg(unix)]
+    let (ctime_ns, size, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+        (ctime, meta.size(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let (ctime_ns, size, ino) = (mtime_ns, meta.len(), 0u64);
+    let settled = mtime_ns.max(ctime_ns);
+    Some((
+        SkillDirStamp {
+            mtime_ns,
+            ctime_ns,
+            size,
+            ino,
+        },
+        settled,
+    ))
+}
+
+fn inspect_agent_roster_dir(
+    path: &Path,
+) -> Result<Option<(SkillDirStamp, Vec<AgentFileStamp>, i128)>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(RuntimeError::policy(
+            "Agent roster directory is a symlink or non-directory",
+        ));
+    }
+    let Some((d_stamp, mut max_settled)) = entry_stamp(path, true) else {
+        return Err(RuntimeError::policy(
+            "Agent roster directory metadata is unsafe or unavailable",
+        ));
+    };
+    let mut entries = std::fs::read_dir(path)?
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut file_stamps = Vec::new();
+    for entry in entries {
+        let entry_path = entry.path();
+        if entry_path.extension().is_none_or(|ext| ext != "md")
+            || entry_path
+                .file_name()
+                .is_some_and(|name| name == "README.md")
+        {
+            continue;
+        }
+        let f_meta = std::fs::symlink_metadata(&entry_path)?;
+        if f_meta.file_type().is_symlink() {
+            return Err(RuntimeError::policy(format!(
+                "Agent roster entry contains a symlink: {}",
+                entry_path.display()
+            )));
+        }
+        if !f_meta.is_file() {
+            continue;
+        }
+        let Some((f_stamp, f_settled)) = entry_stamp(&entry_path, false) else {
+            return Err(RuntimeError::policy(format!(
+                "Agent roster file metadata unavailable: {}",
+                entry_path.display()
+            )));
+        };
+        max_settled = max_settled.max(f_settled);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        file_stamps.push(AgentFileStamp {
+            name,
+            stamp: f_stamp,
+        });
+    }
+    Ok(Some((d_stamp, file_stamps, max_settled)))
+}
+
+fn scan_agent_roster(path: &Path) -> Result<BTreeMap<String, bool>> {
+    #[cfg(test)]
+    bump_roster_dir_scans();
+    let mut result = BTreeMap::new();
+    let mut entries = std::fs::read_dir(path)?
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "md")
             || path.file_name().is_some_and(|name| name == "README.md")
         {
             continue;
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            return Err(RuntimeError::policy(format!(
+                "Agent roster entry contains a symlink: {}",
+                path.display()
+            )));
         }
         let Ok(text) = infra_core::fs::read_text(&path) else {
             continue;
@@ -724,6 +842,84 @@ fn roster(scope: &Context) -> Result<BTreeMap<String, bool>> {
         }
     }
     Ok(result)
+}
+
+fn roster_with_now(
+    path: &Path,
+    cache_file: Option<&Path>,
+    now_ns: i128,
+) -> Result<BTreeMap<String, bool>> {
+    static ROSTER_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, AgentRosterCacheEntry>>> =
+        OnceLock::new();
+    let Some((d_stamp, file_stamps, max_settled)) = inspect_agent_roster_dir(path)? else {
+        return Ok(BTreeMap::new());
+    };
+    let key_str = path.to_string_lossy().into_owned();
+    let racy_settled = now_ns > SKILL_CACHE_RACY_NS && now_ns - max_settled >= SKILL_CACHE_RACY_NS;
+    let memory = ROSTER_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if racy_settled
+        && let Ok(guard) = memory.lock()
+        && let Some(entry) = guard.get(path)
+        && entry.dir_stamp == d_stamp
+        && entry.files == file_stamps
+    {
+        return Ok(entry.roster.clone());
+    }
+    if racy_settled
+        && let Some(cache_path) = cache_file
+        && let Ok(meta) = std::fs::symlink_metadata(cache_path)
+        && !meta.file_type().is_symlink()
+        && meta.is_file()
+        && let Ok(raw) = std::fs::read(cache_path)
+        && let Ok(entry) = serde_json::from_slice::<AgentRosterCacheEntry>(&raw)
+        && entry.agents_dir == key_str
+        && entry.dir_stamp == d_stamp
+        && entry.files == file_stamps
+    {
+        if let Ok(mut guard) = memory.lock() {
+            guard.insert(path.to_path_buf(), entry.clone());
+        }
+        return Ok(entry.roster);
+    }
+
+    let result = scan_agent_roster(path)?;
+    if racy_settled {
+        let entry = AgentRosterCacheEntry {
+            agents_dir: key_str,
+            dir_stamp: d_stamp,
+            files: file_stamps,
+            roster: result.clone(),
+        };
+        if let Ok(mut guard) = memory.lock() {
+            guard.insert(path.to_path_buf(), entry.clone());
+        }
+        if let Some(cache_path) = cache_file
+            && cache_path.parent().is_some_and(|parent| {
+                std::fs::symlink_metadata(parent)
+                    .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+            })
+            && std::fs::symlink_metadata(cache_path)
+                .map(|meta| !meta.file_type().is_symlink())
+                .unwrap_or(true)
+            && let Ok(bytes) = serde_json::to_vec(&entry)
+        {
+            let _ = std::fs::write(cache_path, bytes);
+        }
+    }
+    Ok(result)
+}
+
+fn roster(scope: &Context) -> Result<BTreeMap<String, bool>> {
+    let path = scope.roots.tooling.join(if scope.host == "cursor" {
+        ".cursor/agents"
+    } else {
+        ".claude/agents"
+    });
+    let cache_file = scope.roots.state.join(format!(
+        "memory-bank/local/agent-roster-cache-{}.json",
+        scope.host
+    ));
+    roster_with_now(&path, Some(&cache_file), current_unix_ns())
 }
 fn safe_type(value: &str) -> String {
     value
@@ -1226,5 +1422,70 @@ mod smart_loop_breaker_tests {
             stdout_a.contains("WARNING:"),
             "session B edit leaked into session A reset: {stdout_a}"
         );
+    }
+
+    #[test]
+    fn agent_roster_reuses_settled_cache_invalidates_on_edit_and_fails_closed_on_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let agents = root.join(".claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(root.join("memory-bank/local")).unwrap();
+        let reviewer = agents.join("reviewer-agent.md");
+        std::fs::write(&reviewer, "---\nname: reviewer-agent\nwrites: false\n---\n").unwrap();
+        let cache_file = root.join("memory-bank/local/agent-roster-cache-claude.json");
+
+        let (_, _, settled_ns) = inspect_agent_roster_dir(&agents).unwrap().unwrap();
+        ROSTER_DIR_SCANS.with(|c| c.set(0));
+
+        // Inside SKILL_CACHE_RACY_NS -> always scans live and never writes cache.
+        let racy = roster_with_now(
+            &agents,
+            Some(&cache_file),
+            settled_ns + SKILL_CACHE_RACY_NS - 1,
+        )
+        .unwrap();
+        assert_eq!(racy.get("reviewer-agent"), Some(&false));
+        assert_eq!(ROSTER_DIR_SCANS.with(|c| c.get()), 1);
+        assert!(!cache_file.exists());
+
+        // Settled beyond SKILL_CACHE_RACY_NS -> 1st call populates cache, 2nd hits with 0 scans.
+        let settled_now = settled_ns + SKILL_CACHE_RACY_NS + 1;
+        let first = roster_with_now(&agents, Some(&cache_file), settled_now).unwrap();
+        assert_eq!(first, racy);
+        assert_eq!(ROSTER_DIR_SCANS.with(|c| c.get()), 2);
+        assert!(cache_file.is_file());
+
+        let second = roster_with_now(&agents, Some(&cache_file), settled_now + 500).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(ROSTER_DIR_SCANS.with(|c| c.get()), 2);
+
+        // In-place file edit invalidates cache immediately.
+        std::fs::write(&reviewer, "---\nname: reviewer-agent\nwrites: true\n---\n").unwrap();
+        let (_, _, settled_edit) = inspect_agent_roster_dir(&agents).unwrap().unwrap();
+        let third = roster_with_now(
+            &agents,
+            Some(&cache_file),
+            settled_edit + SKILL_CACHE_RACY_NS + 1,
+        )
+        .unwrap();
+        assert_eq!(third.get("reviewer-agent"), Some(&true));
+        assert_eq!(ROSTER_DIR_SCANS.with(|c| c.get()), 3);
+
+        // Symlinked entry inside agents dir fails closed.
+        #[cfg(unix)]
+        {
+            let target = root.join("outside.md");
+            std::fs::write(&target, "---\nname: evil\nwrites: false\n---\n").unwrap();
+            std::os::unix::fs::symlink(&target, agents.join("evil-agent.md")).unwrap();
+            assert!(
+                roster_with_now(
+                    &agents,
+                    Some(&cache_file),
+                    settled_edit + SKILL_CACHE_RACY_NS + 2
+                )
+                .is_err()
+            );
+        }
     }
 }

@@ -462,7 +462,7 @@ pub fn body_commands(name: &str, body: &str, target: &Path, d: &mut Vec<Diagnost
     if commands.is_empty() {
         return;
     }
-    let analyzer = match crate::commands::CommandAnalyzer::new(target) {
+    let analyzer = match crate::routes::cached_command_analyzer(target) {
         Ok(v) => v,
         Err(e) => {
             diag(

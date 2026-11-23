@@ -17,6 +17,28 @@ use std::{
 pub const MARKER: &str = "INTERNAL_NATIVE_MEMORY_RESULT";
 pub const PROGRESS: &str = "Checkpoint: refunds keep the invoice date.";
 pub const NEXT_STEP: &str = "Check credit notes against the invoice date.";
+
+fn memory_cli_hint_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"Memory CLI: [^`\n]*`([^`\n]+)` in place of").expect("valid hint regex")
+    })
+}
+
+fn save_command_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(crate::rehearsal::SAVE_COMMAND).expect("valid save command regex")
+    })
+}
+
+fn memory_cli_fallback_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"Memory CLI: [^\x60]*\x60([^\x60]+)\x60 in place of")
+            .expect("valid fallback hint regex")
+    })
+}
 #[derive(Clone, Debug)]
 pub struct Step {
     pub name: String,
@@ -61,9 +83,8 @@ impl Checkpoint {
         policy_cli: &str,
     ) -> Option<(String, String)> {
         if self.cli.is_empty() {
-            let hint = regex::Regex::new(r"Memory CLI: [^`\n]*`([^`\n]+)` in place of")
-                .ok()
-                .and_then(|r| r.captures(heard))
+            let hint = memory_cli_hint_re()
+                .captures(heard)
                 .map(|m| m[1].to_string());
             self.cli = hint.unwrap_or_else(|| policy_cli.into());
         }
@@ -420,8 +441,7 @@ fn unescape(text: &str) -> String {
 }
 fn exact_save(text: &str) -> Option<String> {
     let text = unescape(text);
-    let pattern = regex::Regex::new(crate::rehearsal::SAVE_COMMAND).ok()?;
-    pattern.captures(&text).map(|m| m[1].to_string())
+    save_command_re().captures(&text).map(|m| m[1].to_string())
 }
 fn command_tool(body: &Value, host: &str, command: &str, number: usize, tag: &str) -> Value {
     if host == "claude" {
@@ -676,9 +696,7 @@ fn decide(body: &Value, host: &str, s: &mut State, number: usize) -> Result<(Vec
     if host == "claude"
         && s.config["cli"] == "retrieve"
         && !issued("toolu_cli_")
-        && let Some(m) = regex::Regex::new(r"Memory CLI: [^\x60]*\x60([^\x60]+)\x60 in place of")
-            .ok()
-            .and_then(|r| r.captures(&since))
+        && let Some(m) = memory_cli_fallback_re().captures(&since)
     {
         let task = s.config["task"]
             .as_str()
@@ -1116,5 +1134,28 @@ mod codex_output_tests {
         let mut tampered_cmp = cmp_sealed.clone();
         tampered_cmp["horizon"] = serde_json::json!(99);
         assert!(crate::sealed_ab::verify_sealed_digest(&tampered_cmp, "tamper").is_err());
+    }
+
+    #[test]
+    fn hoisted_bench_regexes_extract_cli_hints_and_save_commands() {
+        let h = "Memory CLI: run `./bin/infra-engine` in place of legacy";
+        assert_eq!(
+            super::memory_cli_hint_re()
+                .captures(h)
+                .map(|m| m[1].to_string()),
+            Some("./bin/infra-engine".to_string())
+        );
+        assert_eq!(
+            super::memory_cli_fallback_re()
+                .captures(h)
+                .map(|m| m[1].to_string()),
+            Some("./bin/infra-engine".to_string())
+        );
+        let p1 = super::memory_cli_hint_re() as *const regex::Regex;
+        let p2 = super::memory_cli_hint_re() as *const regex::Regex;
+        assert_eq!(p1, p2);
+        let s1 = super::save_command_re() as *const regex::Regex;
+        let s2 = super::save_command_re() as *const regex::Regex;
+        assert_eq!(s1, s2);
     }
 }

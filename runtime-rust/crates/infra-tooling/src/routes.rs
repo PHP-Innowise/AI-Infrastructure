@@ -1,14 +1,22 @@
 //! Native host routing, roster names, hook wiring and reachability.
-use crate::common;
+use crate::{common, mirrors::check_receipts};
 use infra_core::{Result, RuntimeError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
+
+#[cfg(test)]
+fn routes_live_runs() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
 const TOOLS: [(&str, &str, &str); 3] = [
     ("claude", ".claude", ".claude/settings.json"),
     ("cursor", ".cursor", ".cursor/hooks.json"),
@@ -1149,7 +1157,71 @@ fn apply_allowlist(
     }
     (kept, allowed)
 }
+fn compute_routes_hashes(
+    root: &Path,
+    editions: &[String],
+    allowlist_path: &Path,
+    rules_prefix: &str,
+    store: &mut check_receipts::TreeReceiptStore,
+    now_ns: i128,
+    dirty: &mut bool,
+) -> Option<(String, String)> {
+    let allow_sha = if allowlist_path.exists() {
+        check_receipts::hash_regular_file(allowlist_path, store, now_ns, dirty)?.0
+    } else {
+        "absent".into()
+    };
+    let git_cue = check_receipts::git_modes_cue(root, store, now_ns, dirty)?;
+    let rules_sha =
+        common::sha256(format!("{rules_prefix}\nallow:{allow_sha}\ngit:{git_cue}").as_bytes());
+
+    let mut tree_parts = Vec::new();
+    for name in editions {
+        let base = root.join(name);
+        if !base.is_dir() {
+            tree_parts.push(format!("{name}:absent_edition"));
+            continue;
+        }
+        let agents_md = base.join("AGENTS.md");
+        if agents_md.exists() {
+            let (sha, exec_bit) =
+                check_receipts::hash_regular_file(&agents_md, store, now_ns, dirty)?;
+            tree_parts.push(format!("{name}:AGENTS.md:{sha}:{exec_bit}"));
+        } else {
+            tree_parts.push(format!("{name}:AGENTS.md:absent"));
+        }
+        for sub in [".agents", ".claude", ".cursor", ".codex"] {
+            let dir = base.join(sub);
+            if !dir.is_dir() {
+                tree_parts.push(format!("{name}:{sub}:absent"));
+                continue;
+            }
+            let walked = common::walk(&dir).ok()?;
+            for rel in walked {
+                if common::ignored(&rel) {
+                    continue;
+                }
+                let file = common::under(&dir, &rel).ok()?;
+                let (sha, exec_bit) =
+                    check_receipts::hash_regular_file(&file, store, now_ns, dirty)?;
+                tree_parts.push(format!("{name}:{sub}/{rel}:{sha}:{exec_bit}"));
+            }
+        }
+    }
+    Some((common::sha256(tree_parts.join("\n").as_bytes()), rules_sha))
+}
+
 pub fn check(root: &Path, editions: &[String], allowlist_path: Option<&Path>) -> Result<Value> {
+    check_with_options(root, editions, allowlist_path, true, None).map(|(report, _)| report)
+}
+
+pub fn check_with_options(
+    root: &Path,
+    editions: &[String],
+    allowlist_path: Option<&Path>,
+    use_cache: bool,
+    cache_path: Option<&Path>,
+) -> Result<(Value, bool)> {
     let filtered = !editions.is_empty();
     let editions = if editions.is_empty() {
         common::EDITIONS
@@ -1169,6 +1241,55 @@ pub fn check(root: &Path, editions: &[String], allowlist_path: Option<&Path>) ->
     let path = allowlist_path
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("scripts/check_routes_allowlist.json"));
+    let label = path
+        .strip_prefix(root)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let effective_cache = use_cache && !check_receipts::is_cache_bypassed();
+    let receipt_path = effective_cache.then(|| {
+        cache_path.map(Path::to_path_buf).unwrap_or_else(|| {
+            check_receipts::default_receipt_path(root, "infra-tooling-receipts.json")
+        })
+    });
+    let mut store = receipt_path
+        .as_deref()
+        .map(check_receipts::load_store)
+        .unwrap_or_default();
+    let mut dirty = false;
+    let now_ns = check_receipts::now_unix_ns();
+    let scope = format!("routes:{}", editions.join(","));
+    let hashes = if effective_cache {
+        let rules_prefix = format!(
+            "routes-v1\nfiltered:{filtered}\nlabel:{label}\neditions:{}",
+            editions.join(",")
+        );
+        compute_routes_hashes(
+            root,
+            &editions,
+            &path,
+            &rules_prefix,
+            &mut store,
+            now_ns,
+            &mut dirty,
+        )
+    } else {
+        None
+    };
+    if effective_cache
+        && let Some((ref c_sha, ref r_sha)) = hashes
+        && let Some(cached) = store.matches_report(&scope, c_sha, r_sha, "routes-target")
+    {
+        if dirty && let Some(p) = receipt_path.as_deref() {
+            check_receipts::save_store(p, &store);
+        }
+        return Ok((cached, true));
+    }
+
+    #[cfg(test)]
+    routes_live_runs().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let allow = match std::fs::read(&path) {
         Ok(raw) => serde_json::from_slice::<Value>(&raw)
             .map_err(|_| RuntimeError::invalid("Allowlist must be a UTF-8 JSON object"))?,
@@ -1180,11 +1301,6 @@ pub fn check(root: &Path, editions: &[String], allowlist_path: Option<&Path>) ->
             "Allowlist top level must be an object",
         ));
     }
-    let label = path
-        .strip_prefix(root)
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .replace('\\', "/");
     let mut arguments = vec![
         "ls-files".to_string(),
         "-s".into(),
@@ -1238,9 +1354,40 @@ pub fn check(root: &Path, editions: &[String], allowlist_path: Option<&Path>) ->
         );
     }
     let (kept, allowed) = apply_allowlist(&allow, &label, &editions, findings, filtered);
-    Ok(
-        json!({"editions":editions,"errors":kept.iter().filter(|item|item.severity=="error").count(),"warnings":kept.iter().filter(|item|item.severity=="warning").count(),"allowlisted":allowed.len(),"findings":kept,"allowlisted_findings":allowed}),
-    )
+    let errors = kept.iter().filter(|item| item.severity == "error").count();
+    let warnings = kept
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count();
+    let report = json!({
+        "editions": editions,
+        "errors": errors,
+        "warnings": warnings,
+        "allowlisted": allowed.len(),
+        "findings": kept,
+        "allowlisted_findings": allowed,
+    });
+    if effective_cache
+        && errors == 0
+        && warnings == 0
+        && let Some((c_sha, r_sha)) = hashes
+    {
+        store.insert_report(
+            &scope,
+            c_sha,
+            r_sha,
+            "routes-target".into(),
+            Some(report.clone()),
+        );
+        dirty = true;
+    }
+    if effective_cache
+        && dirty
+        && let Some(p) = receipt_path.as_deref()
+    {
+        check_receipts::save_store(p, &store);
+    }
+    Ok((report, false))
 }
 
 fn py_lines(text: &str) -> Vec<String> {
@@ -1316,5 +1463,96 @@ mod tests {
             assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
             assert_eq!(error.message, "Invalid routing expression");
         }
+    }
+
+    #[test]
+    fn routes_check_shares_tree_receipt_and_honors_bypass_and_tree_drift() {
+        let dir = crate::temp::Temporary::new("infra-routes-receipt").unwrap();
+        let root = dir.path();
+        let ed = root.join("PHP Core");
+        std::fs::create_dir_all(ed.join(".agents/skills/hello")).unwrap();
+        std::fs::create_dir_all(ed.join(".claude/skills/hello")).unwrap();
+        std::fs::create_dir_all(ed.join(".cursor/skills/hello")).unwrap();
+        std::fs::create_dir_all(ed.join(".claude/commands")).unwrap();
+        std::fs::create_dir_all(ed.join(".cursor/commands")).unwrap();
+        std::fs::create_dir_all(ed.join(".claude/agents")).unwrap();
+        std::fs::create_dir_all(ed.join(".cursor/agents")).unwrap();
+        std::fs::write(
+            ed.join(".agents/skills/hello/SKILL.md"),
+            "---\nname: hello\ndescription: Hello skill\n---\n# Hello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ed.join(".claude/skills/hello/SKILL.md"),
+            "---\nname: hello\ndescription: Hello skill\n---\n# Hello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ed.join(".cursor/skills/hello/SKILL.md"),
+            "---\nname: hello\ndescription: Hello skill\n---\n# Hello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ed.join(".claude/commands/hello.md"),
+            "---\nname: hello\ndescription: Hello cmd\n---\nInvoke `/hello`.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ed.join(".cursor/commands/hello.md"),
+            "---\nname: hello\ndescription: Hello cmd\n---\nInvoke `/hello`.\n",
+        )
+        .unwrap();
+        std::fs::write(ed.join("AGENTS.md"), "# Policy\n- `/hello`\n").unwrap();
+        let flow = "# Skill Flow\n\n```text\n-> hello\n```\n";
+        std::fs::write(ed.join(".agents/skills/SKILL FLOW.md"), flow).unwrap();
+        std::fs::write(ed.join(".claude/skills/SKILL FLOW.md"), flow).unwrap();
+        std::fs::write(ed.join(".cursor/skills/SKILL FLOW.md"), flow).unwrap();
+
+        common::git_ok(root, &["init", "-b", "main"], None).unwrap();
+        common::git_ok(root, &["config", "user.email", "test@example.com"], None).unwrap();
+        common::git_ok(root, &["config", "user.name", "Test"], None).unwrap();
+        common::git_ok(root, &["add", "."], None).unwrap();
+        common::git_ok(root, &["commit", "-m", "init"], None).unwrap();
+
+        let cache = root.join(".git/routes-receipts.json");
+        let eds = vec!["PHP Core".to_string()];
+        let before = routes_live_runs().load(std::sync::atomic::Ordering::Relaxed);
+        let (cold, hit1) = check_with_options(root, &eds, None, true, Some(&cache)).unwrap();
+        assert!(!hit1);
+        assert_eq!(cold["errors"], 0, "cold findings={cold}");
+        assert_eq!(cold["warnings"], 0, "cold findings={cold}");
+        assert_eq!(
+            routes_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+
+        let (warm, hit2) = check_with_options(root, &eds, None, true, Some(&cache)).unwrap();
+        assert!(hit2);
+        assert_eq!(warm, cold);
+        assert_eq!(
+            routes_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+
+        let (strict_run, hit3) = check_receipts::with_cache_bypass(true, || {
+            check_with_options(root, &eds, None, true, Some(&cache))
+        })
+        .unwrap();
+        assert!(!hit3);
+        assert_eq!(strict_run, cold);
+        assert_eq!(
+            routes_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            before + 2
+        );
+
+        // Editing a command to reference a missing skill invalidates immediately.
+        std::fs::write(
+            ed.join(".claude/commands/hello.md"),
+            "---\nname: hello\ndescription: Hello cmd\n---\nInvoke `/missing-skill`.\n",
+        )
+        .unwrap();
+        let (drifted, hit4) = check_with_options(root, &eds, None, true, Some(&cache)).unwrap();
+        assert!(!hit4);
+        assert!(drifted["errors"].as_u64().unwrap_or(0) > 0);
     }
 }

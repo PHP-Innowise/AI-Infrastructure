@@ -4,6 +4,12 @@ mod baseline;
 mod consts;
 mod contracts;
 mod evidence;
+#[cfg(test)]
+pub(crate) use contracts::skill as test_contracts_skill;
+#[cfg(test)]
+pub(crate) use evidence::Ledger as TestLedger;
+#[cfg(test)]
+pub(crate) use runtime::body_commands as test_runtime_body_commands;
 mod inventory;
 mod paths;
 mod plan;

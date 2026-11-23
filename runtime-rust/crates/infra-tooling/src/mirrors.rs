@@ -68,6 +68,8 @@ pub(crate) mod check_receipts {
         pub(crate) target_tree_sha256: String,
         pub(crate) cached_at: String,
         pub(crate) last_used: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(crate) report: Option<Value>,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,12 +135,76 @@ pub(crate) mod check_receipts {
             hit
         }
 
+        pub(crate) fn matches_report(
+            &mut self,
+            scope: &str,
+            canonical_tree_sha256: &str,
+            rules_sha256: &str,
+            target_tree_sha256: &str,
+        ) -> Option<Value> {
+            let key = Self::receipt_key(
+                scope,
+                canonical_tree_sha256,
+                rules_sha256,
+                target_tree_sha256,
+            );
+            let report = self.receipts.get(&key).and_then(|entry| {
+                (entry.scope == scope
+                    && entry.canonical_tree_sha256 == canonical_tree_sha256
+                    && entry.rules_sha256 == rules_sha256
+                    && entry.target_tree_sha256 == target_tree_sha256)
+                    .then(|| entry.report.clone())
+                    .flatten()
+            });
+            if report.is_some() {
+                let seq = self.next_seq;
+                self.next_seq = self.next_seq.saturating_add(1);
+                if let Some(entry) = self.receipts.get_mut(&key) {
+                    entry.last_used = seq;
+                }
+            }
+            report
+        }
+
+        pub(crate) fn latest_for_scope_and_rules(
+            &self,
+            scope: &str,
+            rules_sha256: &str,
+            target_tree_sha256: &str,
+        ) -> Option<&TreeReceiptEntry> {
+            self.receipts
+                .values()
+                .filter(|entry| {
+                    entry.scope == scope
+                        && entry.rules_sha256 == rules_sha256
+                        && entry.target_tree_sha256 == target_tree_sha256
+                })
+                .max_by_key(|entry| entry.last_used)
+        }
+
         pub(crate) fn insert_receipt(
             &mut self,
             scope: &str,
             canonical_tree_sha256: String,
             rules_sha256: String,
             target_tree_sha256: String,
+        ) {
+            self.insert_report(
+                scope,
+                canonical_tree_sha256,
+                rules_sha256,
+                target_tree_sha256,
+                None,
+            );
+        }
+
+        pub(crate) fn insert_report(
+            &mut self,
+            scope: &str,
+            canonical_tree_sha256: String,
+            rules_sha256: String,
+            target_tree_sha256: String,
+            report: Option<Value>,
         ) {
             let key = Self::receipt_key(
                 scope,
@@ -157,6 +223,7 @@ pub(crate) mod check_receipts {
                     target_tree_sha256,
                     cached_at: infra_core::domain::utc_now(),
                     last_used: seq,
+                    report,
                 },
             );
             self.evict_excess();

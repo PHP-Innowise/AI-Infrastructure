@@ -590,6 +590,21 @@ pub fn execute(
             Ok(output)
         }
         "validate-skill-quality" => quality_route(request),
+        "partition-pre-generation-batches" => {
+            let target = ownership::resolve_target(&path(request, "target")?)?;
+            let manifest = ownership::load_manifest(&target)?;
+            let changed = field(request, "changed_paths")
+                .as_array()
+                .map(|_| list(request, "changed_paths"));
+            GeneratorOutput::json(
+                &coverage::partition_pre_generation_batches(
+                    &target,
+                    &manifest,
+                    changed.as_deref(),
+                )?,
+                0,
+            )
+        }
         "partition-update-slices" => {
             let target = ownership::resolve_target(&path(request, "target")?)?;
             let manifest = ownership::load_manifest(&target)?;
@@ -1277,5 +1292,78 @@ mod tests {
         assert_eq!(via_ownership.code, 0);
         let parsed: Value = serde_json::from_slice(&via_ownership.stdout).unwrap();
         assert_eq!(parsed, partitioned);
+    }
+
+    #[test]
+    fn quality_runtime_and_contracts_reuse_cached_command_analyzer() {
+        let dir = TempDir::new();
+        let ws = dir.0.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let pkg = ws.join("package.json");
+        std::fs::write(&pkg, r#"{"scripts":{"test":"phpunit"}}"#).unwrap();
+        let ws_canon = ownership::resolve_target(&ws).unwrap();
+
+        let before = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+
+        let mut d1 = Vec::new();
+        quality::test_runtime_body_commands(
+            "test-skill",
+            "Run:\n```bash\nnpm run test\n```\n",
+            &ws,
+            &mut d1,
+        );
+        let after_first = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(after_first, before + 1);
+
+        let mut d2 = Vec::new();
+        quality::test_runtime_body_commands(
+            "test-skill-2",
+            "Run:\n```bash\nnpm run test\n```\n",
+            &ws,
+            &mut d2,
+        );
+        let mut d3 = Vec::new();
+        let skill_val = object!({
+            "kind": "workflow",
+            "capability": {"mode": "check", "summary": "Verify suite"},
+            "ownership": [],
+            "path_contracts": [],
+            "procedures": [],
+            "required_procedure_roles": [],
+            "verification": [{
+                "id": "v1",
+                "mode": "command",
+                "instruction": "Run test suite",
+                "command": "npm run test",
+                "prerequisites": [],
+                "safe_scope": "repo",
+                "mutation_class": "none",
+                "network_class": "none",
+                "expected_result": "exit 0",
+                "failure_result": "non-zero",
+                "skip_condition": "never",
+                "skip_reporting": "fail"
+            }]
+        });
+        let ledger = quality::TestLedger::default();
+        quality::test_contracts_skill("1.6", "test-skill", &skill_val, &ledger, &ws, &mut d3);
+
+        let after_reused = command_analyzer_build_counts()
+            .lock()
+            .unwrap()
+            .get(&ws_canon)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(after_reused, before + 1);
     }
 }

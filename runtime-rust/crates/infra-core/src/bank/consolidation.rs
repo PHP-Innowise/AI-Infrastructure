@@ -2,7 +2,10 @@
 use super::{BankService, codec, promotion, publication::PublicationFiles, validation};
 use crate::{BrainRepository, CreateRecord, Result, RuntimeError, UpdateRecord, domain, fs};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 fn text<'a>(record: &'a Value, key: &str) -> &'a str {
     record[key].as_str().unwrap_or("")
@@ -57,6 +60,20 @@ fn completion_subject(value: &str) -> Option<String> {
         Some(subject.into())
     }
 }
+fn ticket_prefix_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"^[A-Z]{2,10}-\d+\b"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Ticket expression"))
+}
+fn verification_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"(?is)Verification:\s*(.+?)(?:\s+##|\s*$)"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Verification expression"))
+}
 fn event_subject(record: &Value) -> Result<String> {
     let mut title = words(text(record, "title"));
     if title.to_lowercase().starts_with("completed ") {
@@ -71,9 +88,7 @@ fn event_subject(record: &Value) -> Result<String> {
             .iter()
             .any(|p| title.to_lowercase().starts_with(p))
         || title.to_lowercase().contains("auto-provisioned")
-        || regex::Regex::new(r"^[A-Z]{2,10}-\d+\b")
-            .map_err(|_| RuntimeError::invalid("Ticket expression"))?
-            .is_match(&title)
+        || ticket_prefix_re()?.is_match(&title)
     {
         Ok(String::new())
     } else {
@@ -83,8 +98,7 @@ fn event_subject(record: &Value) -> Result<String> {
 fn verification_parts(record: &Value) -> Result<Option<(usize, String)>> {
     // The original grammar ends at the next Markdown heading, including a heading on its own line.
     let goal = text(record, "goal");
-    let pattern = regex::Regex::new(r"(?is)Verification:\s*(.+?)(?:\s+##|\s*$)")
-        .map_err(|_| RuntimeError::invalid("Verification expression"))?;
+    let pattern = verification_re()?;
     Ok(pattern.captures(goal).map(|capture| {
         (
             capture.get(0).map(|m| m.start()).unwrap_or(0),
@@ -152,11 +166,16 @@ fn event_line(record: &Value) -> Result<String> {
         text(record, "id")
     ))
 }
-fn entry_pattern() -> Result<regex::Regex> {
-    regex::Regex::new(
-        r"^- .*\[event ([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\]$",
-    )
-    .map_err(|_| RuntimeError::invalid("Event-line expression"))
+fn entry_pattern() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"^- .*\[event ([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\]$",
+            )
+        })
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Event-line expression"))
 }
 fn covered(record: Option<&Value>) -> Result<Vec<(String, String)>> {
     let pattern = entry_pattern()?;
@@ -170,6 +189,13 @@ fn covered(record: Option<&Value>) -> Result<Vec<(String, String)>> {
         })
         .collect())
 }
+fn progress_heading_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"^Consolidated \d+ completed events? for \S+\.$"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Consolidation heading"))
+}
 fn progress(
     ticket: &str,
     previous: &str,
@@ -177,8 +203,7 @@ fn progress(
     related: &[String],
 ) -> Result<String> {
     let pattern = entry_pattern()?;
-    let head = regex::Regex::new(r"^Consolidated \d+ completed events? for \S+\.$")
-        .map_err(|_| RuntimeError::invalid("Consolidation heading"))?;
+    let head = progress_heading_re()?;
     let mut kept = Vec::new();
     let mut entries = Vec::new();
     for line in previous.lines() {
@@ -212,10 +237,16 @@ fn progress(
     }
     Ok(out.join("\n"))
 }
+fn ticket_ids_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"\b([A-Z]{2,10})-(\d{1,6})\b"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Ticket expression"))
+}
 fn ticket_ids(value: &str) -> Result<Vec<String>> {
     const STOP: &str = "AES AGPL ANSI ASCII BCP BSD CET CP CRC CSS CVE CVSS CWE DES DIN DNS DSA ECDSA ECMA EN EPL ES FIPS GDPR GMT GPL GPT HMAC HTML HTTP HTTPS IEC IEEE IP IPV ISO JSON KOI LATIN LGPL MD MPEG MPL NIST OAUTH OWASP PCI PER PHP PSR RFC RSA SHA SOC SSL TCP TLS UCS UDP UTC UTF UUID WCAG WIN XML YAML";
-    let pattern = regex::Regex::new(r"\b([A-Z]{2,10})-(\d{1,6})\b")
-        .map_err(|_| RuntimeError::invalid("Ticket expression"))?;
+    let pattern = ticket_ids_re()?;
     let mut result = Vec::new();
     for capture in pattern.captures_iter(value) {
         let m = capture
@@ -922,4 +953,43 @@ pub fn consolidate(service: &BankService, apply: bool, wanted: Option<&str>) -> 
             .push(entry);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod regex_tests {
+    use super::*;
+
+    #[test]
+    fn hoisted_consolidation_regexes_extract_tickets_events_and_verifications() {
+        let id1 = "11111111-1111-4111-8111-111111111111";
+        let id2 = "22222222-2222-4222-8222-222222222222";
+        assert_eq!(
+            ticket_ids("SHOP-42 and ISO-9001.2 and UTF-8 and PAY-7").unwrap(),
+            vec!["SHOP-42".to_string(), "PAY-7".to_string()]
+        );
+        let rec = json!({
+            "id": id1,
+            "title": "Completed billing fix: retry idempotency check properly",
+            "goal": "Fixed retry loop. Verification: phpunit tests/RetryTest.php\n## Notes\nextra"
+        });
+        assert_eq!(
+            event_subject(&rec).unwrap(),
+            "retry idempotency check properly"
+        );
+        assert_eq!(verification(&rec).unwrap(), "phpunit tests/RetryTest.php");
+        let prev = format!(
+            "Consolidated 1 completed event for SHOP-42.\n- first item [event {id1}]\nCustom note\nRelated findings: F-1."
+        );
+        let merged = progress(
+            "SHOP-42",
+            &prev,
+            vec![format!("- second item [event {id2}]")],
+            &["F-2".into()],
+        )
+        .unwrap();
+        assert!(merged.starts_with("Consolidated 2 completed events for SHOP-42."));
+        assert!(merged.contains("Custom note"));
+        assert!(merged.contains(&format!("[event {id2}]")));
+        assert!(merged.ends_with("Related findings: F-2."));
+    }
 }

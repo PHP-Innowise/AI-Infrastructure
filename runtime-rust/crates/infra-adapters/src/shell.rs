@@ -2,6 +2,10 @@
 use crate::TailTrim;
 use infra_core::{Result, RuntimeError};
 use regex::Regex;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 #[derive(Clone, Debug, Default)]
 pub struct Segment {
     pub words: Vec<String>,
@@ -526,7 +530,26 @@ fn program(words: &[String]) -> (usize, String, usize) {
     }
     (i, name, argument.min(words.len()))
 }
-fn glob(value: &str, pattern: &str) -> bool {
+const GLOB_REGEX_CACHE_CAP: usize = 256;
+
+#[derive(Default)]
+struct GlobRegexCache {
+    seq: u64,
+    entries: HashMap<String, (Option<Regex>, u64)>,
+}
+
+fn glob_regex_cache() -> &'static Mutex<GlobRegexCache> {
+    static CACHE: OnceLock<Mutex<GlobRegexCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(GlobRegexCache::default()))
+}
+
+#[cfg(test)]
+fn glob_regex_compiles() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
+
+fn translate_glob(pattern: &str) -> String {
     let mut out = String::from("^");
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
@@ -550,7 +573,46 @@ fn glob(value: &str, pattern: &str) -> bool {
         }
     }
     out.push('$');
-    Regex::new(&out).is_ok_and(|p| p.is_match(value))
+    out
+}
+
+fn glob(value: &str, pattern: &str) -> bool {
+    let cached = glob_regex_cache().lock().ok().and_then(|mut cache| {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        cache.entries.get_mut(pattern).map(|(compiled, last_used)| {
+            *last_used = seq;
+            compiled.clone()
+        })
+    });
+    let compiled = match cached {
+        Some(entry) => entry,
+        None => {
+            #[cfg(test)]
+            glob_regex_compiles().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let translated = translate_glob(pattern);
+            let compiled = Regex::new(&translated).ok();
+            if let Ok(mut cache) = glob_regex_cache().lock() {
+                cache.seq = cache.seq.saturating_add(1);
+                let seq = cache.seq;
+                if cache.entries.len() >= GLOB_REGEX_CACHE_CAP
+                    && !cache.entries.contains_key(pattern)
+                    && let Some(evict) = cache
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, (_, last_used))| *last_used)
+                        .map(|(k, _)| k.clone())
+                {
+                    cache.entries.remove(&evict);
+                }
+                cache
+                    .entries
+                    .insert(pattern.to_owned(), (compiled.clone(), seq));
+            }
+            compiled
+        }
+    };
+    compiled.is_some_and(|p| p.is_match(value))
 }
 fn listed(value: &str, patterns: &str) -> bool {
     let mut matched = false;
@@ -1523,5 +1585,34 @@ mod tests {
             assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
             assert_eq!(error.message, "Invalid native hook policy expression");
         }
+    }
+
+    #[test]
+    fn glob_cache_reuses_compiled_patterns_and_bounds_capacity() {
+        let before = glob_regex_compiles().load(std::sync::atomic::Ordering::Relaxed);
+        assert!(glob(".env.local", ".env.*"));
+        assert!(!glob(".env.example", ".env.*,!.env.example"));
+        assert!(listed(".env.production", ".env.*,!.env.example"));
+        assert!(!listed(".env.example", ".env.*,!.env.example"));
+        assert!(glob("a", "[!b]"));
+        assert!(!glob("b", "[!b]"));
+        let after_first = glob_regex_compiles().load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after_first > before);
+
+        // Repeated calls with same globs compile 0 new regexes.
+        assert!(glob(".env.staging", ".env.*"));
+        assert!(listed(".env.staging", ".env.*,!.env.example"));
+        assert!(glob("c", "[!b]"));
+        assert_eq!(
+            glob_regex_compiles().load(std::sync::atomic::Ordering::Relaxed),
+            after_first
+        );
+
+        // Filling beyond GLOB_REGEX_CACHE_CAP bounds stored entries cleanly.
+        for i in 0..(GLOB_REGEX_CACHE_CAP + 20) {
+            let pat = format!("pat-{i}-*");
+            assert!(glob(&format!("pat-{i}-x"), &pat));
+        }
+        assert!(glob_regex_cache().lock().unwrap().entries.len() <= GLOB_REGEX_CACHE_CAP);
     }
 }

@@ -220,7 +220,7 @@ pub fn skill(
             )
         }
     }
-    let analyzer = match crate::commands::CommandAnalyzer::new(target) {
+    let analyzer = match crate::routes::cached_command_analyzer(target) {
         Ok(v) => Some(v),
         Err(e) => {
             diag(d, "COMMAND_ANALYZER_UNAVAILABLE", format!("{name}: {e}"));
