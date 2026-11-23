@@ -925,7 +925,11 @@ impl Sessions {
         value["branch"] = json!(branch);
         value["git_common_dir"] = json!(common);
         if !value["sdd"].is_null() {
-            crate::sdd::require_documents(&root, &value["sdd"])?;
+            let ir_context = project["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| (self.store.state.as_path(), id));
+            crate::sdd::require_documents_in(&root, &value["sdd"], ir_context)?;
         }
         Ok(value)
     }
@@ -1755,7 +1759,11 @@ impl Sessions {
             )
         };
         if !session["sdd"].is_null() {
-            crate::sdd::require_documents(&root, &session["sdd"])?;
+            let ir_context = session["project_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| (self.store.state.as_path(), id));
+            crate::sdd::require_documents_in(&root, &session["sdd"], ir_context)?;
         }
         Ok(Launch {
             provider: provider.into(),
@@ -6470,8 +6478,86 @@ mod phase3c_approvals_tests {
             .unwrap()
             .join("project");
         std::fs::create_dir_all(proj.join("programs")).unwrap();
-        std::fs::write(proj.join("programs/ro.py"), "print('ok')\n").unwrap();
-        fixture.sessions.store.register(&proj).unwrap();
+        let ro_bytes = b"print('ok')\n";
+        std::fs::write(proj.join("programs/ro.py"), ro_bytes).unwrap();
+        let project = fixture.sessions.store.register(&proj).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+
+        // Seed an active, sealed, Gate 1+2+3-verified `read_only: true` capsule in `SessionStore`
+        // so both legacy and strict store-backed `PermissionDesk` checks admit `programs/ro.py`.
+        let warm_root = fixture
+            .sessions
+            .store
+            .state
+            .join(format!("skillcache/capsules/{project_id}/cap-session-ro/1"));
+        let warm_dir = warm_root.join("warm");
+        let capsule_json = json!({
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "form": "hybrid",
+            "mu": {"name": "ro-session", "description": "Read-only session check"},
+            "source": {"skills": [{"name": "ro-session", "path": ".agents/skills/ro-session/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "main",
+                "entry": ["python3", "programs/ro.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/ro.py", "--check"],
+                "timeout_seconds": 60,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "main"}],
+            "verification": []
+        });
+        let cap = infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/ro.py", ro_bytes.to_vec());
+        let pkg_sha = infra_skillcache::package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+        let loaded = infra_skillcache::package::load(&warm_dir).unwrap();
+        {
+            let db = fixture.sessions.store.connection().unwrap();
+            let skill_ref = json!({"name": "ro-session", "path": ".agents/skills/ro-session/SKILL.md", "tree_sha256": "0".repeat(64)});
+            crate::skillcache::db::begin_capsule(
+                &db,
+                "cap-session-ro",
+                "cmp-session-ro",
+                &project_id,
+                "s-ordinary",
+                "gen-session-ro",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            crate::skillcache::db::activate_capsule(
+                &db,
+                &crate::skillcache::db::Qualified {
+                    capsule_id: "cap-session-ro",
+                    mu_name: "ro-session",
+                    mu_description: "Read-only session check",
+                    form: "hybrid",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: "env",
+                    engine_digest: "eng",
+                    artifact_dir: warm_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                crate::skillcache::db::record_gate(
+                    &db,
+                    "cap-session-ro",
+                    1,
+                    gate,
+                    true,
+                    &json!({"gate": gate, "passed": true}),
+                )
+                .unwrap();
+            }
+        }
 
         let accelerators = Arc::new(
             crate::accelerators::Accelerators::new(
@@ -6522,6 +6608,28 @@ mod phase3c_approvals_tests {
                 .is_empty()
         );
 
+        let rx_cli = ordinary_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "cmd-cli".into(),
+                provider: "codex".into(),
+                tool: "Shell".into(),
+                summary: "git status --short".into(),
+                kind: "command".into(),
+                session_rule_key: Some("readonly:program:git status --short".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rx_cli.await.unwrap().decision,
+            infra_host::permission::Decision::Allow
+        );
+        assert!(
+            fixture
+                .sessions
+                .waiting_permissions("s-ordinary")
+                .is_empty()
+        );
+
         // Mutating command still waits for manual approval.
         let _rx_mut = ordinary_approvals
             .ask_answer(&infra_host::permission::PermissionAsk {
@@ -6551,5 +6659,125 @@ mod phase3c_approvals_tests {
             })
             .unwrap();
         assert_eq!(fixture.sessions.waiting_permissions("s-creator").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sdd_session_create_and_launch_verify_claims_against_graph_ir() {
+        let fixture = generation_completion_tests::Fixture::new();
+        let proj = infra_core::fs::canonicalize(fixture.temporary.path())
+            .unwrap()
+            .join("project");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(proj.join("specs/001-ir")).unwrap();
+        std::fs::write(
+            proj.join("src/auth.rs"),
+            "pub struct TokenService;\nimpl TokenService {\n    pub fn issue(&self) {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/spec.md"),
+            "# Spec\n- FR-001: Tokens\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/plan.md"),
+            "# Plan\nCovers FR-001.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/tasks.md"),
+            "- [x] T001 Implement `TokenService::issue` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        std::fs::write(proj.join("specs/001-ir/progress.md"), "- [x] T001 Done\n").unwrap();
+
+        let registered = fixture.sessions.store.register(&proj).unwrap();
+        let pid = registered["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&fixture.sessions.store.state, &pid).unwrap();
+        ir.sync_workspace(&proj).unwrap();
+        drop(ir);
+
+        {
+            let mut map = fixture.sessions.providers.providers.write().unwrap();
+            map.insert(
+                "claude".into(),
+                provider::Provider {
+                    id: "claude".into(),
+                    name: "offline fixture".into(),
+                    available: true,
+                    executable: Some(std::env::current_exe().unwrap()),
+                    detail: "No model".into(),
+                },
+            );
+        }
+        infra_host::model_catalog::model_options("claude", None, None)
+            .await
+            .unwrap();
+        fixture
+            .sessions
+            .install_commands(Arc::new(crate::commands::CommandCatalog::new(
+                fixture.sessions.store.clone(),
+                fixture.temporary.path().join("source"),
+                fixture.sessions.providers.providers.clone(),
+            )))
+            .unwrap();
+
+        let valid_opts = fixture
+            .sessions
+            .create_options_for_test(&json!({
+                "project_id": pid,
+                "provider": "claude",
+                "workflow": "sdd",
+                "mode": "plan",
+                "prompt": "Review SDD implementation",
+                "sdd": {"feature": "001-ir", "phase": "review"},
+            }))
+            .unwrap();
+        assert_eq!(valid_opts["sdd"]["feature"], "001-ir");
+
+        let created = fixture
+            .sessions
+            .store
+            .create_uploaded(&valid_opts, "Review SDD implementation", &[])
+            .unwrap();
+        fixture
+            .sessions
+            .configure_launch(&created, "Review SDD implementation")
+            .unwrap();
+
+        // Break the [x] symbol claim and verify both create_options and configure_launch reject it via Graph-IR.
+        std::fs::write(
+            proj.join("specs/001-ir/tasks.md"),
+            "- [x] T001 Implement `TokenService::bogus` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        let create_err = fixture
+            .sessions
+            .create_options_for_test(&json!({
+                "project_id": pid,
+                "provider": "claude",
+                "workflow": "sdd",
+                "mode": "plan",
+                "prompt": "Review SDD implementation",
+                "sdd": {"feature": "001-ir", "phase": "review"},
+            }))
+            .unwrap_err();
+        assert!(
+            create_err.message.contains("TokenService::bogus"),
+            "{}",
+            create_err.message
+        );
+        let launch_err = match fixture
+            .sessions
+            .configure_launch(&created, "Review SDD implementation")
+        {
+            Ok(_) => panic!("expected configure_launch to reject missing symbol via Graph-IR"),
+            Err(err) => err,
+        };
+        assert!(
+            launch_err.message.contains("TokenService::bogus"),
+            "{}",
+            launch_err.message
+        );
     }
 }

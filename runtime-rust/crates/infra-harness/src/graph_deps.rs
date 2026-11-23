@@ -50,33 +50,14 @@ fn manifest_cache() -> &'static Mutex<Vec<(PathBuf, CachedResolutionBundles)>> {
 }
 
 fn manifest_stamp_for_root(canon_root: &Path, known_files: &BTreeSet<String>) -> String {
-    let mut parts = Vec::new();
-    if let Ok(entries) = fs::read_dir(canon_root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            if !is_graph_manifest_path(Path::new(name_str)) {
-                continue;
-            }
-            if let Ok(meta) = fs::symlink_metadata(entry.path())
-                && !meta.file_type().is_symlink()
-                && meta.is_file()
-            {
-                let nanos = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0u128, |d| d.as_nanos());
-                parts.push(format!("{name_str}:{}:{nanos}", meta.len()));
-            }
-        }
-    }
+    let mut parts: Vec<String> = crate::graph_ir::compute_root_manifest_stamp(canon_root)
+        .split('|')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
     for rel in known_files {
         let leaf = rel.rsplit('/').next().unwrap_or(rel);
         if is_graph_manifest_path(Path::new(leaf))
-            && rel.contains('/')
             && let Ok(meta) = fs::symlink_metadata(canon_root.join(rel))
             && !meta.file_type().is_symlink()
             && meta.is_file()
@@ -1693,6 +1674,7 @@ struct KnownIndex {
     by_lower: BTreeMap<String, Vec<String>>,
     by_stem_lower: BTreeMap<String, Vec<String>>,
     by_dir_stem_lower: BTreeMap<(String, String), Vec<String>>,
+    swift_by_dir: BTreeMap<String, String>,
     all_entries: Vec<(String, String, String)>,
 }
 
@@ -1718,6 +1700,7 @@ impl KnownIndex {
         let mut by_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut by_stem_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut by_dir_stem_lower: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        let mut swift_by_dir: BTreeMap<String, String> = BTreeMap::new();
         let mut all_entries = Vec::with_capacity(known_files.len());
 
         for orig in known_files {
@@ -1735,7 +1718,8 @@ impl KnownIndex {
                 .push(orig.clone());
 
             let stem_lower = file_stem(&cleaned).to_ascii_lowercase();
-            let dir_lower = folder_of(&cleaned).to_ascii_lowercase();
+            let dir = folder_of(&cleaned);
+            let dir_lower = dir.to_ascii_lowercase();
             if !stem_lower.is_empty() {
                 by_stem_lower
                     .entry(stem_lower.clone())
@@ -1745,6 +1729,22 @@ impl KnownIndex {
                     .entry((dir_lower, stem_lower))
                     .or_default()
                     .push(orig.clone());
+            }
+            if has_any_ext(&cleaned, SWIFT_EXTS) && !dir.is_empty() {
+                let segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+                for start in 0..segs.len() {
+                    let mut sub = segs[start].to_owned();
+                    swift_by_dir
+                        .entry(sub.clone())
+                        .or_insert_with(|| orig.clone());
+                    for seg in &segs[(start + 1)..] {
+                        sub.push('/');
+                        sub.push_str(seg);
+                        swift_by_dir
+                            .entry(sub.clone())
+                            .or_insert_with(|| orig.clone());
+                    }
+                }
             }
             all_entries.push((orig.clone(), cleaned, lower));
         }
@@ -1759,6 +1759,7 @@ impl KnownIndex {
             by_lower,
             by_stem_lower,
             by_dir_stem_lower,
+            swift_by_dir,
             all_entries,
         })
     }
@@ -1809,6 +1810,26 @@ impl<'a> KnownLookup<'a> {
 
     fn all_entries(&self) -> &[(String, String, String)] {
         &self.index.all_entries
+    }
+
+    fn resolve_swift_module(&self, module: &str) -> Option<String> {
+        let clean = module.trim().trim_matches('/');
+        if clean.is_empty() {
+            return None;
+        }
+        if let Some(hit) = self.index.swift_by_dir.get(clean) {
+            return Some(hit.clone());
+        }
+        if let Some((head, _)) = clean.split_once('.') {
+            let slash = clean.replace('.', "/");
+            if let Some(hit) = self.index.swift_by_dir.get(&slash) {
+                return Some(hit.clone());
+            }
+            if let Some(hit) = self.index.swift_by_dir.get(head) {
+                return Some(hit.clone());
+            }
+        }
+        None
     }
 
     fn resolve_exact_or_ci(&self, candidate: &str) -> Option<String> {
@@ -3611,14 +3632,7 @@ fn resolve_swift_ir(
 ) {
     let dir = folder_of(rel_path);
     for imp in &ir.imports {
-        let mut resolved = None;
-        for entry in lookup.all_entries() {
-            if has_any_ext(&entry.1, SWIFT_EXTS) && entry.1.contains(&format!("{}/", imp.path)) {
-                resolved = Some(entry.0.clone());
-                break;
-            }
-        }
-        match resolved {
+        match lookup.resolve_swift_module(&imp.path) {
             Some(t) => acc.add_resolved(t, "imports", &[&imp.path], imp.line, &imp.evidence),
             None => acc.add_unresolved(&imp.path, "imports", &[&imp.path], imp.line, &imp.evidence),
         }
@@ -4854,6 +4868,141 @@ class PayController {
         assert!(
             !deps.iter().any(|d| d.target == "strlen"),
             "PHP builtin free functions should stay excluded: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn nested_manifests_invalidate_cached_manifests_even_when_known_files_are_code_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("apps/web/src")).unwrap();
+        std::fs::create_dir_all(root.join("apps/api/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
+
+        std::fs::write(
+            root.join("apps/web/tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@web/*\":[\"src/*\"]}}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            "{\"name\":\"@acme/web\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/api/composer.json"),
+            "{\"autoload\":{\"psr-4\":{\"Acme\\\\Api\\\\\":\"src/\"}}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"acme-core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("apps/web/src/util.ts"), "export const u = 1;\n").unwrap();
+        std::fs::write(root.join("apps/web/src/v2.ts"), "export const v = 2;\n").unwrap();
+        std::fs::write(
+            root.join("apps/api/src/Kernel.php"),
+            "<?php class Kernel {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/core/src/lib.rs"), "pub fn k() {}\n").unwrap();
+
+        // Simulate GraphIrStore::known_files() filtered by is_supported_code_rel (zero manifest paths).
+        let code_only_known = known(&[
+            "apps/web/src/util.ts",
+            "apps/web/src/v2.ts",
+            "apps/api/src/Kernel.php",
+            "crates/core/src/lib.rs",
+        ]);
+        let (m1, c1) = cached_manifests_for_root(root, &code_only_known);
+        let (m1_hit, c1_hit) = cached_manifests_for_root(root, &code_only_known);
+        assert!(Arc::ptr_eq(&m1, &m1_hit));
+        assert!(Arc::ptr_eq(&c1, &c1_hit));
+
+        // Edit nested tsconfig.json and verify ManifestIndex cache invalidates without known_files changing.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("apps/web/tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@web2/*\":[\"src/*\"]}}}\n",
+        )
+        .unwrap();
+        let (m2, _) = cached_manifests_for_root(root, &code_only_known);
+        assert!(
+            !Arc::ptr_eq(&m1, &m2),
+            "nested tsconfig.json edit must invalidate ManifestIndex cache"
+        );
+        let hits = m2.resolve_ts_import("apps/web/src/main.ts", "@web2/v2", &code_only_known);
+        assert_eq!(hits.as_deref(), Some("apps/web/src/v2.ts"), "{hits:?}");
+
+        // Edit nested composer.json, package.json, and Cargo.toml -> each invalidates stamp.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("apps/api/composer.json"),
+            "{\"autoload\":{\"psr-4\":{\"Acme\\\\Api2\\\\\":\"src/\"}}}\n",
+        )
+        .unwrap();
+        let (m3, _) = cached_manifests_for_root(root, &code_only_known);
+        assert!(!Arc::ptr_eq(&m2, &m3));
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("apps/web/package.json"),
+            "{\"name\":\"@acme/web-renamed\"}\n",
+        )
+        .unwrap();
+        let (m4, _) = cached_manifests_for_root(root, &code_only_known);
+        assert!(!Arc::ptr_eq(&m3, &m4));
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"acme-core-renamed\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        let (m5, c5) = cached_manifests_for_root(root, &code_only_known);
+        assert!(!Arc::ptr_eq(&m4, &m5));
+        assert!(!Arc::ptr_eq(&c1, &c5));
+    }
+
+    #[test]
+    fn swift_import_resolution_uses_indexed_dir_lookup_without_false_substring_match() {
+        let mut files = BTreeSet::from([
+            "Sources/AuthKit/Signer.swift".to_owned(),
+            "Sources/MyAuthKitExtra/Helper.swift".to_owned(),
+            "Sources/App/Runner.swift".to_owned(),
+        ]);
+        for i in 0..500 {
+            files.insert(format!("Sources/Generated/File{i:03}.swift"));
+        }
+        let lookup = KnownLookup::new(&files);
+        assert_eq!(
+            lookup.resolve_swift_module("AuthKit").as_deref(),
+            Some("Sources/AuthKit/Signer.swift")
+        );
+        assert_eq!(
+            lookup.resolve_swift_module("Sources/AuthKit").as_deref(),
+            Some("Sources/AuthKit/Signer.swift")
+        );
+        assert_eq!(
+            lookup.resolve_swift_module("AuthKit.Signer").as_deref(),
+            Some("Sources/AuthKit/Signer.swift")
+        );
+        assert_eq!(lookup.resolve_swift_module("Kit"), None);
+
+        let deps = extract_file_deps(
+            "Sources/App/Runner.swift",
+            "import AuthKit\nimport Foundation\nclass Runner {}\n",
+            &files,
+        );
+        assert!(
+            deps.iter()
+                .any(|d| d.target == "Sources/AuthKit/Signer.swift" && d.resolved),
+            "{deps:?}"
+        );
+        assert!(
+            deps.iter().any(|d| d.target == "Foundation" && !d.resolved),
+            "{deps:?}"
         );
     }
 }

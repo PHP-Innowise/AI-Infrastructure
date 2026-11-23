@@ -117,14 +117,15 @@ impl Graphs {
         use crate::graph_map::layer_rules::Rules;
         let wants_layers = pattern.is_some_and(|id| id.starts_with("layers@"));
         let reads_rules =
-            wants_layers || (patterns && !modules && scenario.is_none() && link.is_none());
+            target.is_some() || wants_layers || (!modules && scenario.is_none() && link.is_none());
         // The links followed from a place, where one is followed and the
         // graph knows it; or, before that, one link looked into. `edited`
         // gives what the chosen change did to a file, where that can be told.
         let follow = |index: &crate::graph_map::Index,
                       changed: &[(String, char)],
                       edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>,
-                      rules: &std::result::Result<Option<Rules>, String>| {
+                      rules: &std::result::Result<Option<Rules>, String>,
+                      defer_paging: bool| {
             if let Some((origin, skip)) = scenario {
                 return Some(index.scenario(name, origin, certain, filter, skip));
             }
@@ -168,6 +169,11 @@ impl Graphs {
             {
                 return Some(view);
             }
+            let (follow_offset, follow_limit) = if defer_paging {
+                (0, None)
+            } else {
+                (offset, limit)
+            };
             followed.and_then(|asked| {
                 index.follow_with_depth(
                     name,
@@ -179,8 +185,8 @@ impl Graphs {
                     focus,
                     certain,
                     depth,
-                    offset,
-                    limit,
+                    follow_offset,
+                    follow_limit,
                 )
             })
         };
@@ -198,23 +204,30 @@ impl Graphs {
         let marked = |index: &crate::graph_map::Index,
                       view: &mut Value,
                       rules: &std::result::Result<Option<Rules>, String>| {
-            if let Err(error) = rules {
+            if let Err(error) = rules
+                && !modules
+                && scenario.is_none()
+                && link.is_none()
+            {
                 view["architecture_error"] = json!(error);
             }
-            if patterns
-                && !modules
+            if !modules
                 && scenario.is_none()
                 && link.is_none()
                 && view["mode"] != "pattern"
                 && view["nodes"].is_array()
             {
-                index.mark_patterns(view, certain);
-                match rules {
-                    Ok(Some(rules)) => index.mark_declared_layers(view, Some(rules)),
-                    Err(_) => index.mark_declared_layers(view, None),
-                    Ok(None) => {}
+                if patterns {
+                    index.mark_patterns(view, certain);
+                    match rules {
+                        Ok(Some(rules)) => index.mark_declared_layers(view, Some(rules)),
+                        Err(_) => index.mark_declared_layers(view, None),
+                        Ok(None) => {}
+                    }
                 }
-                if let Ok(rules) = rules {
+                if (patterns || matches!(rules, Ok(Some(_))))
+                    && let Ok(rules) = rules
+                {
                     index.mark_architecture(view, certain, rules.as_ref());
                 }
             }
@@ -259,34 +272,38 @@ impl Graphs {
             } else {
                 Ok(None)
             };
-            let mut view = match follow(&index, &[], &|_| None, &rules) {
-                Some(mut view) => {
-                    apply_lod(&index, &mut view);
-                    view
-                }
+            let lod_opts = crate::graph_map::LodFilter {
+                scope,
+                focus,
+                filter,
+                certain,
+                offset,
+                limit,
+            };
+            let (mut view, pre_shaped) = match follow(
+                &index,
+                &[],
+                &|_| None,
+                &rules,
+                lod.is_some() || min_weight.is_some(),
+            ) {
+                Some(view) => (view, false),
                 None => match lod.filter(|_| index.opens(scope).is_none()) {
-                    Some(level) => crate::graph_map::view_at_lod(
-                        &index,
-                        name,
-                        level,
-                        min_weight,
-                        &crate::graph_map::LodFilter {
-                            scope,
-                            focus,
-                            filter,
-                            certain,
-                            offset,
-                            limit,
-                        },
-                    ),
-                    None => {
-                        let mut view = index.view_with_whole_options(
+                    Some(level) => {
+                        let built = if offset == 0 && limit.is_none() {
+                            crate::graph_map::view_at_lod(&index, name, level, None, &lod_opts)
+                        } else {
+                            index.view_at_lod_unfiltered(name, level, &lod_opts)
+                        };
+                        (built, true)
+                    }
+                    None => (
+                        index.view_with_whole_options(
                             name, scope, spread, focus, certain, filter, whole, offset, limit,
                             depth,
-                        );
-                        apply_lod(&index, &mut view);
-                        view
-                    }
+                        ),
+                        false,
+                    ),
                 },
             };
             marked(&index, &mut view, &rules);
@@ -300,6 +317,10 @@ impl Graphs {
             index.mark_blast(&mut view);
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
+            let reshaped = pre_shaped || index.apply_lod_shape_only(&mut view, lod, &lod_opts);
+            crate::graph_map::Index::apply_min_weight_and_pagination(
+                &mut view, min_weight, focus, offset, limit, reshaped,
+            );
             view["project_id"] = json!(project);
             let native_backend = built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL)
                 || index.backend() == Some(crate::graph_ir::NATIVE_IR_TOOL);
@@ -411,7 +432,7 @@ impl Graphs {
                     ));
                 }
                 let index = asked(index);
-                let mut view = follow(&index, &[], &|_| None, &Ok(None))
+                let mut view = follow(&index, &[], &|_| None, &Ok(None), false)
                     .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
                 apply_lod(&index, &mut view);
                 view["project_id"] = json!(project);
@@ -468,7 +489,13 @@ impl Graphs {
                     }
                     graph_changes::edited(&root, &resolved, path).ok().flatten()
                 };
-                let mut view = if let Some(mut view) = follow(&index, &changed, &touched, &rules) {
+                let mut view = if let Some(mut view) = follow(
+                    &index,
+                    &changed,
+                    &touched,
+                    &rules,
+                    lod.is_some() || min_weight.is_some(),
+                ) {
                     if pull_cycle && view["mode"] == "cycle" {
                         let snapshot = kept.contains('@');
                         self.compare_pr_cycle(
@@ -532,7 +559,6 @@ impl Graphs {
                         None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
                 };
-                apply_lod(&index, &mut view);
                 marked(&index, &mut view, &rules);
                 // Reads and writes are told from the preserved sources on disk:
                 // either the fresh checkout tree or the thinned commit/PR tree.
@@ -585,6 +611,7 @@ impl Graphs {
                             .map(|(run, edited)| ((&run.opened, &run.shell_reads), edited)),
                     );
                 }
+                apply_lod(&index, &mut view);
                 (view, Some(index), cache_hit)
             }
             // Until the commit's own graph is there, the project's graph
@@ -594,11 +621,16 @@ impl Graphs {
                 let (raw_index, cache_hit) =
                     self.maps.index_with_cache_hit(project, &published, &root)?;
                 let index = asked(raw_index);
-                let mut view = follow(&index, &changed, &|_| None, &rules).unwrap_or_else(|| {
-                    index.changes(name, &changed, scope, focus, certain, filter)
-                });
-                apply_lod(&index, &mut view);
+                let mut view = follow(
+                    &index,
+                    &changed,
+                    &|_| None,
+                    &rules,
+                    lod.is_some() || min_weight.is_some(),
+                )
+                .unwrap_or_else(|| index.changes(name, &changed, scope, focus, certain, filter));
                 marked(&index, &mut view, &rules);
+                apply_lod(&index, &mut view);
                 view["preliminary"] = json!(true);
                 if view["pattern"]["sort"] == "layers"
                     && (view["pattern"]["declared"] != true
@@ -713,21 +745,7 @@ impl Graphs {
                 })
                 .and_then(|(k, g, t)| self.maps.index(&k, &g, &t).ok())
                 .map(|b| if notests { b.without_tests() } else { b });
-            let extra_rules: Option<Rules> = if reads_rules {
-                None
-            } else {
-                match &resolved.revision {
-                    Some(rev) => graph_changes::architecture_at(&root, rev, &resolved.prefix)
-                        .ok()
-                        .flatten(),
-                    None => Rules::read(&root).ok().flatten(),
-                }
-            };
-            let overlay_rules = if reads_rules {
-                rules.as_ref().ok().and_then(|r| r.as_ref())
-            } else {
-                extra_rules.as_ref()
-            };
+            let overlay_rules = rules.as_ref().ok().and_then(|r| r.as_ref());
             let changed_paths: Vec<String> = resolved
                 .files
                 .iter()
@@ -1307,5 +1325,163 @@ impl Graphs {
                 .trim()
                 .eq_ignore_ascii_case("native")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_runs_marks_before_lod_min_weight_and_reads_architecture_without_patterns_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/api")).unwrap();
+        std::fs::create_dir_all(root.join("src/core")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"mapops\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod api;\npub mod core;\n").unwrap();
+        std::fs::write(
+            root.join("src/api/mod.rs"),
+            "pub fn api_entry() -> i32 { crate::core::core_leaf() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/core/mod.rs"),
+            "pub fn core_leaf() -> i32 { 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".harness-architecture.json"),
+            json!({
+                "version": 1,
+                "layers": [
+                    {"id": "api", "name": "API", "paths": ["src/api/**"], "allows": []},
+                    {"id": "core", "name": "Core", "paths": ["src/core/**"], "allows": []}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let proj = store.register(&root).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let graphs = Graphs::with_native_backend(store, Duration::ZERO);
+        graphs.act(&pid, "enable").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if graphs.status(&pid, false).unwrap()["state"] == "ready" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+
+        // 1. `.harness-architecture.json` is loaded and marked even when `patterns` is `false`.
+        let plain = graphs
+            .map(
+                &pid,
+                None,
+                &Shown {
+                    patterns: false,
+                    ..Shown::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(plain["architecture"]["declared"], true, "{plain}");
+        assert!(
+            plain["architecture"]["violations"]["pairs"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
+            "{plain}"
+        );
+        assert!(plain["patterns"].is_null(), "{plain}");
+
+        // 2. Symbol LOD preserves focus blast and marks architecture_violation on symbol edges.
+        let sym_overview = graphs
+            .map(
+                &pid,
+                None,
+                &Shown {
+                    lod: Some(crate::graph_map::Lod::Symbol),
+                    patterns: true,
+                    ..Shown::default()
+                },
+            )
+            .unwrap();
+        let core_sym = sym_overview["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|n| {
+                let p = n["path"].as_str()?;
+                p.contains("src/core/mod.rs#").then_some(p.to_owned())
+            })
+            .expect("core_leaf symbol key");
+        let sym_focused = graphs
+            .map(
+                &pid,
+                None,
+                &Shown {
+                    lod: Some(crate::graph_map::Lod::Symbol),
+                    focus: Some(&core_sym),
+                    patterns: true,
+                    ..Shown::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(sym_focused["focus"]["path"], core_sym);
+        assert!(
+            sym_focused["focus"]["blast"]["files"].as_u64().unwrap_or(0) >= 1,
+            "{}",
+            sym_focused["focus"]
+        );
+        assert!(
+            sym_focused["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["architecture_violation"].as_u64().unwrap_or(0) >= 1),
+            "{}",
+            sym_focused["edges"]
+        );
+
+        // 3. `min_weight` filters AFTER `mark_architecture` so `kept: "violation"` weight-1 edges
+        //    do not sneak past `min_weight = 2`.
+        let weighted = graphs
+            .map(
+                &pid,
+                None,
+                &Shown {
+                    lod: Some(crate::graph_map::Lod::Folder),
+                    min_weight: Some(2),
+                    patterns: true,
+                    ..Shown::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            weighted["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["links"].as_u64().unwrap_or(0) >= 2),
+            "{}",
+            weighted["edges"]
+        );
+        assert!(
+            weighted["architecture"]["violations"]["pairs"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+
+        graphs.close();
     }
 }

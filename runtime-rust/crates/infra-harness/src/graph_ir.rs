@@ -124,11 +124,10 @@ pub(crate) struct IrSyncStats {
     pub summary: IrSummary,
 }
 
-/// Incremental update summary + affected file lists returned by `update_paths_with_delta`
-/// and propagated over the Graph-IR invalidation bus.
+/// Incremental update summary + affected file lists returned by `sync_workspace_with_delta` /
+/// `update_paths_with_delta` and propagated over the Graph-IR invalidation bus.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IrUpdateDelta {
-    #[cfg(test)]
     pub stats: IrSyncStats,
     pub changed_paths: Vec<String>,
     pub edited_files: Vec<String>,
@@ -142,7 +141,6 @@ pub(crate) struct IrUpdateDelta {
 
 /// Result returned by [`GraphIrStore::verify_path_or_symbol`] for read-only verification
 /// of workspace paths and declared symbols against indexed Graph IR.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct IrPathSymbolVerification {
     pub path_exists: bool,
@@ -589,7 +587,16 @@ impl GraphIrStore {
     /// via `graph_ast::parse_file_ir`, deleted files are pruned, and cross-file dependencies +
     /// `ir_summary` are updated atomically in one SQLite transaction. All CPU/disk AST parsing
     /// completes before acquiring the `Immediate` SQLite write transaction.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sync_workspace(&self, root: &Path) -> Result<IrSyncStats> {
+        self.sync_workspace_with_delta(root)
+            .map(|delta| delta.stats)
+    }
+
+    /// Synchronizes all bounded workspace code files under `root` into SQLite incrementally and
+    /// returns exact `edited_files`, `removed_files`, `re_resolved_files`, `incoming_caller_files`,
+    /// `changed_paths` (including changed manifests), and `IrSyncStats`.
+    pub(crate) fn sync_workspace_with_delta(&self, root: &Path) -> Result<IrUpdateDelta> {
         if self.read_only {
             return Err(HarnessError::invalid("Graph IR store is read-only."));
         }
@@ -673,12 +680,15 @@ impl GraphIrStore {
                 tx.commit()?;
                 self.write_epoch.store(next_epoch, Ordering::Release);
             }
-            return Ok(IrSyncStats {
-                files_scanned,
-                files_parsed: 0,
-                files_skipped: files_scanned,
-                files_removed: 0,
-                summary,
+            return Ok(IrUpdateDelta {
+                stats: IrSyncStats {
+                    files_scanned,
+                    files_parsed: 0,
+                    files_skipped: files_scanned,
+                    files_removed: 0,
+                    summary,
+                },
+                ..IrUpdateDelta::default()
             });
         }
 
@@ -702,22 +712,24 @@ impl GraphIrStore {
 
         let is_incremental_update = !existing.is_empty();
         let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
-        let mut pending_re_resolve =
+        let (mut pending_re_resolve, mut pre_tx_incoming) =
             if is_incremental_update && (!affected_targets.is_empty() || manifest_changed) {
                 let conn = lock_conn(&self.conn)?;
                 epoch_before = self.write_epoch.load(Ordering::Acquire);
-                collect_affected_dependents(
+                let callers = query_incoming_callers_from_conn(&conn, &affected_targets)?;
+                let re_resolve = collect_affected_dependents(
                     &conn,
                     &affected_targets,
                     &skip_re_resolve,
                     manifest_changed,
                     &[],
-                )?
+                )?;
+                (re_resolve, callers)
             } else {
-                Vec::new()
+                (Vec::new(), BTreeSet::new())
             };
 
-        let summary = loop {
+        let (summary, re_resolved_out, semantic_changed, pre_tx_incoming) = loop {
             let missing_re_resolve: Vec<String> = pending_re_resolve
                 .iter()
                 .filter(|p| !parsed_re_resolve.contains_key(*p))
@@ -735,18 +747,19 @@ impl GraphIrStore {
                 epoch_before = self.write_epoch.load(Ordering::Acquire);
                 let has_rows: bool =
                     conn.query_row("SELECT EXISTS(SELECT 1 FROM ir_files)", [], |r| r.get(0))?;
-                pending_re_resolve =
-                    if has_rows && (!affected_targets.is_empty() || manifest_changed) {
-                        collect_affected_dependents(
-                            &conn,
-                            &affected_targets,
-                            &skip_re_resolve,
-                            manifest_changed,
-                            &[],
-                        )?
-                    } else {
-                        Vec::new()
-                    };
+                if has_rows && (!affected_targets.is_empty() || manifest_changed) {
+                    pre_tx_incoming = query_incoming_callers_from_conn(&conn, &affected_targets)?;
+                    pending_re_resolve = collect_affected_dependents(
+                        &conn,
+                        &affected_targets,
+                        &skip_re_resolve,
+                        manifest_changed,
+                        &[],
+                    )?;
+                } else {
+                    pre_tx_incoming.clear();
+                    pending_re_resolve.clear();
+                }
                 if pending_re_resolve
                     .iter()
                     .any(|p| !parsed_re_resolve.contains_key(p))
@@ -757,6 +770,7 @@ impl GraphIrStore {
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
+            let semantic_changed = detect_semantic_changed(&tx, removed.iter(), &parsed_units)?;
 
             for path in &removed {
                 delete_file_records(&tx, path)?;
@@ -793,15 +807,42 @@ impl GraphIrStore {
             let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
             self.write_epoch.store(next_epoch, Ordering::Release);
-            break summary;
+            break (
+                summary,
+                pending_re_resolve,
+                semantic_changed,
+                pre_tx_incoming,
+            );
         };
 
-        Ok(IrSyncStats {
-            files_scanned,
-            files_parsed,
-            files_skipped,
-            files_removed,
-            summary,
+        let edited_files: Vec<String> = parsed_units.into_iter().map(|u| u.rel_path).collect();
+        let mut changed_set: BTreeSet<String> = edited_files.iter().cloned().collect();
+        changed_set.extend(removed.iter().cloned());
+        if manifest_changed {
+            changed_set.extend(changed_manifest_paths_from_stamps(
+                prev_manifest_stamp.as_deref(),
+                &manifest_stamp,
+            ));
+        }
+        let incoming_caller_files =
+            self.collect_post_tx_incoming(pre_tx_incoming, &edited_files, &removed);
+
+        Ok(IrUpdateDelta {
+            stats: IrSyncStats {
+                files_scanned,
+                files_parsed,
+                files_skipped,
+                files_removed,
+                summary,
+            },
+            changed_paths: changed_set.into_iter().collect(),
+            edited_files,
+            re_resolved_files: re_resolved_out,
+            removed_files: removed,
+            incoming_caller_files,
+            manifest_changed,
+            semantic_changed,
+            ir_revision: 0,
         })
     }
 
@@ -837,10 +878,8 @@ impl GraphIrStore {
             }
         }
         if normalized.is_empty() {
-            #[cfg(test)]
             let summary = self.summary_counts()?.unwrap_or_default();
             return Ok(IrUpdateDelta {
-                #[cfg(test)]
                 stats: IrSyncStats {
                     summary,
                     ..IrSyncStats::default()
@@ -1042,26 +1081,8 @@ impl GraphIrStore {
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
-            let mut semantic_changed = parsed_units.iter().any(|u| !u.ir.semantic_edges.is_empty());
-            if !semantic_changed {
-                for path in removed_files
-                    .iter()
-                    .chain(parsed_units.iter().map(|u| &u.rel_path))
-                {
-                    let exists: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM ir_semantic_edges WHERE file_path = ?1)",
-                            [path],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .unwrap_or(false);
-                    if exists {
-                        semantic_changed = true;
-                        break;
-                    }
-                }
-            }
+            let semantic_changed =
+                detect_semantic_changed(&tx, removed_files.iter(), &parsed_units)?;
             for path in &removed_files {
                 delete_file_records(&tx, path)?;
             }
@@ -1127,8 +1148,35 @@ impl GraphIrStore {
 
         let changed_paths: Vec<String> = normalized.into_iter().collect();
         let edited_files: Vec<String> = parsed_units.into_iter().map(|u| u.rel_path).collect();
+        let incoming_caller_files =
+            self.collect_post_tx_incoming(pre_tx_incoming, &edited_files, &removed_out);
+        Ok(IrUpdateDelta {
+            stats: IrSyncStats {
+                files_scanned,
+                files_parsed,
+                files_skipped: skipped,
+                files_removed,
+                summary,
+            },
+            changed_paths,
+            edited_files,
+            re_resolved_files: re_resolved_out,
+            removed_files: removed_out,
+            incoming_caller_files,
+            manifest_changed,
+            semantic_changed,
+            ir_revision: 0,
+        })
+    }
+
+    fn collect_post_tx_incoming(
+        &self,
+        pre_tx_incoming: BTreeSet<String>,
+        edited_files: &[String],
+        removed_files: &[String],
+    ) -> Vec<String> {
         let mut touched_targets: BTreeSet<String> = edited_files.iter().cloned().collect();
-        touched_targets.extend(removed_out.iter().cloned());
+        touched_targets.extend(removed_files.iter().cloned());
         let mut incoming_set: BTreeSet<String> = pre_tx_incoming
             .into_iter()
             .filter(|p| !touched_targets.contains(p))
@@ -1143,32 +1191,7 @@ impl GraphIrStore {
                 }
             }
         }
-        #[cfg(not(test))]
-        let _ = (
-            files_scanned,
-            files_parsed,
-            skipped,
-            files_removed,
-            &summary,
-        );
-        Ok(IrUpdateDelta {
-            #[cfg(test)]
-            stats: IrSyncStats {
-                files_scanned,
-                files_parsed,
-                files_skipped: skipped,
-                files_removed,
-                summary,
-            },
-            changed_paths,
-            edited_files,
-            re_resolved_files: re_resolved_out,
-            removed_files: removed_out,
-            incoming_caller_files: incoming_set.into_iter().collect(),
-            manifest_changed,
-            semantic_changed,
-            ir_revision: 0,
-        })
+        incoming_set.into_iter().collect()
     }
 
     /// Reads the fast O(1) `ir_summary` counters from SQLite.
@@ -1246,7 +1269,6 @@ impl GraphIrStore {
     ///
     /// When `rel_path` is `None`, `path_exists` stays `false` while `matched_files` reports every
     /// indexed file defining a matching symbol.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn verify_path_or_symbol(
         &self,
         rel_path: Option<&str>,
@@ -2405,7 +2427,64 @@ pub(crate) fn current_git_head(real_root: &Path) -> Option<String> {
     (!head.is_empty()).then_some(head)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+fn parse_manifest_stamp_entries(stamp: &str) -> BTreeMap<&str, (&str, &str)> {
+    let mut map = BTreeMap::new();
+    for entry in stamp.split('|') {
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.rsplitn(3, ':');
+        if let (Some(mtime_s), Some(size_s), Some(rel)) = (parts.next(), parts.next(), parts.next())
+        {
+            map.insert(rel, (size_s, mtime_s));
+        }
+    }
+    map
+}
+
+fn changed_manifest_paths_from_stamps(prev_stamp: Option<&str>, curr_stamp: &str) -> Vec<String> {
+    let prev = prev_stamp
+        .map(parse_manifest_stamp_entries)
+        .unwrap_or_default();
+    let curr = parse_manifest_stamp_entries(curr_stamp);
+    let mut changed = BTreeSet::new();
+    for (rel, vals) in &curr {
+        if prev.get(rel) != Some(vals) {
+            changed.insert((*rel).to_owned());
+        }
+    }
+    for rel in prev.keys() {
+        if !curr.contains_key(rel) {
+            changed.insert((*rel).to_owned());
+        }
+    }
+    changed.into_iter().collect()
+}
+
+fn detect_semantic_changed<'a>(
+    tx: &Transaction<'_>,
+    removed_files: impl Iterator<Item = &'a String>,
+    parsed_units: &'a [ParsedUnit],
+) -> Result<bool> {
+    if parsed_units.iter().any(|u| !u.ir.semantic_edges.is_empty()) {
+        return Ok(true);
+    }
+    for path in removed_files.chain(parsed_units.iter().map(|u| &u.rel_path)) {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ir_semantic_edges WHERE file_path = ?1)",
+                [path],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if exists {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn split_symbol_query(query: &str) -> (Option<&str>, &str) {
     let trimmed = query.trim();
     if let Some((q, leaf)) = trimmed.rsplit_once("::") {
@@ -2421,7 +2500,6 @@ fn split_symbol_query(query: &str) -> (Option<&str>, &str) {
     (None, trimmed)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn symbol_matches_query(
     raw_query: &str,
     qualifier: Option<&str>,
@@ -3378,25 +3456,31 @@ fn matching_ast_type_refs<'a>(
         .collect()
 }
 
+fn decl_matches_hint(decl: &crate::graph_live::ExtractedDecl, hint: Option<&str>) -> bool {
+    let Some(hint) = hint else {
+        return false;
+    };
+    decl.entity.id == hint
+        || decl.entity.name == hint
+        || decl
+            .entity
+            .parent
+            .as_deref()
+            .is_some_and(|p| format!("{p}::{}", decl.entity.name) == hint)
+}
+
 fn resolve_source_symbol_for_line(
     ir: &AstFileExtraction,
     hint: Option<&str>,
     line: u32,
 ) -> Option<String> {
-    if let Some(hint) = hint.map(str::trim).filter(|s| !s.is_empty())
-        && let Some(found) = ir.declarations.iter().find(|d| {
-            d.entity.id == hint
-                || d.entity.name == hint
-                || d.entity
-                    .parent
-                    .as_deref()
-                    .is_some_and(|p| format!("{p}::{}", d.entity.name) == hint)
-        })
-        && line >= found.start_line
-        && line <= found.end_line
-    {
-        return Some(found.entity.id.clone());
-    }
+    let norm_hint = hint.map(str::trim).filter(|s| !s.is_empty());
+    let is_callable = |decl: &crate::graph_live::ExtractedDecl| {
+        matches!(
+            decl.entity.kind.as_str(),
+            "method" | "function" | "constructor"
+        )
+    };
     let mut best: Option<&crate::graph_live::ExtractedDecl> = None;
     for decl in &ir.declarations {
         if line >= decl.start_line && line <= decl.end_line {
@@ -3405,12 +3489,23 @@ fn resolve_source_symbol_for_line(
                 None => true,
                 Some(prev) => {
                     let prev_span = prev.end_line.saturating_sub(prev.start_line);
-                    span < prev_span
-                        || (span == prev_span
-                            && matches!(
-                                decl.entity.kind.as_str(),
-                                "method" | "function" | "constructor"
-                            ))
+                    if span != prev_span {
+                        span < prev_span
+                    } else {
+                        let decl_call = is_callable(decl);
+                        let prev_call = is_callable(prev);
+                        if decl_call != prev_call {
+                            decl_call
+                        } else {
+                            let decl_hint = decl_matches_hint(decl, norm_hint);
+                            let prev_hint = decl_matches_hint(prev, norm_hint);
+                            if decl_hint != prev_hint {
+                                decl_hint
+                            } else {
+                                decl.start_line > prev.start_line
+                            }
+                        }
+                    }
                 }
             };
             if replace {
@@ -3418,7 +3513,17 @@ fn resolve_source_symbol_for_line(
             }
         }
     }
-    best.map(|d| d.entity.id.clone())
+    if let Some(found) = best {
+        return Some(found.entity.id.clone());
+    }
+    norm_hint
+        .and_then(|h| {
+            ir.declarations.iter().find(|d| {
+                decl_matches_hint(d, Some(h))
+                    && (line == 0 || (line >= d.start_line && d.end_line == 0))
+            })
+        })
+        .map(|d| d.entity.id.clone())
 }
 
 fn recompute_summary(tx: &Transaction<'_>, now: &str, truncated: bool) -> Result<IrSummary> {
@@ -5327,6 +5432,109 @@ mod tests {
                 .contains(&"src/api.rs".to_owned()),
             "expected pre-removal caller src/api.rs in incoming_caller_files: {:?}",
             remove_delta.incoming_caller_files
+        );
+    }
+
+    #[test]
+    fn resolve_source_symbol_for_line_prefers_inner_method_over_outer_class_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/dep.ts"),
+            "export class Dep {\n    ping(): number { return 1; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/service.ts"),
+            "import { Dep } from './dep';\nexport class OuterService {\n    build(): Dep {\n        return new Dep();\n    }\n}\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "enclosing-method").unwrap();
+        let delta = store.sync_workspace_with_delta(&root).unwrap();
+        assert!(delta.edited_files.contains(&"src/service.ts".to_owned()));
+        assert!(delta.changed_paths.contains(&"tsconfig.json".to_owned()));
+
+        let conn = lock_conn(&store.conn).unwrap();
+        let edges: Vec<(Option<String>, Option<String>, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_symbol, target_symbol, relation
+                     FROM ir_edges
+                     WHERE source_file = 'src/service.ts' AND target_file = 'src/dep.ts'",
+                )
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert!(
+            edges.iter().any(|(src, _, rel)| {
+                rel == "calls" && src.as_deref().is_some_and(|s| s.ends_with(":build"))
+            }),
+            "expected constructor call inside OuterService.build to attribute to method `build`, got: {edges:?}"
+        );
+        assert!(
+            !edges.iter().any(|(src, _, rel)| {
+                rel == "calls" && src.as_deref().is_some_and(|s| s.ends_with(":OuterService"))
+            }),
+            "outer class hint must not clobber method-level attribution: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn sync_workspace_with_delta_reports_manifest_and_code_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            "{\"name\":\"app\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/dep.ts"), "export const x = 1;\n").unwrap();
+        std::fs::write(
+            root.join("src/use.ts"),
+            "import { x } from './dep';\nexport const y = x;\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "sync-delta").unwrap();
+        let first = store.sync_workspace_with_delta(&root).unwrap();
+        assert_eq!(first.edited_files.len(), 2);
+        assert!(first.manifest_changed);
+        assert!(first.changed_paths.contains(&"package.json".to_owned()));
+
+        let clean = store.sync_workspace_with_delta(&root).unwrap();
+        assert!(clean.changed_paths.is_empty());
+        assert!(!clean.manifest_changed);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("package.json"),
+            "{\"name\":\"app\",\"version\":\"1.0.1\"}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/dep.ts"), "export const x = 2;\n").unwrap();
+        let second = store.sync_workspace_with_delta(&root).unwrap();
+        assert!(second.manifest_changed);
+        assert!(second.changed_paths.contains(&"package.json".to_owned()));
+        assert!(second.edited_files.contains(&"src/dep.ts".to_owned()));
+        assert!(
+            second
+                .incoming_caller_files
+                .contains(&"src/use.ts".to_owned()),
+            "expected incoming caller src/use.ts: {:?}",
+            second.incoming_caller_files
         );
     }
 }

@@ -559,7 +559,7 @@ impl Maps {
         state: &Path,
         project: &str,
     ) -> Option<crate::graph_ir::IrSummary> {
-        crate::graph_ir::GraphIrStore::open_readonly(state, project)
+        crate::graph_ir::GraphIrStore::open_readonly_cached(state, project)
             .ok()
             .flatten()
             .and_then(|ir| ir.summary_counts().ok().flatten())
