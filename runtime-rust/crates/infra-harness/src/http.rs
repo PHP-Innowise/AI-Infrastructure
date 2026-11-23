@@ -906,7 +906,7 @@ pub const ROUTES: &[Route] = &[
         operation: "delivery.get",
         status: 200,
         token: false,
-        query: &[],
+        query: &["strict", "no_cache", "cache"],
     },
     Route {
         method: "GET",
@@ -1352,6 +1352,14 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/requalify",
         operation: "skillcache.requalify",
+        status: 202,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/recompile",
+        operation: "skillcache.recompile",
         status: 202,
         token: true,
         query: &[],
@@ -3198,6 +3206,10 @@ async fn serve(
         && matches!(&payload,Payload::Json(value)if value["current"]==true)
     {
         200
+    } else if route.operation == "skillcache.recompile"
+        && matches!(&payload, Payload::Json(value) if value["needs_trace"] == true || value["status"] == 409)
+    {
+        409
     } else {
         route.status
     };
@@ -3760,6 +3772,123 @@ mod tests {
         assert!(!matches_sse_filter(&status, Some("s-a"), Some("proj-b")));
         assert!(matches_sse_filter(&status, Some("s-b"), Some("proj-b")));
     }
+
+    #[tokio::test]
+    async fn skillcache_recompile_and_delivery_query_http_seams() {
+        struct SeamServices;
+        impl crate::services::Services for SeamServices {
+            fn request<'a>(
+                &'a self,
+                operation: &'a str,
+                request: Value,
+            ) -> crate::services::Reply<'a> {
+                Box::pin(async move {
+                    match operation {
+                        "skillcache.recompile" => {
+                            if request["params"]["capsule_id"] == "cap-needs-trace" {
+                                Ok(Payload::Json(json!({
+                                    "status": 409,
+                                    "code": "needs_trace",
+                                    "needs_trace": true,
+                                    "error": "Needs fresh trace"
+                                })))
+                            } else {
+                                Ok(Payload::Json(
+                                    json!({"queued": true, "compile_id": "cmp-1"}),
+                                ))
+                            }
+                        }
+                        "delivery.get" => Ok(Payload::Json(json!({"query": request["query"]}))),
+                        _ => Ok(Payload::Json(json!({}))),
+                    }
+                })
+            }
+
+            fn close<'a>(&'a self) -> crate::services::CloseFuture<'a> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let mut app = test_http_app(8766);
+        app.services = Arc::new(SeamServices);
+
+        let no_token = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-1/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, 2)
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            handle(State(app.clone()), no_token).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let needs_trace_body = br#"{"compiler":{"provider":"codex"}}"#;
+        let needs_trace_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-needs-trace/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header("x-harness-token", "test-csrf-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, needs_trace_body.len())
+            .body(Body::from(needs_trace_body.as_slice()))
+            .unwrap();
+        let needs_trace_resp = handle(State(app.clone()), needs_trace_req).await;
+        assert_eq!(needs_trace_resp.status(), StatusCode::CONFLICT);
+        let needs_trace_body: Value = serde_json::from_slice(
+            &to_bytes(needs_trace_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(needs_trace_body["needs_trace"], true);
+        assert_eq!(needs_trace_body["code"], "needs_trace");
+
+        let queued_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-ok/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header("x-harness-token", "test-csrf-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, 2)
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            handle(State(app.clone()), queued_req).await.status(),
+            StatusCode::ACCEPTED
+        );
+
+        let delivery_req = Request::builder()
+            .method("GET")
+            .uri("/api/sessions/s1/delivery?strict=true&no_cache=true&cache=false")
+            .header(header::HOST, "127.0.0.1:8766")
+            .body(Body::empty())
+            .unwrap();
+        let delivery_resp = handle(State(app.clone()), delivery_req).await;
+        assert_eq!(delivery_resp.status(), StatusCode::OK);
+        let delivery_body: Value = serde_json::from_slice(
+            &to_bytes(delivery_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(delivery_body["query"]["strict"], "true");
+        assert_eq!(delivery_body["query"]["no_cache"], "true");
+        assert_eq!(delivery_body["query"]["cache"], "false");
+
+        let bad_delivery = Request::builder()
+            .method("GET")
+            .uri("/api/sessions/s1/delivery?unknown=1")
+            .header(header::HOST, "127.0.0.1:8766")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            handle(State(app), bad_delivery).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3780,6 +3909,7 @@ mod skillcache_route_tests {
             ("skillcache.get", "GET", false, 200),
             ("skillcache.compile", "POST", true, 202),
             ("skillcache.requalify", "POST", true, 202),
+            ("skillcache.recompile", "POST", true, 202),
             ("skillcache.invalidate", "POST", true, 200),
             ("skillcache.retire", "POST", true, 200),
             ("skillcache.delete", "DELETE", true, 200),
