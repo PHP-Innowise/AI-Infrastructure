@@ -514,31 +514,33 @@ pub(super) fn render_canvas_bundle_with_layout(
         contract_arrow_defs_svg(surface.id_prefix),
     );
 
-    // Architectural tier bands in Layers mode
-    for (tier_label, bx, bw, bh) in &layout.tier_bands {
-        let band_h = (bh - MARGIN + 12.0).max(120.0);
-        html.push_str(&format!(
-            "<g class=\"system-tier-band\"><rect class=\"graph-map-arch-band system-arch-band\" x=\"{bx:.1}\" y=\"{:.1}\" width=\"{bw:.1}\" height=\"{band_h:.1}\" rx=\"8\"/><text class=\"system-arch-label\" x=\"{:.1}\" y=\"{:.1}\">{}</text></g>",
-            MARGIN - 4.0,
-            bx + 10.0,
-            MARGIN + 14.0,
-            escape(tier_label),
-        ));
-    }
+    if !is_dense {
+        // Architectural tier bands in Layers mode (Canvas2D paints these via meta.containers in dense mode)
+        for (tier_label, bx, bw, bh) in &layout.tier_bands {
+            let band_h = (bh - MARGIN + 12.0).max(120.0);
+            html.push_str(&format!(
+                "<g class=\"system-tier-band\"><rect class=\"graph-map-arch-band system-arch-band\" x=\"{bx:.1}\" y=\"{:.1}\" width=\"{bw:.1}\" height=\"{band_h:.1}\" rx=\"8\"/><text class=\"system-arch-label\" x=\"{:.1}\" y=\"{:.1}\">{}</text></g>",
+                MARGIN - 4.0,
+                bx + 10.0,
+                MARGIN + 14.0,
+                escape(tier_label),
+            ));
+        }
 
-    // Unfolded service frames
-    for frame in &layout.frames {
-        html.push_str(&format!(
-            "<g class=\"system-service-frame\" data-of=\"{}\"><rect class=\"graph-map-frame system-frame-rect\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"10\"/><text class=\"system-frame-title\" x=\"{:.1}\" y=\"{:.1}\">{}</text></g>",
-            escape(&frame.service_id),
-            frame.x,
-            frame.y,
-            frame.w,
-            frame.h,
-            frame.x + 12.0,
-            frame.y + 18.0,
-            escape(&frame.title),
-        ));
+        // Unfolded service frames
+        for frame in &layout.frames {
+            html.push_str(&format!(
+                "<g class=\"system-service-frame\" data-of=\"{}\"><rect class=\"graph-map-frame system-frame-rect\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"10\"/><text class=\"system-frame-title\" x=\"{:.1}\" y=\"{:.1}\">{}</text></g>",
+                escape(&frame.service_id),
+                frame.x,
+                frame.y,
+                frame.w,
+                frame.h,
+                frame.x + 12.0,
+                frame.y + 18.0,
+                escape(&frame.title),
+            ));
+        }
     }
 
     let hidden_kinds = hidden_contract_kinds(state);
@@ -1569,10 +1571,15 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
     let hidden_kinds = hidden_contract_kinds(state);
     let (_, layer_violations) = assign_service_layers(doc);
     let violation_set: BTreeSet<(String, String)> = layer_violations.into_iter().collect();
+    let doc_nodes = m::array(&doc["nodes"]);
+    let mut node_by_id: BTreeMap<String, &V> = BTreeMap::new();
     let mut name_by_id: HashMap<String, String> = HashMap::new();
-    for node in m::array(&doc["nodes"]) {
-        let id = node_id(&node);
-        let name = m::text(&node, "name");
+    for node in &doc_nodes {
+        let id = node_id(node);
+        if !id.is_empty() {
+            node_by_id.insert(id.clone(), node);
+        }
+        let name = m::text(node, "name");
         if !id.is_empty() && !name.is_empty() {
             name_by_id.insert(id, name);
         }
@@ -1580,6 +1587,32 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
     let node_ids: Vec<String> = layout.nodes.iter().map(|n| n.id.clone()).collect();
     let mut node_index_by_id: HashMap<&str, usize> = HashMap::with_capacity(node_ids.len());
     let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
+    meta.containers
+        .reserve(layout.tier_bands.len() + layout.frames.len());
+    for (tier_label, bx, bw, bh) in &layout.tier_bands {
+        meta.containers
+            .push(graph_viewport::canvas2d::DenseContainerSpec {
+                kind: graph_viewport::canvas2d::DenseContainerKind::TierBand,
+                x: *bx,
+                y: MARGIN - 4.0,
+                w: *bw,
+                h: (bh - MARGIN + 12.0).max(120.0),
+                radius: 8.0,
+                label: tier_label.clone(),
+            });
+    }
+    for frame in &layout.frames {
+        meta.containers
+            .push(graph_viewport::canvas2d::DenseContainerSpec {
+                kind: graph_viewport::canvas2d::DenseContainerKind::ServiceFrame,
+                x: frame.x,
+                y: frame.y,
+                w: frame.w,
+                h: frame.h,
+                radius: 10.0,
+                label: frame.title.clone(),
+            });
+    }
     let nodes = layout
         .nodes
         .iter()
@@ -1590,22 +1623,27 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
                 .get(&n.id)
                 .cloned()
                 .unwrap_or_else(|| n.id.clone());
-            let svc_id = n.child_of.as_deref().unwrap_or(&n.id);
+            let svc_id = endpoint_service_id(&n.id, Some(&node_by_id))
+                .or_else(|| n.child_of.clone())
+                .unwrap_or_else(|| n.id.clone());
+            let node_services: Vec<String> = endpoint_service_id(&n.id, Some(&node_by_id))
+                .into_iter()
+                .collect();
+            let node_kind = n.child_of.as_deref().map_or("service", |_| "contract");
             meta.nodes.insert(
                 i,
                 graph_viewport::canvas2d::DenseNodeMeta {
                     explain_kind: "node".to_owned(),
                     explain_payload: json!({
                         "id": n.id,
+                        "path": n.id,
                         "service": svc_id,
+                        "services": node_services,
                         "name": label,
                         "label": label,
+                        "kind": node_kind,
                     }),
-                    symbol_kind: n
-                        .child_of
-                        .as_deref()
-                        .map_or("service", |_| "contract")
-                        .to_owned(),
+                    symbol_kind: node_kind.to_owned(),
                     tooltip: format!("{label} — double-click to open service code map"),
                     ..Default::default()
                 },
@@ -1650,6 +1688,12 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
             if !kind_hidden {
                 let from_idx = node_index_by_id.get(from.as_str()).copied();
                 let to_idx = node_index_by_id.get(to.as_str()).copied();
+                let edge_services: Vec<String> =
+                    explain_services_for_endpoints(&from, &to, Some(&node_by_id))
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
                 meta.edges.insert(
                     i,
                     graph_viewport::canvas2d::DenseEdgeMeta {
@@ -1658,6 +1702,10 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
                             "from": from,
                             "to": to,
                             "kind": kind,
+                            "services": edge_services,
+                            "provenance": prov,
+                            "broken_risk": broken,
+                            "against": against,
                         }),
                         from_index: from_idx,
                         to_index: to_idx,

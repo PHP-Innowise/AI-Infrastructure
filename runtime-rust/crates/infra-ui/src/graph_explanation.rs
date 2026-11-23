@@ -310,6 +310,99 @@ fn parse_hit_payload(hit: &Element) -> Option<V> {
     None
 }
 
+fn normalize_explain_service_id(raw: &str) -> Option<String> {
+    let head = raw.trim().split("::").next().map(str::trim).unwrap_or("");
+    if head.is_empty() || head == "__system__" || head.starts_with("__unmatched__:") {
+        None
+    } else {
+        Some(head.to_owned())
+    }
+}
+
+fn push_unique_service(out: &mut Vec<String>, candidate: Option<String>) {
+    if let Some(svc) = candidate {
+        if !out.iter().any(|existing| existing == &svc) {
+            out.push(svc);
+        }
+    }
+}
+
+fn resolve_system_explain_services(
+    canvas_id: &str,
+    explicit_services: &[String],
+    data: &V,
+    scope: Option<&GraphTargetScope>,
+    fallback_services: &[String],
+) -> Vec<String> {
+    if !explicit_services.is_empty() {
+        return explicit_services.to_vec();
+    }
+    let is_topology_canvas = matches!(
+        canvas_id,
+        "system-map-canvas" | "system-change-topology-canvas"
+    );
+    let is_system_embedded_canvas = matches!(
+        canvas_id,
+        "system-member-graph-canvas" | "system-change-graph-canvas"
+    );
+    let scope_service_id = match scope {
+        Some(GraphTargetScope::SystemService { service_id, .. }) => {
+            normalize_explain_service_id(service_id)
+        }
+        _ => None,
+    };
+
+    if is_topology_canvas {
+        let mut resolved = Vec::new();
+        if let Some(arr) = data["services"].as_array() {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    push_unique_service(&mut resolved, normalize_explain_service_id(s));
+                }
+            }
+        }
+        if resolved.is_empty() {
+            for key in ["service", "from", "to", "id", "path"] {
+                if let Some(s) = data[key].as_str() {
+                    push_unique_service(&mut resolved, normalize_explain_service_id(s));
+                }
+            }
+            if let Some(s) = data.as_str() {
+                push_unique_service(&mut resolved, normalize_explain_service_id(s));
+            }
+        }
+        if !resolved.is_empty() {
+            return resolved;
+        }
+        for svc in fallback_services {
+            push_unique_service(&mut resolved, normalize_explain_service_id(svc));
+        }
+        if !resolved.is_empty() {
+            return resolved;
+        }
+        return scope_service_id.into_iter().collect();
+    }
+
+    if is_system_embedded_canvas {
+        if let Some(sid) = scope_service_id {
+            return vec![sid];
+        }
+        if let Some(sid) = data["service"]
+            .as_str()
+            .and_then(normalize_explain_service_id)
+        {
+            return vec![sid];
+        }
+        let mut resolved = Vec::new();
+        for svc in fallback_services {
+            push_unique_service(&mut resolved, normalize_explain_service_id(svc));
+        }
+        return resolved;
+    }
+
+    Vec::new()
+}
+
 fn resolve_system_explain_meta(
     canvas_id: &str,
     hit: &Element,
@@ -329,15 +422,31 @@ fn resolve_system_explain_meta(
     if let Some(GraphTargetScope::SystemService {
         project_id,
         config_path,
-        service_id,
+        services: scope_services,
         ..
     }) = scope
     {
-        let services = if !explicit_services.is_empty() {
-            explicit_services
-        } else {
-            vec![service_id.clone()]
-        };
+        let mut services = resolve_system_explain_services(
+            canvas_id,
+            &explicit_services,
+            data,
+            scope,
+            scope_services,
+        );
+        if services.is_empty() {
+            let stored = m::data(SYSTEM_CONTEXT);
+            let stored_svcs: Vec<String> = m::array(&stored["services"])
+                .into_iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            services = resolve_system_explain_services(
+                canvas_id,
+                &explicit_services,
+                data,
+                scope,
+                &stored_svcs,
+            );
+        }
         return Some(json!({
             "project_id": project_id,
             "config_path": config_path,
@@ -361,27 +470,17 @@ fn resolve_system_explain_meta(
     let dom_sys_cfg = dom::value("system-config");
     let config_path = first_non_empty([stored_cfg.as_str(), dom_sys_cfg.as_str()]);
 
-    let mut services = explicit_services;
-    if services.is_empty() {
-        for key in ["service", "from", "to"] {
-            if let Some(svc) = data[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                if !services.iter().any(|existing| existing == svc) {
-                    services.push(svc.to_owned());
-                }
-            }
-        }
-    }
-    if services.is_empty() {
-        services = m::array(&stored["services"])
-            .into_iter()
-            .filter_map(|v| {
-                v.as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-            })
-            .collect();
-    }
+    let stored_svcs: Vec<String> = m::array(&stored["services"])
+        .into_iter()
+        .filter_map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    let services =
+        resolve_system_explain_services(canvas_id, &explicit_services, data, scope, &stored_svcs);
     Some(json!({
         "project_id": project_id,
         "config_path": config_path,
@@ -797,13 +896,23 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
     let (view, map, scope_opt) = resolve_surface_view_and_scope(&canvas_id);
     let system_explain =
         resolve_system_explain_meta(&canvas_id, &dom_ctx, &data, scope_opt.as_ref());
+    let is_topology_canvas = matches!(
+        canvas_id.as_str(),
+        "system-map-canvas" | "system-change-topology-canvas"
+    );
 
-    let node_key = data.as_str().or(data["path"].as_str()).unwrap_or("");
+    let node_key = data
+        .as_str()
+        .or(data["path"].as_str())
+        .or(data["id"].as_str())
+        .unwrap_or("");
     let matched_node = (!is_omnigraph && !is_commit_graph && !link && !node_key.is_empty())
         .then(|| {
-            view["nodes"]
-                .as_array()
-                .and_then(|nodes| nodes.iter().find(|node| node["path"] == node_key))
+            view["nodes"].as_array().and_then(|nodes| {
+                nodes
+                    .iter()
+                    .find(|node| node["path"] == node_key || node["id"] == node_key)
+            })
         })
         .flatten();
     let mut subject = if link {
@@ -815,6 +924,21 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
         }
     } else if let Some(title) = hit_opt.as_ref().and_then(|hit| hit.get_attribute("title")) {
         title
+    } else if is_topology_canvas {
+        if let Some(node) = matched_node {
+            let name = node["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&label);
+            let kind = node["kind"].as_str().filter(|s| !s.is_empty());
+            if let Some(k) = kind {
+                format!("{name} ({k})")
+            } else {
+                name.to_owned()
+            }
+        } else {
+            label.clone()
+        }
     } else if let Some(node) = matched_node {
         format_node_explain_subject(node, &view, &label)
     } else {
@@ -891,6 +1015,46 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             "aggregate": false,
             "graph_evidence": commit_evidence,
         })
+    } else if is_topology_canvas {
+        let key = node_key;
+        let mut context = json!({
+            "canvas": canvas_id,
+            "project": system_explain
+                .as_ref()
+                .and_then(|s| s["project_id"].as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| scope_opt.as_ref().map_or("", GraphTargetScope::project_id)),
+            "config_path": system_explain
+                .as_ref()
+                .map(|s| s["config_path"].clone())
+                .unwrap_or(V::Null),
+            "target": view["target"],
+            "run_id": match scope_opt.as_ref() {
+                Some(GraphTargetScope::SystemService { run_id: Some(rid), .. }) => json!(rid),
+                _ => view["run_id"].clone(),
+            },
+            "certain": view["certain"],
+        });
+        if let Some(target_str) = context["run_id"]
+            .as_str()
+            .filter(|rid| !rid.trim().is_empty())
+            .map(|rid| format!("sysrun:{rid}"))
+        {
+            if context["target"].is_null() || m::text(&context, "target").is_empty() {
+                context["target"] = json!(target_str);
+            }
+        }
+        let local_ev = system_topology_selection_evidence(&view, matched_node, &data, key, link);
+        json!({
+            "kind": if link { "link" } else { "node" },
+            "subject": subject,
+            "label": label,
+            "data": data,
+            "context": context,
+            "file": V::Null,
+            "aggregate": false,
+            "graph_evidence": local_ev,
+        })
     } else {
         let key = node_key;
         let node = matched_node;
@@ -911,19 +1075,32 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
         let visibility = node
             .and_then(|n| n["visibility"].as_str())
             .filter(|s| !s.is_empty());
-        let aggregate = node.is_some_and(|node| m::yes(&node["layer"]) || m::yes(&node["module"]));
+        let agg_kind = aggregate_kind_for_selection(&view, node, key, &data, link);
+        let aggregate = !agg_kind.is_empty();
+        let mut context = graph_selection(&view, &map);
+        context["canvas"] = json!(canvas_id);
+        context["mode"] = view["mode"].clone();
+        context["view_scope"] = view["scope"].clone();
+        context["lod"] = view["lod"].clone();
+        context["pattern"] = view["pattern"].clone();
+        context["pattern_sort"] = view["pattern_sort"].clone();
+        context["cycle"] = view["cycle"].clone();
+        context["modules"] = view["modules"].clone();
+        context["aggregate_kind"] = json!(agg_kind);
+        let local_evidence =
+            code_selection_local_evidence(&view, node, key, &agg_kind, &data, link);
         json!({
             "kind": if link { "link" } else { "node" },
             "subject": subject,
             "label": label,
             "data": data,
-            "context": graph_selection(&view, &map),
+            "context": context,
             "file": file,
             "line": line,
             "symbol_kind": symbol_kind,
             "visibility": visibility,
             "aggregate": aggregate,
-            "graph_evidence": if link { V::Null } else { visible_neighbors(&view, key) },
+            "graph_evidence": local_evidence,
         })
     };
     if let Some(sys) = system_explain.as_ref() {
@@ -1215,57 +1392,331 @@ fn link_evidence(view: &V) -> V {
     json!({"pairs": pairs, "links": count, "omitted": count.saturating_sub(pairs.len() as u64)})
 }
 
-async fn add_evidence(selection: &mut V, scope: &GraphTargetScope) {
-    if scope.is_empty() {
-        return;
+fn aggregate_kind_for_selection(
+    view: &V,
+    node: Option<&V>,
+    key: &str,
+    data: &V,
+    link: bool,
+) -> String {
+    let view_mode = view["mode"].as_str().unwrap_or("");
+    let view_lod = view["lod"].as_str().unwrap_or("");
+    if node.is_some_and(|n| m::yes(&n["layer"]))
+        || view_mode == "layers"
+        || key.starts_with("layer:")
+        || (link
+            && (data["from"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("layer:"))
+                || data["to"].as_str().is_some_and(|s| s.starts_with("layer:"))))
+    {
+        return "layer".to_owned();
     }
-    let canvas = selection["context"]["canvas"]
-        .as_str()
-        .unwrap_or("")
-        .to_owned();
-    if canvas == "graph-commit-graph-list" {
-        let target = m::text(&selection["context"], "target");
-        if target.is_empty() {
-            return;
-        }
-        let path = graph_map::build_scoped_changes_path(scope, &target, "", false);
-        let Ok(changes) = api::get(&path).await else {
-            return;
-        };
-        let files = rows(&changes, "files")
+    if node.is_some_and(|n| m::yes(&n["module"]))
+        || m::yes(&view["modules"])
+        || key.starts_with("module:")
+        || (link
+            && (data["from"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("module:"))
+                || data["to"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("module:"))))
+    {
+        return "module".to_owned();
+    }
+    if matches!(view_lod, "crate" | "folder") {
+        return view_lod.to_owned();
+    }
+    if node.is_some_and(|n| m::yes(&n["crate"])) {
+        return "crate".to_owned();
+    }
+    if node.is_some_and(|n| m::yes(&n["folder"])) {
+        return "folder".to_owned();
+    }
+    String::new()
+}
+
+fn system_topology_selection_evidence(
+    view: &V,
+    matched_node: Option<&V>,
+    data: &V,
+    key: &str,
+    link: bool,
+) -> V {
+    let edges = rows(view, "edges");
+    if link {
+        let from = m::text(data, "from");
+        let to = m::text(data, "to");
+        let matching: Vec<V> = edges
             .iter()
+            .filter(|e| e["from"].as_str() == Some(&from) && e["to"].as_str() == Some(&to))
             .take(LIMIT)
-            .map(|f| {
+            .map(|e| {
                 json!({
-                    "path": f["path"],
-                    "previous_path": f["previous_path"],
-                    "status": f["status"],
+                    "from": e["from"],
+                    "to": e["to"],
+                    "kinds": e["kinds"],
+                    "provenance": e["provenance"],
+                    "broken_risk": e["broken_risk"],
+                    "against": e["against"],
+                    "contracts": e["contracts"],
                 })
             })
-            .collect::<Vec<_>>();
-        let total_files = changes["total_files"]
-            .as_u64()
-            .unwrap_or_else(|| rows(&changes, "files").len() as u64);
-        let risk_callers = rows(&changes["edge_diffs"], "risk_callers")
+            .collect();
+        return json!({
+            "scope": "system_topology_link",
+            "from": from,
+            "to": to,
+            "kind": data["kind"],
+            "services": data["services"],
+            "provenance": data["provenance"],
+            "broken_risk": data["broken_risk"],
+            "against": data["against"],
+            "matching_edges": matching,
+        });
+    }
+    let node_summary = matched_node.map(|n| {
+        json!({
+            "id": n["id"],
+            "name": n["name"],
+            "kind": n["kind"],
+            "role": n["role"],
+            "layer": n["layer"],
+            "language": n["language"],
+            "child_of": n["child_of"],
+            "changed": n["changed"],
+            "broken_risk": n["broken_risk"],
+        })
+    });
+    let outgoing: Vec<V> = edges
+        .iter()
+        .filter(|e| e["from"].as_str() == Some(key))
+        .take(LIMIT)
+        .map(|e| {
+            json!({
+                "to": e["to"],
+                "kinds": e["kinds"],
+                "provenance": e["provenance"],
+                "broken_risk": e["broken_risk"],
+                "against": e["against"],
+            })
+        })
+        .collect();
+    let incoming: Vec<V> = edges
+        .iter()
+        .filter(|e| e["to"].as_str() == Some(key))
+        .take(LIMIT)
+        .map(|e| {
+            json!({
+                "from": e["from"],
+                "kinds": e["kinds"],
+                "provenance": e["provenance"],
+                "broken_risk": e["broken_risk"],
+                "against": e["against"],
+            })
+        })
+        .collect();
+    json!({
+        "scope": "system_topology_node",
+        "node": node_summary,
+        "services": data["services"],
+        "outgoing": outgoing,
+        "incoming": incoming,
+    })
+}
+
+fn code_selection_local_evidence(
+    view: &V,
+    node: Option<&V>,
+    key: &str,
+    agg_kind: &str,
+    data: &V,
+    link: bool,
+) -> V {
+    if link {
+        let (from, to) = (m::text(data, "from"), m::text(data, "to"));
+        let matching: Vec<V> = rows(view, "edges")
             .iter()
+            .filter(|e| e["from"].as_str() == Some(&from) && e["to"].as_str() == Some(&to))
             .take(LIMIT)
             .cloned()
-            .collect::<Vec<_>>();
-        selection["graph_evidence"]["changes"] = json!({
-            "total_files": total_files,
-            "created_files": changes["created_files"],
-            "modified_files": changes["modified_files"],
-            "deleted_files": changes["deleted_files"],
-            "renamed_files": changes["renamed_files"],
-            "files": files,
-            "omitted_files": total_files.saturating_sub(files.len() as u64),
-            "risk_callers": risk_callers,
+            .collect();
+        let has_diff = view["explanation_base"].is_string() || view["changes"].is_object();
+        if matching.is_empty() && agg_kind.is_empty() && !has_diff {
+            return V::Null;
+        }
+        return json!({
+            "scope": if !agg_kind.is_empty() {
+                format!("visible {agg_kind} link")
+            } else {
+                "visible map link".to_owned()
+            },
+            "from": from,
+            "to": to,
+            "matching_edges": matching,
         });
-        return;
     }
+    let mut ev = visible_neighbors(view, key);
+    if !ev.is_object() {
+        ev = json!({});
+    }
+    if !agg_kind.is_empty() {
+        ev["scope"] = json!(format!("visible {agg_kind} aggregate"));
+        if let Some(n) = node {
+            ev["node"] = json!({
+                "path": n["path"],
+                "name": n["name"],
+                "kind": n["kind"],
+                "role": n["role"],
+                "files": n["files"],
+                "lines": n["lines"],
+                "symbols": n["symbols"],
+                "cycles": n["cycles"],
+            });
+        }
+    }
+    if let Some(n) = node {
+        let diff_status = n["diff_status"]
+            .as_str()
+            .or_else(|| n["status"].as_str())
+            .filter(|s| !s.is_empty());
+        if diff_status.is_some() || m::yes(&n["changed"]) || view["explanation_base"].is_string() {
+            ev["diff_node"] = json!({
+                "status": diff_status,
+                "changed": n["changed"],
+                "added": n["added"],
+                "removed": n["removed"],
+                "modified": n["modified"],
+                "base": view["explanation_base"],
+            });
+        }
+    }
+    ev
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EvidenceFetchKind {
+    CommitChanges,
+    OmnigraphCodeFocus {
+        file_path: String,
+    },
+    SystemTopologyBridge {
+        from: String,
+        to: String,
+    },
+    SystemTopologyImpact {
+        service: String,
+    },
+    SystemTopologyChanges {
+        focus_key: String,
+        is_link: bool,
+        from: String,
+        to: String,
+    },
+    LayerFocus {
+        focus_key: String,
+    },
+    LayerLink {
+        from: String,
+        to: String,
+    },
+    ModuleFocus {
+        focus_key: String,
+    },
+    ModuleLink {
+        from: String,
+        to: String,
+    },
+    AggregateLodFocus {
+        focus_key: String,
+        lod: String,
+    },
+    AggregateLodLink {
+        from: String,
+        to: String,
+        lod: String,
+    },
+    CodeFocus {
+        focus_key: String,
+    },
+    CodeLink,
+    DiffCycle {
+        cycle: String,
+    },
+    DiffChanges {
+        focus_key: String,
+        is_link: bool,
+        from: String,
+        to: String,
+    },
+}
+
+fn encode_query_params(params: &[(&str, String)]) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        dom::query(params)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let enc = |val: &str| -> String {
+            let mut out = String::new();
+            for b in val.as_bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(*b as char);
+                    }
+                    _ => out.push_str(&format!("%{b:02X}")),
+                }
+            }
+            out
+        };
+        let parts: Vec<String> = params
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        }
+    }
+}
+
+fn context_without_base(context: &V) -> V {
+    let mut cloned = context.clone();
+    if let Some(obj) = cloned.as_object_mut() {
+        obj.insert("base".to_owned(), V::Null);
+    }
+    cloned
+}
+
+fn plan_evidence_requests(
+    selection: &V,
+    scope: &GraphTargetScope,
+) -> Vec<(EvidenceFetchKind, String)> {
+    if scope.is_empty() {
+        return Vec::new();
+    }
+    let context = &selection["context"];
+    let data = &selection["data"];
+    let canvas = m::text(context, "canvas");
+
+    if canvas == "graph-commit-graph-list" {
+        let target = m::text(context, "target");
+        if target.is_empty() {
+            return Vec::new();
+        }
+        return vec![(
+            EvidenceFetchKind::CommitChanges,
+            graph_map::build_scoped_changes_path(scope, &target, "", false),
+        )];
+    }
+
     if canvas == "omnigraph-canvas" {
         if selection["kind"] != "node" {
-            return;
+            return Vec::new();
         }
         let Some(file_path) = selection["file"]
             .as_str()
@@ -1273,80 +1724,835 @@ async fn add_evidence(selection: &mut V, scope: &GraphTargetScope) {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
         else {
-            return;
+            return Vec::new();
         };
         let scope_dir = file_path.rsplit_once('/').map_or("", |(parent, _)| parent);
-        let request = graph_map::build_scoped_graph_request(
+        let req = graph_map::build_scoped_graph_request(
             scope,
             vec![
                 ("scope", scope_dir.to_owned()),
                 ("focus", file_path.clone()),
             ],
-            &selection["context"],
+            context,
         );
-        if let Ok(view) = api::get(&request).await {
-            if !m::yes(&view["preliminary"]) && view["focus"]["path"].as_str() == Some(&file_path) {
-                let focus = &view["focus"];
+        return vec![(EvidenceFetchKind::OmnigraphCodeFocus { file_path }, req)];
+    }
+
+    let link = selection["kind"] == "link";
+
+    if matches!(
+        canvas.as_str(),
+        "system-map-canvas" | "system-change-topology-canvas"
+    ) {
+        let (pid, cfg, run_id) = match scope {
+            GraphTargetScope::SystemService {
+                project_id,
+                config_path,
+                run_id,
+                ..
+            } => (
+                project_id.clone(),
+                config_path.clone(),
+                run_id.clone().unwrap_or_else(|| m::text(context, "run_id")),
+            ),
+            _ => (
+                first_non_empty([m::text(context, "project").as_str(), scope.project_id()]),
+                m::text(context, "config_path"),
+                m::text(context, "run_id"),
+            ),
+        };
+        if pid.is_empty() {
+            return Vec::new();
+        }
+        let raw_target = m::text(context, "target");
+        let target = if !raw_target.is_empty() {
+            raw_target
+        } else if !run_id.is_empty() {
+            format!("sysrun:{run_id}")
+        } else if canvas == "system-change-topology-canvas" {
+            "work".to_owned()
+        } else {
+            String::new()
+        };
+        let certain = if m::yes(&context["certain"]) {
+            "1".to_owned()
+        } else {
+            String::new()
+        };
+        let mut plan = Vec::new();
+        let focus_key = data
+            .as_str()
+            .or(data["path"].as_str())
+            .or(data["id"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        if link {
+            let from = m::text(data, "from");
+            let to = m::text(data, "to");
+            if !from.is_empty() && !to.is_empty() {
+                let q = encode_query_params(&[
+                    ("project_id", pid.clone()),
+                    ("config_path", cfg.clone()),
+                    ("from", from.clone()),
+                    ("to", to.clone()),
+                    ("target", target.clone()),
+                    ("run_id", run_id.clone()),
+                    ("certain", certain),
+                ]);
+                plan.push((
+                    EvidenceFetchKind::SystemTopologyBridge {
+                        from: from.clone(),
+                        to: to.clone(),
+                    },
+                    format!("/api/systems/graph/bridge{q}"),
+                ));
+            }
+        } else {
+            let service = data["service"]
+                .as_str()
+                .and_then(normalize_explain_service_id)
+                .or_else(|| {
+                    selection["system_services"]
+                        .as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                        .and_then(normalize_explain_service_id)
+                })
+                .or_else(|| normalize_explain_service_id(&focus_key))
+                .unwrap_or_default();
+            let contract = if data["kind"].as_str() == Some("contract") || focus_key.contains("::")
+            {
+                focus_key.clone()
+            } else {
+                String::new()
+            };
+            if !service.is_empty() {
+                let q = encode_query_params(&[
+                    ("project_id", pid.clone()),
+                    ("config_path", cfg.clone()),
+                    ("service", service.clone()),
+                    ("contract", contract),
+                    ("run_id", run_id.clone()),
+                ]);
+                plan.push((
+                    EvidenceFetchKind::SystemTopologyImpact {
+                        service: service.clone(),
+                    },
+                    format!("/api/systems/graph/impact{q}"),
+                ));
+            }
+        }
+        if canvas == "system-change-topology-canvas" || !run_id.is_empty() || !target.is_empty() {
+            let svc_filter = if link {
+                String::new()
+            } else {
+                normalize_explain_service_id(&focus_key)
+                    .or_else(|| {
+                        data["service"]
+                            .as_str()
+                            .and_then(normalize_explain_service_id)
+                    })
+                    .unwrap_or_default()
+            };
+            let q = encode_query_params(&[
+                ("project_id", pid),
+                ("config_path", cfg),
+                ("target", target),
+                ("run_id", run_id),
+                ("service", svc_filter),
+            ]);
+            plan.push((
+                EvidenceFetchKind::SystemTopologyChanges {
+                    focus_key,
+                    is_link: link,
+                    from: m::text(data, "from"),
+                    to: m::text(data, "to"),
+                },
+                format!("/api/systems/graph/changes{q}"),
+            ));
+        }
+        return plan;
+    }
+
+    let mut plan = Vec::new();
+    let view_scope = m::text(context, "view_scope");
+    let lod = m::text(context, "lod");
+    let pattern = m::text(context, "pattern");
+    let non_diff_context = context_without_base(context);
+
+    let key = data
+        .as_str()
+        .or(data["path"].as_str())
+        .or(data["id"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    let from = m::text(data, "from");
+    let to = m::text(data, "to");
+    let agg_kind = {
+        let explicit = m::text(context, "aggregate_kind");
+        if !explicit.is_empty() {
+            explicit
+        } else if key.starts_with("layer:")
+            || from.starts_with("layer:")
+            || to.starts_with("layer:")
+        {
+            "layer".to_owned()
+        } else if key.starts_with("module:")
+            || from.starts_with("module:")
+            || to.starts_with("module:")
+            || m::yes(&context["modules"])
+        {
+            "module".to_owned()
+        } else if matches!(lod.as_str(), "crate" | "folder") {
+            lod.clone()
+        } else {
+            String::new()
+        }
+    };
+
+    if link {
+        if from.is_empty() || to.is_empty() {
+            return plan;
+        }
+        match agg_kind.as_str() {
+            "layer" => {
+                let eff_pat = if pattern.starts_with("layers") {
+                    pattern.clone()
+                } else if view_scope.is_empty() {
+                    "layers".to_owned()
+                } else {
+                    format!("layers@{view_scope}")
+                };
+                let focus = format!("{from}>{to}");
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("scope", view_scope.clone()),
+                        ("pattern", eff_pat),
+                        ("focus", focus),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::LayerLink {
+                        from: from.clone(),
+                        to: to.clone(),
+                    },
+                    req,
+                ));
+            }
+            "module" => {
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("scope", view_scope.clone()),
+                        ("modules", "1".to_owned()),
+                        ("focus", from.clone()),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::ModuleLink {
+                        from: from.clone(),
+                        to: to.clone(),
+                    },
+                    req,
+                ));
+            }
+            "crate" | "folder" => {
+                let eff_lod = if lod.is_empty() {
+                    agg_kind.clone()
+                } else {
+                    lod.clone()
+                };
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("lod", eff_lod.clone()),
+                        ("scope", view_scope.clone()),
+                        ("focus", from.clone()),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::AggregateLodLink {
+                        from: from.clone(),
+                        to: to.clone(),
+                        lod: eff_lod,
+                    },
+                    req,
+                ));
+            }
+            _ => {
+                plan.push((
+                    EvidenceFetchKind::CodeLink,
+                    graph_map::build_scoped_link_request(scope, &from, &to, context),
+                ));
+            }
+        }
+    } else if !key.is_empty() {
+        match agg_kind.as_str() {
+            "layer" => {
+                let eff_pat = if pattern.starts_with("layers") {
+                    pattern.clone()
+                } else if view_scope.is_empty() {
+                    "layers".to_owned()
+                } else {
+                    format!("layers@{view_scope}")
+                };
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("scope", view_scope.clone()),
+                        ("pattern", eff_pat),
+                        ("focus", key.clone()),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::LayerFocus {
+                        focus_key: key.clone(),
+                    },
+                    req,
+                ));
+            }
+            "module" => {
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("scope", view_scope.clone()),
+                        ("modules", "1".to_owned()),
+                        ("focus", key.clone()),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::ModuleFocus {
+                        focus_key: key.clone(),
+                    },
+                    req,
+                ));
+            }
+            "crate" | "folder" => {
+                let eff_lod = if lod.is_empty() {
+                    agg_kind.clone()
+                } else {
+                    lod.clone()
+                };
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![
+                        ("lod", eff_lod.clone()),
+                        ("scope", view_scope.clone()),
+                        ("focus", key.clone()),
+                    ],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::AggregateLodFocus {
+                        focus_key: key.clone(),
+                        lod: eff_lod,
+                    },
+                    req,
+                ));
+            }
+            _ => {
+                // Backend /api/graph/map only allows `base` with `cycle` or link queries,
+                // so node neighborhood focus strips `base` and diff evidence fetches separately.
+                let scope_dir = selection["file"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        if !view_scope.is_empty() {
+                            view_scope.clone()
+                        } else {
+                            key.rsplit_once('/')
+                                .map_or_else(String::new, |(parent, _)| parent.to_owned())
+                        }
+                    });
+                let req = graph_map::build_scoped_graph_request(
+                    scope,
+                    vec![("scope", scope_dir), ("focus", key.clone())],
+                    &non_diff_context,
+                );
+                plan.push((
+                    EvidenceFetchKind::CodeFocus {
+                        focus_key: key.clone(),
+                    },
+                    req,
+                ));
+            }
+        }
+    }
+
+    if context["base"].is_string() {
+        let cycle = m::text(context, "cycle");
+        if !cycle.is_empty() {
+            let req = graph_map::build_scoped_graph_request(
+                scope,
+                vec![("scope", view_scope), ("cycle", cycle.clone())],
+                context,
+            );
+            plan.push((EvidenceFetchKind::DiffCycle { cycle }, req));
+        }
+    }
+    let target = m::text(context, "target");
+    if !target.is_empty() {
+        let run_id = m::text(context, "run_id");
+        plan.push((
+            EvidenceFetchKind::DiffChanges {
+                focus_key: key,
+                is_link: link,
+                from,
+                to,
+            },
+            graph_map::build_scoped_changes_path(scope, &target, &run_id, false),
+        ));
+    }
+
+    plan
+}
+
+fn ensure_evidence_object(selection: &mut V) {
+    if !selection["graph_evidence"].is_object() {
+        selection["graph_evidence"] = json!({});
+    }
+}
+
+fn summarize_aggregate_neighbors(doc: &V, focus_key: &str) -> V {
+    let edges = rows(doc, "edges");
+    let outgoing: Vec<V> = edges
+        .iter()
+        .filter(|e| e["from"].as_str() == Some(focus_key))
+        .take(LIMIT)
+        .map(|e| {
+            json!({
+                "to": e["to"],
+                "links": e["links"],
+                "guessed": e["guessed"],
+                "against": e["against"],
+            })
+        })
+        .collect();
+    let incoming: Vec<V> = edges
+        .iter()
+        .filter(|e| e["to"].as_str() == Some(focus_key))
+        .take(LIMIT)
+        .map(|e| {
+            json!({
+                "from": e["from"],
+                "links": e["links"],
+                "guessed": e["guessed"],
+                "against": e["against"],
+            })
+        })
+        .collect();
+    let node_meta = rows(doc, "nodes")
+        .iter()
+        .find(|n| n["path"].as_str() == Some(focus_key) || n["id"].as_str() == Some(focus_key))
+        .cloned()
+        .unwrap_or(V::Null);
+    let violations: Vec<V> = rows(doc, "violations")
+        .iter()
+        .filter(|v| v["from"].as_str() == Some(focus_key) || v["to"].as_str() == Some(focus_key))
+        .take(LIMIT)
+        .cloned()
+        .collect();
+    let mut out = json!({
+        "focus": focus_key,
+        "node": node_meta,
+        "outgoing": outgoing,
+        "incoming": incoming,
+        "violations": violations,
+    });
+    if doc["focus"].is_object() {
+        out["uses"] = neighbors(&doc["focus"], "uses");
+        out["used_by"] = neighbors(&doc["focus"], "used_by");
+    }
+    out
+}
+
+fn summarize_aggregate_link(doc: &V, from: &str, to: &str, kind_label: &str) -> V {
+    if doc["mode"] == "link" && !m::yes(&doc["missing"]) {
+        return link_evidence(doc);
+    }
+    let edges: Vec<V> = rows(doc, "edges")
+        .iter()
+        .filter(|e| e["from"].as_str() == Some(from) && e["to"].as_str() == Some(to))
+        .take(LIMIT)
+        .cloned()
+        .collect();
+    let violations: Vec<V> = rows(doc, "violations")
+        .iter()
+        .filter(|v| v["from"].as_str() == Some(from) && v["to"].as_str() == Some(to))
+        .take(LIMIT)
+        .cloned()
+        .collect();
+    let from_node = rows(doc, "nodes")
+        .iter()
+        .find(|n| n["path"].as_str() == Some(from) || n["id"].as_str() == Some(from))
+        .cloned()
+        .unwrap_or(V::Null);
+    let to_node = rows(doc, "nodes")
+        .iter()
+        .find(|n| n["path"].as_str() == Some(to) || n["id"].as_str() == Some(to))
+        .cloned()
+        .unwrap_or(V::Null);
+    let pairs =
+        if !rows(&doc["users"], "groups").is_empty() && !rows(&doc["used"], "groups").is_empty() {
+            link_evidence(doc)["pairs"].clone()
+        } else {
+            json!([])
+        };
+    json!({
+        "scope": kind_label,
+        "from": from,
+        "to": to,
+        "from_node": from_node,
+        "to_node": to_node,
+        "edges": edges,
+        "violations": violations,
+        "pairs": pairs,
+    })
+}
+
+fn diff_path_matches(path: &str, focus_key: &str, from: &str, to: &str, is_link: bool) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let matches_key = |needle: &str| -> bool {
+        if needle.is_empty() || needle == "." {
+            return needle == ".";
+        }
+        let clean = needle
+            .strip_prefix("layer:")
+            .or_else(|| needle.strip_prefix("module:"))
+            .unwrap_or(needle);
+        path == clean || path.starts_with(&format!("{clean}/"))
+    };
+    if is_link {
+        matches_key(from) || matches_key(to)
+    } else {
+        matches_key(focus_key)
+    }
+}
+
+fn merge_evidence_response(
+    selection: &mut V,
+    scope: &GraphTargetScope,
+    kind: &EvidenceFetchKind,
+    doc: &V,
+) {
+    let context = selection["context"].clone();
+    match kind {
+        EvidenceFetchKind::CommitChanges => {
+            let files = rows(doc, "files")
+                .iter()
+                .take(LIMIT)
+                .map(|f| {
+                    json!({
+                        "path": f["path"],
+                        "previous_path": f["previous_path"],
+                        "status": f["status"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            let total_files = doc["total_files"]
+                .as_u64()
+                .unwrap_or_else(|| rows(doc, "files").len() as u64);
+            let risk_callers = rows(&doc["edge_diffs"], "risk_callers")
+                .iter()
+                .take(LIMIT)
+                .cloned()
+                .collect::<Vec<_>>();
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["changes"] = json!({
+                "total_files": total_files,
+                "created_files": doc["created_files"],
+                "modified_files": doc["modified_files"],
+                "deleted_files": doc["deleted_files"],
+                "renamed_files": doc["renamed_files"],
+                "files": files,
+                "omitted_files": total_files.saturating_sub(files.len() as u64),
+                "risk_callers": risk_callers,
+            });
+        }
+        EvidenceFetchKind::OmnigraphCodeFocus { file_path } => {
+            if !m::yes(&doc["preliminary"])
+                && doc["focus"]["path"].as_str() == Some(file_path.as_str())
+            {
+                let focus = &doc["focus"];
+                ensure_evidence_object(selection);
                 selection["graph_evidence"]["code_graph"] = json!({
                     "uses": neighbors(focus, "uses"),
                     "used_by": neighbors(focus, "used_by"),
                 });
             }
         }
-        return;
+        EvidenceFetchKind::SystemTopologyBridge { from, to } => {
+            ensure_evidence_object(selection);
+            let contracts: Vec<V> = rows(doc, "contracts").iter().take(LIMIT).cloned().collect();
+            let code_edges: Vec<V> = rows(doc, "code_edges")
+                .iter()
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            let symbol_bridges: Vec<V> = rows(doc, "symbol_bridges")
+                .iter()
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            let bridges: Vec<V> = rows(doc, "bridges").iter().take(LIMIT).cloned().collect();
+            selection["graph_evidence"]["bridge"] = json!({
+                "from": from,
+                "to": to,
+                "summary": doc["summary"],
+                "contracts": contracts,
+                "code_edges": code_edges,
+                "symbol_bridges": symbol_bridges,
+                "bridges": bridges,
+            });
+        }
+        EvidenceFetchKind::SystemTopologyImpact { service } => {
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["impact"] = json!({
+                "service": service,
+                "contract": doc["contract"],
+                "impacted_services": rows(doc, "impacted_services").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+                "impacted_contracts": rows(doc, "impacted_contracts").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+                "downstream": rows(doc, "downstream").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+                "upstream": rows(doc, "upstream").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+            });
+        }
+        EvidenceFetchKind::SystemTopologyChanges {
+            focus_key,
+            is_link,
+            from,
+            to,
+        } => {
+            ensure_evidence_object(selection);
+            let matches_svc = |s: &str| {
+                let svc = normalize_explain_service_id(s);
+                let svc_ref = svc.as_deref().unwrap_or(s);
+                if *is_link {
+                    normalize_explain_service_id(from).as_deref() == Some(svc_ref)
+                        || normalize_explain_service_id(to).as_deref() == Some(svc_ref)
+                } else {
+                    normalize_explain_service_id(focus_key).as_deref() == Some(svc_ref)
+                }
+            };
+            let broken_contracts: Vec<V> = rows(doc, "broken_contracts")
+                .iter()
+                .filter(|c| {
+                    matches_svc(&m::text(c, "service"))
+                        || matches_svc(&m::text(c, "from"))
+                        || matches_svc(&m::text(c, "to"))
+                })
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            let drifts: Vec<V> = rows(doc, "drifts")
+                .iter()
+                .filter(|d| {
+                    matches_svc(&m::text(d, "service"))
+                        || matches_svc(&m::text(d, "from"))
+                        || matches_svc(&m::text(d, "to"))
+                })
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            let changed_services: Vec<V> = rows(doc, "services")
+                .iter()
+                .filter(|s| matches_svc(&m::text(s, "id")) || matches_svc(&m::text(s, "service")))
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            selection["graph_evidence"]["changes"] = json!({
+                "target": doc["target"],
+                "changed_services": changed_services,
+                "broken_contracts": broken_contracts,
+                "drifts": drifts,
+                "total_files": doc["total_files"],
+            });
+        }
+        EvidenceFetchKind::DiffChanges {
+            focus_key,
+            is_link,
+            from,
+            to,
+        } => {
+            let matching_files: Vec<V> = rows(doc, "files")
+                .iter()
+                .filter(|f| {
+                    let p = f["path"].as_str().unwrap_or("");
+                    diff_path_matches(p, focus_key, from, to, *is_link)
+                })
+                .take(LIMIT)
+                .cloned()
+                .collect();
+            let files = if matching_files.is_empty() {
+                rows(doc, "files")
+                    .iter()
+                    .take(LIMIT)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                matching_files
+            };
+            let edge_diffs = &doc["edge_diffs"];
+            let filter_edges = |key: &str| -> Vec<V> {
+                let all = rows(edge_diffs, key);
+                let matched: Vec<V> = all
+                    .iter()
+                    .filter(|e| {
+                        let ef = e["from"].as_str().unwrap_or("");
+                        let et = e["to"].as_str().unwrap_or("");
+                        if *is_link {
+                            diff_path_matches(ef, "", from, "", false)
+                                && diff_path_matches(et, "", to, "", false)
+                        } else {
+                            diff_path_matches(ef, focus_key, "", "", false)
+                                || diff_path_matches(et, focus_key, "", "", false)
+                        }
+                    })
+                    .take(LIMIT)
+                    .cloned()
+                    .collect();
+                if matched.is_empty() && focus_key == "." {
+                    all.iter().take(LIMIT).cloned().collect()
+                } else {
+                    matched
+                }
+            };
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["diff"] = json!({
+                "total_files": doc["total_files"],
+                "created_files": doc["created_files"],
+                "modified_files": doc["modified_files"],
+                "deleted_files": doc["deleted_files"],
+                "files": files,
+                "added_edges": filter_edges("added"),
+                "removed_edges": filter_edges("removed"),
+                "modified_edges": filter_edges("modified"),
+                "risk_callers": filter_edges("risk_callers"),
+            });
+        }
+        EvidenceFetchKind::LayerFocus { focus_key }
+        | EvidenceFetchKind::ModuleFocus { focus_key }
+        | EvidenceFetchKind::AggregateLodFocus { focus_key, .. } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            let actual = graph_selection(doc, &V::Null);
+            if !context["base"].is_string()
+                && context["revision"].is_string()
+                && actual["revision"] != context["revision"]
+            {
+                return;
+            }
+            let summary = summarize_aggregate_neighbors(doc, focus_key);
+            ensure_evidence_object(selection);
+            if let Some(ev_obj) = selection["graph_evidence"].as_object_mut() {
+                if let Some(sum_obj) = summary.as_object() {
+                    for (k, v) in sum_obj {
+                        ev_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        EvidenceFetchKind::LayerLink { from, to } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            let summary = summarize_aggregate_link(doc, from, to, "layer");
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["layer_link"] = summary;
+        }
+        EvidenceFetchKind::ModuleLink { from, to } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            let summary = summarize_aggregate_link(doc, from, to, "module");
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["module_link"] = summary;
+        }
+        EvidenceFetchKind::AggregateLodLink { from, to, lod } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            let summary = summarize_aggregate_link(doc, from, to, lod);
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["aggregate_link"] = summary;
+        }
+        EvidenceFetchKind::DiffCycle { cycle } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["cycle"] = json!({
+                "cycle": cycle,
+                "nodes": rows(doc, "nodes").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+                "edges": rows(doc, "edges").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+                "violations": rows(doc, "violations").iter().take(LIMIT).cloned().collect::<Vec<_>>(),
+            });
+        }
+        EvidenceFetchKind::CodeLink => {
+            let actual = graph_selection(doc, &V::Null);
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || (context["revision"].is_string() && actual["revision"] != context["revision"])
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            if doc["mode"] == "link" && !m::yes(&doc["missing"]) {
+                let ev = link_evidence(doc);
+                ensure_evidence_object(selection);
+                if let (Some(dst), Some(src)) =
+                    (selection["graph_evidence"].as_object_mut(), ev.as_object())
+                {
+                    for (k, v) in src {
+                        dst.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        EvidenceFetchKind::CodeFocus { focus_key } => {
+            let actual = graph_selection(doc, &V::Null);
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || (!context["base"].is_string()
+                    && context["revision"].is_string()
+                    && actual["revision"] != context["revision"])
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            if doc["focus"]["path"].as_str() == Some(focus_key.as_str()) {
+                let focus = &doc["focus"];
+                ensure_evidence_object(selection);
+                selection["graph_evidence"]["uses"] = neighbors(focus, "uses");
+                selection["graph_evidence"]["used_by"] = neighbors(focus, "used_by");
+            }
+        }
     }
+}
 
-    let context = &selection["context"];
-    let data = &selection["data"];
-    let link = selection["kind"] == "link";
-    let request = if link {
-        let (from, to) = (m::text(data, "from"), m::text(data, "to"));
-        if from.is_empty() || to.is_empty() {
-            return;
+async fn add_evidence(selection: &mut V, scope: &GraphTargetScope) {
+    let plan = plan_evidence_requests(selection, scope);
+    for (kind, path) in plan {
+        if let Ok(doc) = api::get(&path).await {
+            merge_evidence_response(selection, scope, &kind, &doc);
         }
-        graph_map::build_scoped_link_request(scope, &from, &to, context)
-    } else {
-        // The base endpoint currently supports cycle and link inspection only.
-        if m::yes(&selection["aggregate"]) || context["base"].is_string() {
-            return;
-        }
-        let Some(key) = data
-            .as_str()
-            .or(data["path"].as_str())
-            .filter(|key| !key.is_empty())
-        else {
-            return;
-        };
-        let scope_dir = selection["file"]
-            .as_str()
-            .unwrap_or_else(|| key.rsplit_once('/').map_or("", |(parent, _)| parent));
-        graph_map::build_scoped_graph_request(
-            scope,
-            vec![("scope", scope_dir.to_owned()), ("focus", key.to_owned())],
-            context,
-        )
-    };
-    let Ok(view) = api::get(&request).await else {
-        return;
-    };
-    let actual = graph_selection(&view, &V::Null);
-    if (!scope.is_system() && view["project_id"] != scope.project_id())
-        || (context["revision"].is_string() && actual["revision"] != context["revision"])
-        || m::yes(&view["preliminary"])
-    {
-        return;
-    }
-    if link && view["mode"] == "link" && !m::yes(&view["missing"]) {
-        selection["graph_evidence"] = link_evidence(&view);
-    } else if !link
-        && view["focus"]["path"]
-            .as_str()
-            .is_some_and(|key| data == key || data["path"] == key)
-    {
-        let focus = &view["focus"];
-        selection["graph_evidence"] = json!({
-            "uses": neighbors(focus, "uses"), "used_by": neighbors(focus, "used_by"),
-        });
     }
 }
 
@@ -2488,5 +3694,265 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
             "fallback",
         );
         assert_eq!(file_mode_subj, "check · src/Auth/Guard.php:17");
+    }
+
+    #[test]
+    fn resolve_system_explain_services_prefers_hit_payload_on_topology_canvas() {
+        let topo_scope = GraphTargetScope::SystemService {
+            project_id: "harbor-root".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "__system__".to_owned(),
+            services: vec!["gateway".into(), "orders".into(), "billing".into()],
+            run_id: None,
+            run_title: None,
+            launches: vec![],
+        };
+        // Canvas2D dense node hit has no data-explain-services attr and scope.service_id == "__system__".
+        let node_hit = json!({
+            "id": "orders::orders.http",
+            "service": "orders",
+            "services": ["orders"],
+            "name": "POST /orders",
+        });
+        assert_eq!(
+            resolve_system_explain_services(
+                "system-map-canvas",
+                &[],
+                &node_hit,
+                Some(&topo_scope),
+                &["gateway".into(), "orders".into()],
+            ),
+            vec!["orders".to_owned()]
+        );
+
+        // Dense edge hit without services array resolves endpoints via from/to stripping ::contract.
+        let edge_hit = json!({
+            "from": "gateway::orders.http",
+            "to": "orders",
+            "kind": "http",
+        });
+        assert_eq!(
+            resolve_system_explain_services(
+                "system-map-canvas",
+                &[],
+                &edge_hit,
+                Some(&topo_scope),
+                &[],
+            ),
+            vec!["gateway".to_owned(), "orders".to_owned()]
+        );
+
+        // Embedded member code graph keeps scope service instead of parsing file paths from from/to.
+        let member_scope = GraphTargetScope::SystemService {
+            project_id: "harbor-root".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "orders".to_owned(),
+            services: vec![],
+            run_id: None,
+            run_title: None,
+            launches: vec![],
+        };
+        assert_eq!(
+            resolve_system_explain_services(
+                "system-member-graph-canvas",
+                &[],
+                &json!({"from": "src/api.rs", "to": "src/db.rs"}),
+                Some(&member_scope),
+                &[],
+            ),
+            vec!["orders".to_owned()]
+        );
+    }
+
+    #[test]
+    fn plan_and_merge_evidence_covers_aggregate_scopes_diff_mode_and_system_topology() {
+        let code_scope = GraphTargetScope::single("proj-1");
+
+        // 1. Layer aggregate focus + link
+        let layer_sel = json!({
+            "kind": "node",
+            "data": "layer:Api",
+            "aggregate": true,
+            "context": {
+                "canvas": "graph-map-canvas",
+                "view_scope": "src",
+                "mode": "layers",
+                "pattern": "layers@src",
+                "aggregate_kind": "layer",
+                "revision": "rev-head"
+            }
+        });
+        let layer_plan = plan_evidence_requests(&layer_sel, &code_scope);
+        assert_eq!(layer_plan.len(), 1);
+        assert!(matches!(
+            layer_plan[0].0,
+            EvidenceFetchKind::LayerFocus { .. }
+        ));
+        assert!(layer_plan[0].1.contains("pattern=layers%40src"));
+        assert!(layer_plan[0].1.contains("focus=layer%3AApi"));
+
+        let mut layer_sel_merged = layer_sel.clone();
+        merge_evidence_response(
+            &mut layer_sel_merged,
+            &code_scope,
+            &layer_plan[0].0,
+            &json!({
+                "project_id": "proj-1",
+                "chosen": { "head": { "commit": "rev-head" } },
+                "nodes": [{ "path": "layer:Api", "files": 12, "layer": true }],
+                "edges": [{ "from": "layer:Api", "to": "layer:Domain", "links": 7, "against": false }],
+                "violations": []
+            }),
+        );
+        assert_eq!(
+            layer_sel_merged["graph_evidence"]["outgoing"][0]["to"],
+            json!("layer:Domain")
+        );
+
+        // 2. Module aggregate + Folder/Crate LOD link & focus
+        let mod_sel = json!({
+            "kind": "node",
+            "data": { "path": "module:auth" },
+            "aggregate": true,
+            "context": {
+                "canvas": "graph-map-canvas",
+                "modules": true,
+                "aggregate_kind": "module"
+            }
+        });
+        let mod_plan = plan_evidence_requests(&mod_sel, &code_scope);
+        assert!(matches!(
+            mod_plan[0].0,
+            EvidenceFetchKind::ModuleFocus { .. }
+        ));
+        assert!(mod_plan[0].1.contains("modules=1"));
+
+        let folder_link_sel = json!({
+            "kind": "link",
+            "data": { "from": "src/api", "to": "src/db" },
+            "aggregate": true,
+            "context": {
+                "canvas": "graph-map-canvas",
+                "lod": "folder",
+                "view_scope": "src",
+                "aggregate_kind": "folder"
+            }
+        });
+        let folder_plan = plan_evidence_requests(&folder_link_sel, &code_scope);
+        assert!(matches!(
+            folder_plan[0].0,
+            EvidenceFetchKind::AggregateLodLink { .. }
+        ));
+        assert!(folder_plan[0].1.contains("lod=folder"));
+        assert!(folder_plan[0].1.contains("focus=src%2Fapi"));
+
+        // 3. Diff mode node focus strips `base`, adds `DiffCycle` & `DiffChanges`
+        let diff_sel = json!({
+            "kind": "node",
+            "data": "src/auth.rs",
+            "file": "src",
+            "context": {
+                "canvas": "graph-map-canvas",
+                "base": "origin/main",
+                "revision": "base-sha",
+                "target": "HEAD",
+                "cycle": "cyc-1",
+                "view_scope": "src"
+            }
+        });
+        let diff_plan = plan_evidence_requests(&diff_sel, &code_scope);
+        assert_eq!(diff_plan.len(), 3);
+        assert!(matches!(
+            diff_plan[0].0,
+            EvidenceFetchKind::CodeFocus { .. }
+        ));
+        assert!(!diff_plan[0].1.contains("base="));
+        assert!(matches!(
+            diff_plan[1].0,
+            EvidenceFetchKind::DiffCycle { .. }
+        ));
+        assert!(diff_plan[1].1.contains("base=origin%2Fmain"));
+        assert!(diff_plan[1].1.contains("cycle=cyc-1"));
+        assert!(matches!(
+            diff_plan[2].0,
+            EvidenceFetchKind::DiffChanges { .. }
+        ));
+        assert!(diff_plan[2]
+            .1
+            .contains("/api/projects/proj-1/graph/changes"));
+
+        let mut diff_merged = diff_sel.clone();
+        merge_evidence_response(
+            &mut diff_merged,
+            &code_scope,
+            &diff_plan[0].0,
+            &json!({
+                "project_id": "proj-1",
+                "chosen": { "head": { "commit": "head-sha" } },
+                "focus": {
+                    "path": "src/auth.rs",
+                    "uses": [{ "path": "src/db.rs", "links": 2 }],
+                    "used_by": []
+                }
+            }),
+        );
+        merge_evidence_response(
+            &mut diff_merged,
+            &code_scope,
+            &diff_plan[2].0,
+            &json!({
+                "total_files": 1,
+                "files": [{ "path": "src/auth.rs", "status": "modified" }],
+                "edge_diffs": {
+                    "added": [{ "from": "src/auth.rs", "to": "src/db.rs" }],
+                    "removed": [],
+                    "modified": [],
+                    "risk_callers": []
+                }
+            }),
+        );
+        assert_eq!(
+            diff_merged["graph_evidence"]["uses"]["items"][0]["path"],
+            json!("src/db.rs")
+        );
+        assert_eq!(
+            diff_merged["graph_evidence"]["diff"]["added_edges"][0]["to"],
+            json!("src/db.rs")
+        );
+
+        // 4. System topology dense Canvas2D node & link evidence uses /api/systems/graph/*
+        let sys_scope = GraphTargetScope::SystemService {
+            project_id: "sys-1".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "__system__".to_owned(),
+            services: vec!["gateway".into(), "orders".into()],
+            run_id: Some("run-7".into()),
+            run_title: None,
+            launches: vec![],
+        };
+        let sys_link_sel = json!({
+            "kind": "link",
+            "data": { "from": "gateway", "to": "orders", "kind": "http" },
+            "system_services": ["gateway", "orders"],
+            "context": {
+                "canvas": "system-map-canvas",
+                "project": "sys-1",
+                "config_path": "system.json",
+                "run_id": "run-7",
+                "target": "sysrun:run-7"
+            }
+        });
+        let sys_plan = plan_evidence_requests(&sys_link_sel, &sys_scope);
+        assert_eq!(sys_plan.len(), 2);
+        assert!(matches!(
+            sys_plan[0].0,
+            EvidenceFetchKind::SystemTopologyBridge { .. }
+        ));
+        assert!(sys_plan[0].1.starts_with("/api/systems/graph/bridge?"));
+        assert!(matches!(
+            sys_plan[1].0,
+            EvidenceFetchKind::SystemTopologyChanges { .. }
+        ));
+        assert!(sys_plan[1].1.starts_with("/api/systems/graph/changes?"));
     }
 }

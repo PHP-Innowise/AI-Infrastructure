@@ -886,38 +886,13 @@ pub(super) fn render_constellation() {
         .collect();
     let is_dense = rendered.dense_scene.is_some();
     if let Some(scene) = rendered.dense_scene {
-        let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
-        for (i, (id, ..)) in rendered.node_rects.iter().enumerate() {
-            let title = node_titles.get(i).cloned().unwrap_or_else(|| id.clone());
-            meta.nodes.insert(
-                i,
-                graph_viewport::canvas2d::DenseNodeMeta {
-                    explain_kind: "node".to_owned(),
-                    explain_payload: json!({
-                        "node_id": id,
-                        "label": title,
-                        "name": title,
-                    }),
-                    tooltip: title,
-                    ..Default::default()
-                },
-            );
-        }
-        for (i, (from, to)) in rendered.edge_endpoints.iter().enumerate() {
-            meta.edges.insert(
-                i,
-                graph_viewport::canvas2d::DenseEdgeMeta {
-                    explain_kind: "link".to_owned(),
-                    explain_payload: json!({
-                        "from": from,
-                        "to": to,
-                    }),
-                    from_index: node_index_by_id.get(from.as_str()).copied(),
-                    to_index: node_index_by_id.get(to.as_str()).copied(),
-                    summary: format!("{from} -> {to}"),
-                },
-            );
-        }
+        let meta = build_omni_dense_scene_meta(
+            &graph,
+            &rendered.node_rects,
+            &rendered.edge_endpoints,
+            &node_titles,
+            &node_index_by_id,
+        );
         graph_viewport::canvas2d::store_scene_with_meta("omnigraph-canvas", scene, meta);
     } else {
         graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
@@ -1101,5 +1076,358 @@ pub(super) fn render_pulse() {
     dom::text("omni-pulse-count", &events.len().to_string());
     if let Some(el) = dom::get("omnigraph-pulse-list") {
         el.set_inner_html(&render_pulse_list_html(&events));
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OmniNodeExplainInfo {
+    node_type: String,
+    kind: String,
+    branch: String,
+    file_path: String,
+    symbol_fqn: String,
+}
+
+fn first_omni_field(item: &V, keys: &[&str]) -> String {
+    for &key in keys {
+        if let Some(val) = item[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            return val.to_owned();
+        }
+    }
+    String::new()
+}
+
+pub(super) fn build_omni_dense_scene_meta(
+    graph: &V,
+    node_rects: &[(String, f64, f64, f64, f64)],
+    edge_endpoints: &[(String, String)],
+    node_titles: &[String],
+    node_index_by_id: &HashMap<String, usize>,
+) -> graph_viewport::canvas2d::DenseSceneMeta {
+    let mut node_info: HashMap<String, OmniNodeExplainInfo> = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
+
+    for s in m::array(&graph["sessions"]) {
+        let id = session_node_id(&s);
+        if id.is_empty() || node_info.contains_key(&id) {
+            continue;
+        }
+        let branch = first_omni_field(&s, &["branch", "source_branch", "graph_branch"]);
+        node_info.insert(
+            id,
+            OmniNodeExplainInfo {
+                node_type: "session".to_owned(),
+                kind: "session".to_owned(),
+                branch: if branch.is_empty() {
+                    "main".to_owned()
+                } else {
+                    branch
+                },
+                file_path: String::new(),
+                symbol_fqn: String::new(),
+            },
+        );
+    }
+
+    for a in m::array(&graph["atoms"]) {
+        let id = atom_id(&a);
+        if id.is_empty() || node_info.contains_key(&id) {
+            continue;
+        }
+        let kind = first_omni_field(&a, &["kind"]);
+        let branch = first_omni_field(&a, &["branch", "source_branch", "graph_branch"]);
+        node_info.insert(
+            id,
+            OmniNodeExplainInfo {
+                node_type: "atom".to_owned(),
+                kind: if kind.is_empty() {
+                    "insight".to_owned()
+                } else {
+                    kind
+                },
+                branch: if branch.is_empty() {
+                    "main".to_owned()
+                } else {
+                    branch
+                },
+                file_path: first_omni_field(&a, &["file_path", "path"]),
+                symbol_fqn: first_omni_field(&a, &["symbol_fqn", "fqn"]),
+            },
+        );
+    }
+
+    for f in m::array(&graph["files"]) {
+        let (id, path) = if let Some(s) = f.as_str() {
+            (s.to_owned(), s.to_owned())
+        } else {
+            let path = first_omni_field(&f, &["path", "file_path", "name", "label"]);
+            let id = first_omni_field(&f, &["id", "@id"]);
+            let resolved_id = if id.is_empty() { path.clone() } else { id };
+            let resolved_path = if path.is_empty() {
+                resolved_id.clone()
+            } else {
+                path
+            };
+            (resolved_id, resolved_path)
+        };
+        if id.is_empty() {
+            continue;
+        }
+        if !path.is_empty() && path != id {
+            aliases.entry(path.clone()).or_insert_with(|| id.clone());
+        }
+        if node_info.contains_key(&id) {
+            continue;
+        }
+        let branch = if f.is_object() {
+            first_omni_field(&f, &["branch", "source_branch", "graph_branch"])
+        } else {
+            String::new()
+        };
+        node_info.insert(
+            id,
+            OmniNodeExplainInfo {
+                node_type: "file".to_owned(),
+                kind: "file".to_owned(),
+                branch,
+                file_path: path,
+                symbol_fqn: String::new(),
+            },
+        );
+    }
+
+    for sym in m::array(&graph["symbols"]) {
+        let id = symbol_node_id(&sym);
+        if id.is_empty() {
+            continue;
+        }
+        let fqn = {
+            let raw = first_omni_field(&sym, &["fqn", "id", "symbol_id"]);
+            if raw.is_empty() {
+                id.clone()
+            } else {
+                raw
+            }
+        };
+        if !fqn.is_empty() && fqn != id {
+            aliases.entry(fqn.clone()).or_insert_with(|| id.clone());
+        }
+        let sym_id = first_omni_field(&sym, &["symbol_id"]);
+        if !sym_id.is_empty() && sym_id != id {
+            aliases.entry(sym_id).or_insert_with(|| id.clone());
+        }
+        if node_info.contains_key(&id) {
+            continue;
+        }
+        let kind = first_omni_field(&sym, &["kind", "symbol_kind"]);
+        let branch = first_omni_field(&sym, &["branch", "source_branch", "graph_branch"]);
+        node_info.insert(
+            id,
+            OmniNodeExplainInfo {
+                node_type: "symbol".to_owned(),
+                kind: if kind.is_empty() {
+                    "symbol".to_owned()
+                } else {
+                    kind
+                },
+                branch,
+                file_path: symbol_file_path(&sym),
+                symbol_fqn: fqn,
+            },
+        );
+    }
+
+    let resolve_alias =
+        |raw: &str| -> String { aliases.get(raw).cloned().unwrap_or_else(|| raw.to_owned()) };
+    let mut edge_meta_by_pair: HashMap<(String, String), (String, String)> = HashMap::new();
+    for key in ["edges", "links"] {
+        for edge in m::array(&graph[key]) {
+            let raw_from = first_omni_field(&edge, &["from", "source"]);
+            let raw_to = first_omni_field(&edge, &["to", "target"]);
+            if raw_from.is_empty() || raw_to.is_empty() {
+                continue;
+            }
+            let from = resolve_alias(&raw_from);
+            let to = resolve_alias(&raw_to);
+            let kind = first_omni_field(&edge, &["kind", "type", "edge_kind"]);
+            let relation = first_omni_field(&edge, &["relation", "rel", "kind", "type"]);
+            edge_meta_by_pair
+                .entry((from, to))
+                .or_insert((kind, relation));
+        }
+    }
+
+    let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
+    for (i, (id, ..)) in node_rects.iter().enumerate() {
+        let title = node_titles.get(i).cloned().unwrap_or_else(|| id.clone());
+        let info = node_info.get(id).cloned().unwrap_or_else(|| {
+            let inferred_type = if id.contains("::") {
+                "symbol"
+            } else if id.contains('/') || id.contains('.') {
+                "file"
+            } else {
+                "node"
+            };
+            OmniNodeExplainInfo {
+                node_type: inferred_type.to_owned(),
+                kind: inferred_type.to_owned(),
+                branch: String::new(),
+                file_path: if inferred_type == "file" {
+                    id.clone()
+                } else if inferred_type == "symbol" {
+                    id.split_once("::")
+                        .map_or_else(String::new, |(p, _)| p.to_owned())
+                } else {
+                    String::new()
+                },
+                symbol_fqn: if inferred_type == "symbol" {
+                    id.clone()
+                } else {
+                    String::new()
+                },
+            }
+        });
+        meta.nodes.insert(
+            i,
+            graph_viewport::canvas2d::DenseNodeMeta {
+                explain_kind: "node".to_owned(),
+                explain_payload: json!({
+                    "node_id": id,
+                    "label": title,
+                    "name": title,
+                    "node_type": info.node_type,
+                    "kind": info.kind,
+                    "branch": info.branch,
+                    "file_path": info.file_path,
+                    "symbol_fqn": info.symbol_fqn,
+                }),
+                symbol_kind: info.kind,
+                tooltip: title,
+                file_line: info.file_path,
+                ..Default::default()
+            },
+        );
+    }
+    for (i, (from, to)) in edge_endpoints.iter().enumerate() {
+        let (kind, relation) = edge_meta_by_pair
+            .get(&(from.clone(), to.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let summary = if kind.is_empty() {
+            format!("{from} -> {to}")
+        } else {
+            format!("{from} -> {to} ({kind})")
+        };
+        meta.edges.insert(
+            i,
+            graph_viewport::canvas2d::DenseEdgeMeta {
+                explain_kind: "link".to_owned(),
+                explain_payload: json!({
+                    "from": from,
+                    "to": to,
+                    "kind": kind,
+                    "relation": relation,
+                }),
+                from_index: node_index_by_id.get(from.as_str()).copied(),
+                to_index: node_index_by_id.get(to.as_str()).copied(),
+                summary,
+            },
+        );
+    }
+    meta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omnigraph_dense_scene_meta_populates_explain_fields_for_all_node_types() {
+        let graph = json!({
+            "sessions": [{
+                "id": "sess-1",
+                "title": "Auth refactor",
+                "branch": "feat/auth"
+            }],
+            "atoms": [{
+                "id": "atom-1",
+                "kind": "decision",
+                "title": "Use Ed25519 tokens",
+                "branch": "knowledge/canonical"
+            }],
+            "files": [{
+                "id": "file:src/auth.rs",
+                "path": "src/auth.rs",
+                "branch": "main"
+            }],
+            "symbols": [{
+                "id": "sym-1",
+                "fqn": "src/auth.rs::verify_token",
+                "kind": "function",
+                "file_path": "src/auth.rs",
+                "branch": "feat/auth"
+            }],
+            "edges": [{
+                "from": "atom-1",
+                "to": "src/auth.rs",
+                "kind": "mentions"
+            }]
+        });
+        let node_rects = vec![
+            ("sess-1".to_owned(), 0.0, 0.0, 120.0, 48.0),
+            ("atom-1".to_owned(), 0.0, 80.0, 120.0, 48.0),
+            ("file:src/auth.rs".to_owned(), 0.0, 160.0, 120.0, 48.0),
+            ("sym-1".to_owned(), 0.0, 240.0, 120.0, 48.0),
+        ];
+        let node_titles: Vec<String> = node_rects
+            .iter()
+            .map(|(id, ..)| title_for_omni_node(&graph, id))
+            .collect();
+        let node_index_by_id: HashMap<String, usize> = node_rects
+            .iter()
+            .enumerate()
+            .map(|(i, (id, ..))| (id.clone(), i))
+            .collect();
+        let edge_endpoints = vec![("atom-1".to_owned(), "file:src/auth.rs".to_owned())];
+        let meta = build_omni_dense_scene_meta(
+            &graph,
+            &node_rects,
+            &edge_endpoints,
+            &node_titles,
+            &node_index_by_id,
+        );
+
+        assert_eq!(
+            meta.nodes[&0].explain_payload["node_type"],
+            json!("session")
+        );
+        assert_eq!(meta.nodes[&0].explain_payload["kind"], json!("session"));
+        assert_eq!(meta.nodes[&0].explain_payload["branch"], json!("feat/auth"));
+
+        assert_eq!(meta.nodes[&1].explain_payload["node_type"], json!("atom"));
+        assert_eq!(meta.nodes[&1].explain_payload["kind"], json!("decision"));
+
+        assert_eq!(meta.nodes[&2].explain_payload["node_type"], json!("file"));
+        assert_eq!(meta.nodes[&2].explain_payload["kind"], json!("file"));
+        assert_eq!(
+            meta.nodes[&2].explain_payload["file_path"],
+            json!("src/auth.rs")
+        );
+        assert_eq!(meta.nodes[&2].file_line, "src/auth.rs");
+
+        assert_eq!(meta.nodes[&3].explain_payload["node_type"], json!("symbol"));
+        assert_eq!(meta.nodes[&3].explain_payload["kind"], json!("function"));
+        assert_eq!(
+            meta.nodes[&3].explain_payload["file_path"],
+            json!("src/auth.rs")
+        );
+        assert_eq!(
+            meta.nodes[&3].explain_payload["symbol_fqn"],
+            json!("src/auth.rs::verify_token")
+        );
+
+        assert_eq!(meta.edges[&0].explain_payload["kind"], json!("mentions"));
+        assert_eq!(meta.edges[&0].from_index, Some(1));
+        assert_eq!(meta.edges[&0].to_index, Some(2));
     }
 }

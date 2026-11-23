@@ -10259,3 +10259,65 @@ fn graph_status_sse_invalidates_analysis_cache_keys_on_watcher_and_ir_updated() 
     assert!(m::data(surfaces::MODAL_SURFACE.changes_key).is_null());
     assert!(m::data(surfaces::MODAL_SURFACE.impact_key).is_null());
 }
+
+#[test]
+fn progressive_lod_reads_zoom_and_live_modal_camera_scale_and_sse_updates_graph_counts() {
+    // 1. State `zoom` key (set by camera_dom interactive zoom) feeds progressive_lod_for_state.
+    let zoomed_out = json!({"auto_lod": true, "zoom": 0.28, "scope": "", "focus": ""});
+    assert_eq!(
+        surfaces::progressive_lod_for_state(&zoomed_out, None),
+        (Some("crate".to_owned()), Some(2))
+    );
+    let url_zoom = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &zoomed_out, false);
+    assert!(url_zoom.contains("lod=crate"), "{url_zoom}");
+    assert!(url_zoom.contains("min_weight=2"), "{url_zoom}");
+
+    // 2. Saved non-fit modal camera scale overrides default 1.0 when building modal map URLs.
+    m::set(
+        surfaces::MODAL_SURFACE.camera_key,
+        json!({ "scale": 0.48, "fit_mode": false }),
+    );
+    let plain_auto = json!({"auto_lod": true, "fit": false, "scope": "", "focus": ""});
+    let url_cam = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &plain_auto, false);
+    m::take(surfaces::MODAL_SURFACE.camera_key);
+    assert!(url_cam.contains("lod=folder"), "{url_cam}");
+
+    // 3. Fit-mode camera should NOT lock a modal request into coarse LOD.
+    m::set(
+        surfaces::MODAL_SURFACE.camera_key,
+        json!({ "scale": 0.22, "fit_mode": true }),
+    );
+    let fit_auto = json!({"auto_lod": true, "fit": true, "scope": "", "focus": ""});
+    let url_fit = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &fit_auto, false);
+    m::take(surfaces::MODAL_SURFACE.camera_key);
+    assert!(!url_fit.contains("lod=crate"), "{url_fit}");
+
+    // 4. Incremental SSE graph_status updates cached graph node/edge counts and previous count metadata.
+    m::set(
+        "graph",
+        json!({ "state": "ready", "graph": { "nodes": 84, "edges": 190 } }),
+    );
+    let inc_act = crate::graph::apply_graph_status_sse_event(
+        &json!({
+            "project_id": "proj-1",
+            "state": "updated",
+            "reason": "incremental_update",
+            "revision": 99,
+            "nodes": 84,
+            "edges": 190,
+            "changed_files": ["src/main.rs"]
+        }),
+        "proj-1",
+    );
+    assert_eq!(
+        inc_act,
+        crate::graph::GraphSseAction::RefreshCandidate {
+            event_project: "proj-1".to_owned(),
+            banner_text: "Graph updated — Refresh".to_owned(),
+            schedule_idle: true,
+        }
+    );
+    assert_eq!(m::data("graph")["ir_revision"], json!(99));
+    assert_eq!(m::data("graph")["graph"]["nodes"], json!(84));
+    assert_eq!(m::data("graph-sse-delta-meta")["prev_nodes"], json!(84));
+}

@@ -701,18 +701,100 @@ pub(crate) enum GraphSseAction {
 
 /// Applies non-DOM model updates for SSE `event: "graph_status"` and invalidates matching
 /// surface analysis cache keys without touching browser DOM globals.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SseDeltaPayload {
+    pub project_id: String,
+    pub state: String,
+    pub reason: String,
+    pub revision: Option<u64>,
+    pub nodes: Option<u64>,
+    pub edges: Option<u64>,
+    pub changed_files: Vec<String>,
+    pub removed_files: Vec<String>,
+    pub schema_changed: bool,
+    pub full_reload: bool,
+}
+
+fn push_unique_rel_files(out: &mut Vec<String>, arr: &V) {
+    let Some(items) = arr.as_array() else {
+        return;
+    };
+    for item in items {
+        let raw = item
+            .as_str()
+            .or_else(|| item["path"].as_str())
+            .unwrap_or("")
+            .trim()
+            .replace('\\', "/");
+        let norm = raw.trim_start_matches("./").trim_start_matches('/');
+        if !norm.is_empty() && !out.iter().any(|existing| existing == norm) {
+            out.push(norm.to_owned());
+        }
+    }
+}
+
+pub(crate) fn extract_sse_delta_payload(event: &V) -> SseDeltaPayload {
+    let reason = m::text(event, "reason");
+    let mut changed_files = Vec::new();
+    for candidate in [
+        &event["changed_files"],
+        &event["files"],
+        &event["delta"]["changed_files"],
+        &event["delta"]["files"],
+    ] {
+        push_unique_rel_files(&mut changed_files, candidate);
+    }
+    let mut removed_files = Vec::new();
+    for candidate in [
+        &event["removed_files"],
+        &event["deleted_files"],
+        &event["delta"]["removed_files"],
+        &event["delta"]["deleted_files"],
+    ] {
+        push_unique_rel_files(&mut removed_files, candidate);
+    }
+    let schema_changed = m::yes(&event["schema_changed"])
+        || m::yes(&event["schema_updated"])
+        || m::yes(&event["structural_change"]);
+    let full_reload = m::yes(&event["full_reload"])
+        || schema_changed
+        || matches!(
+            reason.as_str(),
+            "rebuild" | "completed" | "architecture_updated" | "schema_changed"
+        );
+    SseDeltaPayload {
+        project_id: m::text(event, "project_id"),
+        state: m::text(event, "state"),
+        reason,
+        revision: event["revision"]
+            .as_u64()
+            .or_else(|| event["ir_revision"].as_u64()),
+        nodes: event["nodes"]
+            .as_u64()
+            .or_else(|| event["graph"]["nodes"].as_u64()),
+        edges: event["edges"]
+            .as_u64()
+            .or_else(|| event["graph"]["edges"].as_u64()),
+        changed_files,
+        removed_files,
+        schema_changed,
+        full_reload,
+    }
+}
+
 pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> GraphSseAction {
     if !event.is_object() {
         return GraphSseAction::Ignored;
     }
     m::set("graph-sse-status", event.clone());
-    let event_project = m::text(event, "project_id");
+    let delta = extract_sse_delta_payload(event);
+    let event_project = delta.project_id.clone();
     if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
     {
         return GraphSseAction::Ignored;
     }
-    let state = m::text(event, "state");
-    let reason = m::text(event, "reason");
+    let state = delta.state.clone();
+    let reason = delta.reason.clone();
     let message = m::text(event, "message");
     if state == "building" {
         let mut status = m::data("graph");
@@ -765,13 +847,33 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
     if !synth_status.is_object() {
         synth_status = json!({});
     }
+    let prev_nodes = synth_status["graph"]["nodes"].as_u64();
+    let prev_edges = synth_status["graph"]["edges"].as_u64();
+    m::set(
+        "graph-sse-delta-meta",
+        json!({
+            "prev_nodes": prev_nodes,
+            "prev_edges": prev_edges,
+        }),
+    );
     synth_status["state"] = json!(if state.is_empty() {
         "ready"
     } else {
         state.as_str()
     });
-    if let Some(rev) = event["revision"].as_u64() {
+    if let Some(rev) = delta.revision {
         synth_status["ir_revision"] = json!(rev);
+    }
+    if delta.nodes.is_some() || delta.edges.is_some() {
+        if !synth_status["graph"].is_object() {
+            synth_status["graph"] = json!({});
+        }
+        if let Some(nodes) = delta.nodes {
+            synth_status["graph"]["nodes"] = json!(nodes);
+        }
+        if let Some(edges) = delta.edges {
+            synth_status["graph"]["edges"] = json!(edges);
+        }
     }
     if !event["backend"].is_null() {
         synth_status["backend"] = event["backend"].clone();
@@ -1563,5 +1665,33 @@ mod tests {
             freshness_badge_info(&building, &V::Null),
             ("building", "Rebuilding (55%)".to_owned())
         );
+    }
+
+    #[test]
+    fn extract_sse_delta_payload_collects_incremental_files_revision_and_full_reload_flags() {
+        let inc = extract_sse_delta_payload(&json!({
+            "project_id": "p1",
+            "state": "updated",
+            "reason": "incremental_update",
+            "revision": 77,
+            "nodes": 120,
+            "edges": 310,
+            "changed_files": ["./src\\auth.rs", "src/auth.rs", "src/db.rs"]
+        }));
+        assert_eq!(inc.revision, Some(77));
+        assert_eq!(inc.nodes, Some(120));
+        assert_eq!(inc.edges, Some(310));
+        assert_eq!(inc.changed_files, vec!["src/auth.rs", "src/db.rs"]);
+        assert!(!inc.full_reload);
+
+        let schema = extract_sse_delta_payload(&json!({
+            "project_id": "p1",
+            "state": "ready",
+            "reason": "ir_updated",
+            "schema_changed": true,
+            "changed_files": ["src/a.rs"]
+        }));
+        assert!(schema.schema_changed);
+        assert!(schema.full_reload);
     }
 }
