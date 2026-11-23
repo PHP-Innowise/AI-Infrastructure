@@ -198,6 +198,225 @@ pub(super) fn render_results_files_into(container_id: &str, scope_id: &str, file
     }
 }
 
+pub(super) fn launch_metric_summary(launch: &V) -> String {
+    let settings = &launch["settings"];
+    let usage = &launch["usage"];
+    let mut parts = Vec::new();
+    let provider = m::text(settings, "provider");
+    let model = m::text(settings, "model");
+    let kind = m::text(launch, "kind");
+    let status = m::text(launch, "status");
+    if !provider.is_empty() && !model.is_empty() {
+        parts.push(format!("{provider} ({model})"));
+    } else if !provider.is_empty() {
+        parts.push(provider);
+    } else if !model.is_empty() {
+        parts.push(model);
+    }
+    if !kind.is_empty() {
+        parts.push(kind);
+    }
+    if !status.is_empty() {
+        parts.push(status);
+    }
+    if let Some(tokens) = usage["tokens"].as_u64() {
+        parts.push(format!("{tokens} tokens"));
+    }
+    if let Some(cost) = usage["cost_usd"]
+        .as_f64()
+        .filter(|c| c.is_finite() && *c >= 0.0)
+    {
+        parts.push(format!("${cost:.4}"));
+    }
+    if let Some(secs) = usage["seconds"]
+        .as_f64()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+    {
+        parts.push(format!("{secs:.2}s"));
+    }
+    if parts.is_empty() {
+        let id = m::text(launch, "id");
+        if id.is_empty() {
+            "Launch".into()
+        } else {
+            id
+        }
+    } else {
+        parts.join(" · ")
+    }
+}
+
+pub(super) fn render_launch_metrics_html(launch: &V) -> String {
+    let settings = &launch["settings"];
+    let usage = &launch["usage"];
+    let context = &launch["context"];
+    let receipt = &launch["receipt"];
+    let mut rows = String::new();
+    let push_row = |buf: &mut String, label: &str, value: &str| {
+        if !value.trim().is_empty() {
+            buf.push_str(&format!(
+                "<dt>{}</dt><dd>{}</dd>",
+                dom::escape_html(label),
+                dom::escape_html(value.trim())
+            ));
+        }
+    };
+
+    let id = m::text(launch, "id");
+    let kind = m::text(launch, "kind");
+    let status = m::text(launch, "status");
+    let mut run_bits = Vec::new();
+    if !id.is_empty() {
+        run_bits.push(id);
+    }
+    if !kind.is_empty() {
+        run_bits.push(kind);
+    }
+    if !status.is_empty() {
+        run_bits.push(status);
+    }
+    push_row(&mut rows, "Launch", &run_bits.join(" · "));
+
+    let mut cfg_bits = Vec::new();
+    for field in [
+        "provider",
+        "workflow",
+        "model",
+        "mode",
+        "permissions",
+        "thinking_effort",
+    ] {
+        let v = m::text(settings, field);
+        if !v.is_empty() {
+            cfg_bits.push(if field == "thinking_effort" {
+                format!("effort {v}")
+            } else {
+                v
+            });
+        }
+    }
+    push_row(&mut rows, "Configuration", &cfg_bits.join(" · "));
+
+    let started = m::text(launch, "started_at");
+    let finished = m::text(launch, "finished_at");
+    let secs = usage["seconds"]
+        .as_f64()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(|s| format!("{s:.2}s"));
+    let timing = match (started.as_str(), finished.as_str(), secs.as_deref()) {
+        ("", "", Some(s)) => s.to_owned(),
+        (a, "", Some(s)) => format!("{a} ({s})"),
+        (a, b, Some(s)) if !a.is_empty() && !b.is_empty() => format!("{a} → {b} ({s})"),
+        (a, b, None) if !a.is_empty() && !b.is_empty() => format!("{a} → {b}"),
+        (a, "", None) if !a.is_empty() => a.to_owned(),
+        ("", b, _) if !b.is_empty() => b.to_owned(),
+        _ => String::new(),
+    };
+    push_row(&mut rows, "Timing", &timing);
+
+    let mut token_bits = Vec::new();
+    if let Some(total) = usage["tokens"].as_u64() {
+        token_bits.push(format!("{total} total"));
+    }
+    for (field, label) in [
+        ("input_tokens", "in"),
+        ("output_tokens", "out"),
+        ("cache_read_input_tokens", "cache read"),
+        ("cache_creation_input_tokens", "cache write"),
+    ] {
+        if let Some(n) = usage[field].as_u64() {
+            token_bits.push(format!("{n} {label}"));
+        }
+    }
+    push_row(&mut rows, "Tokens", &token_bits.join(" · "));
+
+    if let Some(cost) = usage["cost_usd"]
+        .as_f64()
+        .filter(|c| c.is_finite() && *c >= 0.0)
+    {
+        push_row(&mut rows, "Cost", &format!("${cost:.4}"));
+    }
+
+    if let Some(ctx_obj) = context.as_object() {
+        let mut ctx_bits = Vec::new();
+        for (k, v) in ctx_obj {
+            if let Some(n) = v.as_u64() {
+                ctx_bits.push(format!("{}: {n}", m::label(k)));
+            } else if let Some(n) = v.as_f64().filter(|n| n.is_finite()) {
+                ctx_bits.push(format!("{}: {n:.1}", m::label(k)));
+            } else if let Some(s) = v.as_str().filter(|s| !s.is_empty()) {
+                ctx_bits.push(format!("{}: {s}", m::label(k)));
+            }
+        }
+        push_row(&mut rows, "Context", &ctx_bits.join(" · "));
+    }
+
+    let sc = &settings["skillcache"];
+    if sc.is_object() {
+        let mut sc_bits = Vec::new();
+        for (field, prefix) in [
+            ("decision", ""),
+            ("mode", "mode "),
+            ("reason", "reason "),
+            ("capsule_id", "capsule "),
+        ] {
+            let val = m::text(sc, field);
+            if !val.is_empty() {
+                sc_bits.push(format!("{prefix}{val}"));
+            }
+        }
+        push_row(&mut rows, "SkillCache", &sc_bits.join(" · "));
+    }
+
+    if receipt.is_object() {
+        let mut rec_bits = Vec::new();
+        for field in ["outcome", "stop_reason", "stopped", "reason", "error"] {
+            let val = m::text(receipt, field);
+            if !val.is_empty() {
+                rec_bits.push(format!("{}: {val}", m::label(field)));
+            }
+        }
+        push_row(&mut rows, "Receipt", &rec_bits.join(" · "));
+    }
+
+    format!("<dl class=\"skill-capsule-facts-grid\">{rows}</dl>")
+}
+
+fn render_results_launches(launches: &[V]) {
+    let keyed: Vec<V> = launches
+        .iter()
+        .enumerate()
+        .map(|(index, launch)| {
+            let id = m::text(launch, "id");
+            let status = m::text(launch, "status");
+            let usage_sig = format!(
+                "{}:{}:{}",
+                launch["usage"]["tokens"].as_u64().unwrap_or(0),
+                launch["usage"]["cost_usd"].as_f64().unwrap_or(0.0),
+                launch["usage"]["seconds"].as_f64().unwrap_or(0.0)
+            );
+            json!({
+                "key": format!("{index}:{id}:{status}:{usage_sig}"),
+                "launch": launch,
+            })
+        })
+        .collect();
+    dom::keyed_render(
+        "results-launches",
+        &keyed,
+        |item| m::text(item, "key"),
+        |item| {
+            let launch = &item["launch"];
+            let d = dom::el("details", "setup-file launch-metric-row", "");
+            dom::add(&d, &dom::el("summary", "", &launch_metric_summary(launch)));
+            let body = dom::el("div", "launch-metrics-body", "");
+            body.set_inner_html(&render_launch_metrics_html(launch));
+            dom::add(&d, &body);
+            d
+        },
+    );
+}
+
 pub async fn results() {
     dom::cancel_timer("results-poll");
     if !results_relevant() {
@@ -469,7 +688,7 @@ pub async fn results() {
                 }
             }
             if view == "usage" {
-                dom::rows("results-launches", &m::array(&v["launches"]));
+                render_results_launches(&m::array(&v["launches"]));
                 knowledge::usage(&v);
                 crate::skillcache::render_usage(&m::array(&v["launches"]));
             }

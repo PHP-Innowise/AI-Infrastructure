@@ -227,14 +227,49 @@ fn overlay_inert_targets(
     }
 }
 
+pub(crate) fn standalone_body_inert_targets(
+    modal_open: bool,
+    mobile_sidebar_open: bool,
+) -> [(&'static str, bool); 3] {
+    if modal_open {
+        [
+            ("#graph-explain-action", true),
+            ("#scrim", true),
+            (".skip", true),
+        ]
+    } else if mobile_sidebar_open {
+        [
+            ("#graph-explain-action", true),
+            ("#scrim", false),
+            (".skip", true),
+        ]
+    } else {
+        [
+            ("#graph-explain-action", false),
+            ("#scrim", false),
+            (".skip", false),
+        ]
+    }
+}
+
+fn set_element_inert(e: &Element, inert: bool) {
+    let has_inert = e.has_attribute("inert");
+    if inert && !has_inert {
+        let _ = e.set_attribute("inert", "");
+    } else if !inert && has_inert {
+        let _ = e.remove_attribute("inert");
+    }
+}
+
 fn set_inert_attr(id: &str, inert: bool) {
     if let Some(e) = get(id) {
-        let has_inert = e.has_attribute("inert");
-        if inert && !has_inert {
-            let _ = e.set_attribute("inert", "");
-        } else if !inert && has_inert {
-            let _ = e.remove_attribute("inert");
-        }
+        set_element_inert(&e, inert);
+    }
+}
+
+fn set_selector_inert_attr(selector: &str, inert: bool) {
+    for el in all(selector) {
+        set_element_inert(&el, inert);
     }
 }
 
@@ -381,6 +416,9 @@ pub fn sync_overlay_inert() {
     if let Some(ref top_id) = top_modal {
         set_inert_attr("sidebar", true);
         set_inert_attr("main", true);
+        for (selector, inert) in standalone_body_inert_targets(true, sidebar_open && mobile) {
+            set_selector_inert_attr(selector, inert);
+        }
         for d in dialogs {
             let should_inert = is_dialog_open_el(&d) && d.id() != *top_id;
             let has_inert = d.has_attribute("inert");
@@ -405,6 +443,11 @@ pub fn sync_overlay_inert() {
         None
     };
 
+    for (selector, inert) in
+        standalone_body_inert_targets(false, (sidebar_open && mobile) || expanded_ws.is_some())
+    {
+        set_selector_inert_attr(selector, inert);
+    }
     for (id, mut inert) in overlay_inert_targets(false, false, false, sidebar_open, mobile) {
         if expanded_ws.is_some() && id == "sidebar" {
             inert = true;
@@ -747,6 +790,7 @@ pub fn dialog(id: &str, open: bool) {
 pub(crate) fn dialog_with_restore(id: &str, open: bool, restore_focus: bool) {
     if let Some(d) = get(id).and_then(|e| e.dyn_into::<web_sys::HtmlDialogElement>().ok()) {
         if open {
+            let _ = d.remove_attribute("hidden");
             if !d.open() {
                 save_focus_for_overlay(id);
                 let _ = d.show_modal();
@@ -762,6 +806,9 @@ pub(crate) fn dialog_with_restore(id: &str, open: bool, restore_focus: bool) {
             if was_open {
                 mark_suppress_close_restore(id);
                 d.close();
+            }
+            if MODAL_OVERLAY_IDS.contains(&id) {
+                let _ = d.set_attribute("hidden", "");
             }
             if !restore_focus {
                 clear_saved_focus_for_overlay(id);
@@ -1631,11 +1678,26 @@ pub(crate) fn next_trap_index(current: Option<usize>, len: usize, shift: bool) -
     }
 }
 
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+pub(crate) fn is_computed_hidden(display: &str, visibility: &str, check_visibility: bool) -> bool {
+    display == "none" || (check_visibility && matches!(visibility, "hidden" | "collapse"))
+}
+
 fn element_hidden(e: &Element, stop_at: Option<&Element>) -> bool {
     let mut cur = Some(e.clone());
     while let Some(node) = cur {
         if node.has_attribute("hidden") {
             return true;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if node.is_connected() {
+            if let Ok(Some(style)) = window().get_computed_style(&node) {
+                let display = style.get_property_value("display").unwrap_or_default();
+                let visibility = style.get_property_value("visibility").unwrap_or_default();
+                if is_computed_hidden(&display, &visibility, &node == e) {
+                    return true;
+                }
+            }
         }
         if let Some(stop) = stop_at {
             if &node == stop {
@@ -1812,16 +1874,13 @@ pub(crate) fn collapse_active_expanded_workspace() -> bool {
     false
 }
 
-fn handle_modal_trap(event: &web_sys::KeyboardEvent) -> bool {
+pub(crate) fn trap_tab_in_container(container: &Element, event: &web_sys::KeyboardEvent) -> bool {
     if event.key() != "Tab" || event.ctrl_key() || event.meta_key() || event.alt_key() {
         return false;
     }
-    let Some(container) = active_overlay_container() else {
-        return false;
-    };
-    let items = modal_focusables(&container);
+    let items = modal_focusables(container);
     if items.is_empty() {
-        focus_element(&container);
+        focus_element(container);
         return true;
     }
     let current = document()
@@ -1831,6 +1890,16 @@ fn handle_modal_trap(event: &web_sys::KeyboardEvent) -> bool {
         focus_element(&items[next]);
     }
     true
+}
+
+fn handle_modal_trap(event: &web_sys::KeyboardEvent) -> bool {
+    if event.key() != "Tab" || event.ctrl_key() || event.meta_key() || event.alt_key() {
+        return false;
+    }
+    let Some(container) = active_overlay_container() else {
+        return false;
+    };
+    trap_tab_in_container(&container, event)
 }
 
 fn handle_tree_keydown(tree: &Element, target: &Element, key: &str) -> bool {
@@ -2452,5 +2521,34 @@ mod tests {
     fn stale_async_dialog_close_is_ignored_when_reopened() {
         assert!(should_apply_dialog_close(false));
         assert!(!should_apply_dialog_close(true));
+        assert_eq!(
+            standalone_body_inert_targets(true, false),
+            [
+                ("#graph-explain-action", true),
+                ("#scrim", true),
+                (".skip", true),
+            ]
+        );
+        assert_eq!(
+            standalone_body_inert_targets(false, true),
+            [
+                ("#graph-explain-action", true),
+                ("#scrim", false),
+                (".skip", true),
+            ]
+        );
+        assert_eq!(
+            standalone_body_inert_targets(false, false),
+            [
+                ("#graph-explain-action", false),
+                ("#scrim", false),
+                (".skip", false),
+            ]
+        );
+        assert!(is_computed_hidden("none", "visible", false));
+        assert!(is_computed_hidden("block", "hidden", true));
+        assert!(is_computed_hidden("block", "collapse", true));
+        assert!(!is_computed_hidden("block", "hidden", false));
+        assert!(!is_computed_hidden("block", "visible", true));
     }
 }

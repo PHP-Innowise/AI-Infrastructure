@@ -490,6 +490,15 @@ fn status(value: &str) -> &'static str {
         _ => "Delivery uncertain — review before continuing",
     }
 }
+const INBOX_VISIBLE_RECEIPTS: usize = 5;
+
+pub(crate) fn earlier_receipts_notice(total_items: usize) -> Option<String> {
+    total_items
+        .checked_sub(INBOX_VISIBLE_RECEIPTS)
+        .filter(|hidden| *hidden > 0)
+        .map(|hidden| format!("+{hidden} earlier"))
+}
+
 pub fn render() {
     let (sid, selected, pending) = m::read(|s| {
         (
@@ -506,7 +515,12 @@ pub fn render() {
     };
     let unknown = unresolved(&saved);
     dom::hidden("session-inbox", items.is_empty() && !unknown);
-    let projection = json!({"sid":sid,"items":items.iter().take(5).collect::<Vec<_>>(),"request":saved["request"],"invalid":saved["invalid"],"disabled":pending});
+    let visible_items = items
+        .iter()
+        .take(INBOX_VISIBLE_RECEIPTS)
+        .collect::<Vec<_>>();
+    let hidden_count = items.len().saturating_sub(INBOX_VISIBLE_RECEIPTS);
+    let projection = json!({"sid":sid,"items":visible_items,"hidden_count":hidden_count,"request":saved["request"],"invalid":saved["invalid"],"disabled":pending});
     if m::data("inbox-render") != projection {
         m::set("inbox-render", projection);
         dom::clear("inbox-receipts");
@@ -546,7 +560,7 @@ pub fn render() {
             }
             dom::append("inbox-receipts", &card);
         }
-        for item in items.iter().take(5) {
+        for item in items.iter().take(INBOX_VISIBLE_RECEIPTS) {
             let card = dom::el("li", "inbox-receipt", "");
             dom::add(
                 &card,
@@ -584,6 +598,13 @@ pub fn render() {
                 );
             }
             dom::append("inbox-receipts", &card);
+        }
+        if let Some(notice) = earlier_receipts_notice(items.len()) {
+            let more = dom::el("li", "inbox-receipt inbox-receipt-more", "");
+            let label = dom::el("p", "knowledge-note", &notice);
+            let _ = label.set_attribute("data-inbox-earlier", &hidden_count.to_string());
+            dom::add(&more, &label);
+            dom::append("inbox-receipts", &more);
         }
     }
     let hint = if saved["invalid"] == true {
@@ -751,5 +772,9 @@ mod tests {
         assert!(track(&json!({"items":[]}), true));
         assert!(!track(&json!({"items":[{"status":"completed"}]}), false));
         assert!(!track(&json!({"error":true,"retry":false}), false));
+        assert_eq!(earlier_receipts_notice(0), None);
+        assert_eq!(earlier_receipts_notice(5), None);
+        assert_eq!(earlier_receipts_notice(6).as_deref(), Some("+1 earlier"));
+        assert_eq!(earlier_receipts_notice(9).as_deref(), Some("+4 earlier"));
     }
 }

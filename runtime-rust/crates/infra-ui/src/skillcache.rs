@@ -858,20 +858,47 @@ async fn load_session(sid: &str, key: &str) {
     }
 }
 
+pub(crate) fn should_reload_session_for_capsule_sse(
+    sid: &str,
+    run_skillcache: &[V],
+    has_rendered_observed_card: bool,
+    has_session_state: bool,
+) -> bool {
+    !sid.is_empty()
+        && (!run_skillcache.is_empty() || has_rendered_observed_card || has_session_state)
+}
+
 /// A capsule changed somewhere in this project: what is shown may be stale.
 pub fn on_sse_capsule(event: &V) {
-    if m::text(event, "project_id") != m::current_project() {
+    let event_project = m::text(event, "project_id");
+    let current_project = m::current_project();
+    let (sid, selected_project, view) = m::read(|s| {
+        (
+            s.sid.clone(),
+            m::text(&s.selected, "project_id"),
+            s.view.clone(),
+        )
+    });
+    if event_project != current_project && (sid.is_empty() || event_project != selected_project) {
         return;
     }
     invalidate_session();
-    let sid = m::read(|s| s.sid.clone());
-    let view = m::read(|s| s.view.clone());
+    let has_observed_card =
+        !dom::all("#events .conversation-skillcache[data-phase=\"observed\"]").is_empty();
+    let run_skillcache = m::array(&m::data("run")["skillcache"]);
+    let reload_session = should_reload_session_for_capsule_sse(
+        &sid,
+        &run_skillcache,
+        has_observed_card,
+        session_state().is_object(),
+    );
+    let reload_capsules = view == "skill-capsules" && event_project == current_project;
     let capsule = m::text(event, "capsule_id");
     spawn_local(async move {
-        if !sid.is_empty() && !m::array(&m::data("run")["skillcache"]).is_empty() {
+        if reload_session {
             load_session(&sid, "").await;
         }
-        if view == "skill-capsules" {
+        if reload_capsules {
             crate::management::capsule_changed(&capsule).await;
         }
     });
@@ -1312,5 +1339,27 @@ mod tests {
         let (custom_ph, custom_hint) = compiler_copy("codex", Some("codex"));
         assert_eq!(custom_ph, "Codex's default model");
         assert!(custom_hint.contains("compiled by Codex"));
+
+        // Observed cards from earlier turns reload session skillcache state even after later
+        // turns cleared `run["skillcache"]`.
+        assert!(!should_reload_session_for_capsule_sse("", &[], true, true));
+        assert!(!should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            false,
+            false
+        ));
+        assert!(should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            true,
+            false
+        ));
+        assert!(should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            false,
+            true
+        ));
     }
 }
