@@ -962,6 +962,8 @@ fn prepare_in_store(
         let mut watermark: u64 = 0;
         let mut extract = CapsuleExtract::default();
         let mut used_cache_prefix = false;
+        let mut cache_hit_watermark = 0u64;
+        let mut cache_hit_count = 0usize;
 
         if let Some((c_wm, c_count, c_msgs, c_seen, c_total, c_cap)) = cached_row
             && c_count > 0
@@ -980,12 +982,18 @@ fn prepare_in_store(
             watermark = c_wm;
             extract = parsed_cap;
             used_cache_prefix = true;
+            cache_hit_watermark = c_wm;
+            cache_hit_count = c_count;
         }
 
         let need_scan =
-            !used_cache_prefix || max_id > watermark || row_count > 0 && messages.is_empty();
-        if !used_cache_prefix || max_id > watermark {
-            let after_id = if used_cache_prefix { watermark } else { 0 };
+            !used_cache_prefix || max_id > watermark || (row_count > 0 && messages.is_empty());
+        if need_scan {
+            let after_id = if used_cache_prefix && !messages.is_empty() {
+                watermark
+            } else {
+                0
+            };
             let mut q = db
                 .prepare(
                     "SELECT id,data FROM events WHERE session_id=? AND id>? ORDER BY id LIMIT ?",
@@ -1039,7 +1047,7 @@ fn prepare_in_store(
                 absorb_message_into_extract(&mut extract, role, &text);
                 messages.push(message);
             }
-        } else if !need_scan {
+        } else {
             watermark = max_id;
         }
 
@@ -1049,7 +1057,7 @@ fn prepare_in_store(
             ));
         }
 
-        if !used_cache_prefix || max_id != watermark || row_count > 0 && watermark == max_id {
+        if !used_cache_prefix || watermark != cache_hit_watermark || row_count != cache_hit_count {
             let _ = db.execute(
                 "INSERT INTO session_merge_source_cache(
                      session_id, event_watermark, event_count, messages_json, seen_json, total_bytes, capsule_json, updated_at
@@ -1532,5 +1540,28 @@ mod tests {
             "{}",
             s1_v2["capsule"]
         );
+
+        // Warm cache repeat read must reuse cache WITHOUT overwriting updated_at.
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "UPDATE session_merge_source_cache SET updated_at='1999-01-01T00:00:00Z' WHERE session_id=?1",
+                [&sid1],
+            )
+            .unwrap();
+            let _bundle3 =
+                prepare_in_store(&db, Some(&store.state), &source_ids, &project_id).unwrap();
+            let marker: String = db
+                .query_row(
+                    "SELECT updated_at FROM session_merge_source_cache WHERE session_id=?1",
+                    [&sid1],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                marker, "1999-01-01T00:00:00Z",
+                "warm cache hit must not perform redundant SQLite cache rewrites"
+            );
+        }
     }
 }

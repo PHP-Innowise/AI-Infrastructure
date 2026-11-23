@@ -140,7 +140,12 @@ struct PreflightMemoKey {
     ir_revision: u64,
     omnigraph_epoch: u64,
     knowledge_epoch: u64,
+    graph_epoch: u64,
+    session_epoch: u64,
+    edition: String,
     knowledge_stamp: String,
+    live_graph_stamp: String,
+    workspace_paths_stamp: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -162,15 +167,19 @@ struct ServicesRuntimeCache {
     seq: u64,
     omnigraph_epochs: HashMap<String, u64>,
     knowledge_epochs: HashMap<String, u64>,
+    graph_epochs: HashMap<String, u64>,
+    session_epochs: HashMap<String, u64>,
     preflight_memo: HashMap<PreflightMemoKey, (Value, u64)>,
     knowledge_sync_stamps: HashMap<KnowledgeSyncStampKey, ((String, u64), u64)>,
 }
 
 impl ServicesRuntimeCache {
-    fn epochs_for(&self, project_id: &str) -> (u64, u64) {
+    fn epochs_for(&self, project_id: &str) -> (u64, u64, u64, u64) {
         (
             self.omnigraph_epochs.get(project_id).copied().unwrap_or(0),
             self.knowledge_epochs.get(project_id).copied().unwrap_or(0),
+            self.graph_epochs.get(project_id).copied().unwrap_or(0),
+            self.session_epochs.get(project_id).copied().unwrap_or(0),
         )
     }
 
@@ -187,6 +196,24 @@ impl ServicesRuntimeCache {
         if !project_id.trim().is_empty() {
             *self
                 .knowledge_epochs
+                .entry(project_id.trim().to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    fn bump_graph(&mut self, project_id: &str) {
+        if !project_id.trim().is_empty() {
+            *self
+                .graph_epochs
+                .entry(project_id.trim().to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    fn bump_session(&mut self, project_id: &str) {
+        if !project_id.trim().is_empty() {
+            *self
+                .session_epochs
                 .entry(project_id.trim().to_owned())
                 .or_insert(0) += 1;
         }
@@ -299,6 +326,128 @@ fn knowledge_revision_stamp(project_root: Option<&Path>) -> KnowledgeDiskStamp {
         return KnowledgeDiskStamp::Racy;
     }
     KnowledgeDiskStamp::Settled(crate::store::sha(entries_out.join("\n").as_bytes()))
+}
+
+fn resolve_knowledge_roots(
+    store: &SessionStore,
+    project_id: &str,
+) -> (Option<PathBuf>, Option<PathBuf>, Option<String>) {
+    let project_root = store
+        .project(project_id)
+        .ok()
+        .and_then(|p| p["path"].as_str().map(PathBuf::from));
+    let edition = store.connection().ok().and_then(|db| {
+        db.query_row(
+            "SELECT edition FROM project_accelerators WHERE project_id=?1",
+            [project_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    });
+    let state_root = if edition.is_some() {
+        Some(store.state.join("attached").join(project_id))
+    } else {
+        project_root.clone()
+    };
+    (project_root, state_root, edition)
+}
+
+fn stamp_file_with_racy_hash(path: &Path, max_hash_bytes: u64) -> Option<String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Some("missing".to_owned());
+        }
+        Err(_) => return None,
+    };
+    if meta.file_type().is_symlink() {
+        return None;
+    }
+    let mtime_ns = meta.modified().ok().and_then(time_ns)?;
+    let now_ns = time_ns(SystemTime::now()).unwrap_or(0);
+    let racy =
+        mtime_ns <= 0 || now_ns <= KNOWLEDGE_RACY_NS || mtime_ns > now_ns - KNOWLEDGE_RACY_NS;
+    if meta.is_dir() {
+        return (!racy).then(|| format!("dir:{mtime_ns}"));
+    }
+    if !meta.is_file() {
+        return None;
+    }
+    if racy {
+        if meta.len() > max_hash_bytes {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        Some(format!(
+            "file:{}:{mtime_ns}:{}",
+            meta.len(),
+            crate::store::sha(&bytes)
+        ))
+    } else {
+        Some(format!("file:{}:{mtime_ns}", meta.len()))
+    }
+}
+
+fn collect_preflight_request_paths(request: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for arr in [
+        request["body"]["paths"].as_array(),
+        request["query"]["paths"].as_array(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for raw in arr.iter().filter_map(Value::as_str) {
+            if let Some(clean) = crate::knowledge::clean_relative_path(raw)
+                && seen.insert(clean.clone())
+            {
+                paths.push(clean);
+                if paths.len() >= 64 {
+                    return paths;
+                }
+            }
+        }
+    }
+    for text in [
+        request["body"]["prompt"].as_str(),
+        request["query"]["prompt"].as_str(),
+        request["query"]["query"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for token in text.split_whitespace() {
+            let trimmed = token.trim_matches(|c| {
+                matches!(c, '`' | '\'' | '"' | ',' | ';' | ')' | '(' | '[' | ']')
+            });
+            if trimmed.contains('/')
+                && !trimmed.contains("://")
+                && let Some(clean) = crate::knowledge::clean_relative_path(trimmed)
+                && seen.insert(clean.clone())
+            {
+                paths.push(clean);
+                if paths.len() >= 64 {
+                    return paths;
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn workspace_paths_stamp(project_root: Option<&Path>, request: &Value) -> Option<String> {
+    let requested = collect_preflight_request_paths(request);
+    if requested.is_empty() {
+        return Some(String::new());
+    }
+    let root = project_root.filter(|p| p.is_dir())?;
+    let mut parts = Vec::with_capacity(requested.len());
+    for rel in requested {
+        let stamp = stamp_file_with_racy_hash(&root.join(&rel), 512 * 1024)?;
+        parts.push(format!("{rel}={stamp}"));
+    }
+    Some(crate::store::sha(parts.join("\n").as_bytes()))
 }
 
 pub struct NativeServices {
@@ -424,12 +573,9 @@ impl NativeServices {
         {
             return;
         }
-        let project_root = self
-            .store
-            .project(project_id)
-            .ok()
-            .and_then(|p| p["path"].as_str().map(PathBuf::from));
-        let disk_stamp = knowledge_revision_stamp(project_root.as_deref());
+        let (project_root, state_root, _) = resolve_knowledge_roots(&self.store, project_id);
+        let stamp_root = state_root.as_deref().or(project_root.as_deref());
+        let disk_stamp = knowledge_revision_stamp(stamp_root);
         let bank_norm = bank.map(str::trim).unwrap_or("").to_owned();
         let session_norm = session_id.map(str::trim).unwrap_or("").to_owned();
         let sync_key = KnowledgeSyncStampKey {
@@ -439,7 +585,7 @@ impl NativeServices {
         };
         let settled_token = match &disk_stamp {
             KnowledgeDiskStamp::Settled(stamp) => self.runtime_cache.lock().ok().map(|guard| {
-                let (_, knowledge_epoch) = guard.epochs_for(project_id);
+                let (_, knowledge_epoch, _, _) = guard.epochs_for(project_id);
                 (stamp.clone(), knowledge_epoch)
             }),
             KnowledgeDiskStamp::Absent | KnowledgeDiskStamp::Racy => None,
@@ -477,23 +623,24 @@ impl NativeServices {
             )
             .await;
         if sync_res.is_ok()
-            && let Some(token) = settled_token
             && let Ok(mut guard) = self.runtime_cache.lock()
         {
-            guard.seq = guard.seq.saturating_add(1);
-            let s = guard.seq;
-            if guard.knowledge_sync_stamps.len() >= MAX_KNOWLEDGE_SYNC_STAMPS
-                && !guard.knowledge_sync_stamps.contains_key(&sync_key)
-                && let Some(evict) = guard
-                    .knowledge_sync_stamps
-                    .iter()
-                    .min_by_key(|(_, (_, last))| *last)
-                    .map(|(k, _)| k.clone())
-            {
-                guard.knowledge_sync_stamps.remove(&evict);
-            }
-            guard.knowledge_sync_stamps.insert(sync_key, (token, s));
             guard.bump_omnigraph(project_id);
+            if let Some(token) = settled_token {
+                guard.seq = guard.seq.saturating_add(1);
+                let s = guard.seq;
+                if guard.knowledge_sync_stamps.len() >= MAX_KNOWLEDGE_SYNC_STAMPS
+                    && !guard.knowledge_sync_stamps.contains_key(&sync_key)
+                    && let Some(evict) = guard
+                        .knowledge_sync_stamps
+                        .iter()
+                        .min_by_key(|(_, (_, last))| *last)
+                        .map(|(k, _)| k.clone())
+                {
+                    guard.knowledge_sync_stamps.remove(&evict);
+                }
+                guard.knowledge_sync_stamps.insert(sync_key, (token, s));
+            }
         }
     }
     async fn attach_waiting_permission_counts(&self, sessions: &mut [Value]) {
@@ -1221,16 +1368,40 @@ impl NativeServices {
         if project_id.is_empty() {
             return None;
         }
-        let project_root = self
-            .store
-            .project(project_id)
-            .ok()
-            .and_then(|p| p["path"].as_str().map(PathBuf::from));
-        let knowledge_stamp = match knowledge_revision_stamp(project_root.as_deref()) {
+        // Session-scoped preflights read live `session["brain"]`, worktree `project_path`, and
+        // `graphs.changes_catalog(Target::Run(sid))`; bypass memoization when `session_id` is set.
+        let has_session_scope = [
+            request["params"]["session_id"].as_str(),
+            request["query"]["session_id"].as_str(),
+            request["body"]["session_id"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|s| !s.trim().is_empty());
+        if has_session_scope {
+            return None;
+        }
+        let (project_root, state_root, edition) = resolve_knowledge_roots(&self.store, project_id);
+        let stamp_root = state_root.as_deref();
+        let knowledge_stamp = match knowledge_revision_stamp(stamp_root) {
             KnowledgeDiskStamp::Racy => return None,
-            KnowledgeDiskStamp::Absent => "absent".to_owned(),
+            KnowledgeDiskStamp::Absent => {
+                if edition.is_some() {
+                    // Attached project without materialized bank/brain yet -> bypass cleanly.
+                    return None;
+                }
+                "absent".to_owned()
+            }
             KnowledgeDiskStamp::Settled(digest) => digest,
         };
+        let live_graph_path = self
+            .store
+            .state
+            .join("graphs")
+            .join(project_id)
+            .join("live.json");
+        let live_graph_stamp = stamp_file_with_racy_hash(&live_graph_path, 2 * 1024 * 1024)?;
+        let workspace_paths_stamp = workspace_paths_stamp(project_root.as_deref(), request)?;
         let mut req_norm = request.clone();
         if let Some(body) = req_norm.get_mut("body").and_then(Value::as_object_mut) {
             body.remove("skillcache");
@@ -1244,19 +1415,24 @@ impl NativeServices {
                 .flatten()
                 .map(|ir| ir.current_write_epoch())
                 .unwrap_or(0);
-        let (omnigraph_epoch, knowledge_epoch) = self
+        let (omnigraph_epoch, knowledge_epoch, graph_epoch, session_epoch) = self
             .runtime_cache
             .lock()
             .ok()
             .map(|guard| guard.epochs_for(project_id))
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0, 0));
         Some(PreflightMemoKey {
             project_id: project_id.to_owned(),
             request_sha,
             ir_revision,
             omnigraph_epoch,
             knowledge_epoch,
+            graph_epoch,
+            session_epoch,
+            edition: edition.unwrap_or_default(),
             knowledge_stamp,
+            live_graph_stamp,
+            workspace_paths_stamp,
         })
     }
     pub fn new(
@@ -1791,28 +1967,55 @@ impl Services for NativeServices {
                 }
             };
             if let Payload::Json(ref val) = payload
-                && val["ok"] == true
+                && val.get("ok").and_then(Value::as_bool) != Some(false)
             {
                 let mut_pid = self.resolve_project_id(&[
                     val.get("project_id"),
+                    val.get("session").and_then(|s| s.get("project_id")),
                     params.get("project_id"),
                     query.get("project_id"),
                     body.get("project_id"),
                 ]);
-                if operation.starts_with("omnigraph.")
-                    && !matches!(operation, "omnigraph.status" | "omnigraph.file_context")
-                    && let Some(ref pid) = mut_pid
+                if let Some(ref pid) = mut_pid
                     && let Ok(mut guard) = self.runtime_cache.lock()
                 {
-                    guard.bump_omnigraph(pid);
-                } else if (operation == "knowledge.run"
-                    || operation.starts_with("brain.")
-                    || operation.starts_with("memory."))
-                    && let Some(ref pid) = mut_pid
-                    && let Ok(mut guard) = self.runtime_cache.lock()
-                {
-                    guard.bump_knowledge(pid);
+                    if operation.starts_with("omnigraph.")
+                        && !matches!(operation, "omnigraph.status" | "omnigraph.file_context")
+                    {
+                        guard.bump_omnigraph(pid);
+                    } else if operation == "knowledge.run"
+                        || operation.starts_with("brain.")
+                        || operation.starts_with("memory.")
+                        || operation.starts_with("accelerators.")
+                    {
+                        guard.bump_knowledge(pid);
+                    } else if operation.starts_with("graph.")
+                        && !matches!(
+                            operation,
+                            "graph.status" | "graph.live" | "graph.list" | "graph.changes"
+                        )
+                        && !(operation == "graph.act" && body["action"].as_str() == Some("changes"))
+                    {
+                        guard.bump_graph(pid);
+                    } else if operation.starts_with("sessions.")
+                        && !matches!(
+                            operation,
+                            "sessions.list"
+                                | "sessions.get"
+                                | "sessions.events"
+                                | "sessions.tail"
+                                | "sessions.waiting_counts"
+                                | "sessions.waiting_permissions"
+                                | "sessions.skillcache_preview"
+                        )
+                    {
+                        guard.bump_session(pid);
+                    }
                 }
+            }
+            if let Payload::Json(ref val) = payload
+                && val["ok"] == true
+            {
                 if operation == "omnigraph.promote" {
                     let project_id = body["project_id"]
                         .as_str()
@@ -3632,8 +3835,109 @@ mod tests {
             )
             .await
             .unwrap();
-        let _ = services.request("knowledge.preflight", req2).await.unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
         assert_eq!(preflight_calls.load(Ordering::SeqCst), 3);
+
+        // Editing requested workspace file WITHOUT IR sync still invalidates workspace_paths_stamp!
+        std::fs::write(proj.join("src/a.rs"), "pub fn a() -> i32 { 3 }\n").unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 4);
+
+        // Graph mutation bumps graph_epoch -> invalidates preflight memo cleanly.
+        let _ = services
+            .request(
+                "graph.act",
+                json!({"params": {"project_id": pid}, "query": {}, "body": {"project_id": pid, "action": "rebuild"}}),
+            )
+            .await
+            .unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 5);
+
+        // `best_effort_sync_knowledge` when disk stamp is Absent must still bump omnigraph_epoch.
+        services.best_effort_sync_knowledge(&pid, None, None).await;
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 6);
+
+        // Session-scoped preflight requests (`session_id` present) bypass memoization cleanly.
+        let sid_req = json!({
+            "params": {"project_id": pid},
+            "query": {},
+            "body": {"prompt": "check a.rs", "paths": ["src/a.rs"], "session_id": "sess-live-1"}
+        });
+        let _ = services
+            .request("knowledge.preflight", sid_req.clone())
+            .await
+            .unwrap();
+        let _ = services
+            .request("knowledge.preflight", sid_req)
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 8);
+
+        // Attached project resolves `<store.state>/attached/<project_id>` for knowledge stamping
+        // and invalidates when attached `memory-bank/` contains fresh edits.
+        {
+            let db = services.store.connection().unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS project_accelerators(project_id TEXT PRIMARY KEY,edition TEXT NOT NULL,attached_at TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO project_accelerators(project_id, edition, attached_at)
+                 VALUES(?1, 'Laravel', '2026-01-01T00:00:00Z')",
+                [&pid],
+            )
+            .unwrap();
+        }
+        let attached_bank = dir
+            .path()
+            .join("state/attached")
+            .join(&pid)
+            .join("memory-bank");
+        std::fs::create_dir_all(&attached_bank).unwrap();
+        let attached_mem = attached_bank.join("MEM-20260101-att.md");
+        std::fs::write(&attached_mem, "# Attached\nInitial.\n").unwrap();
+        let settled_att = SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&attached_mem)
+            .unwrap()
+            .set_modified(settled_att)
+            .unwrap();
+        std::fs::File::options()
+            .read(true)
+            .open(&attached_bank)
+            .unwrap()
+            .set_modified(settled_att)
+            .unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        let _ = services
+            .request("knowledge.preflight", req2.clone())
+            .await
+            .unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 9);
+
+        // Recent edit under `<state>/attached/<pid>/memory-bank` bypasses memo inside RACY_NS.
+        std::fs::write(&attached_mem, "# Attached\nModified.\n").unwrap();
+        let _ = services.request("knowledge.preflight", req2).await.unwrap();
+        assert_eq!(preflight_calls.load(Ordering::SeqCst), 10);
+
         services.close().await.unwrap();
     }
 
