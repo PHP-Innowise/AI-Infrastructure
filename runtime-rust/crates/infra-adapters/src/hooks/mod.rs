@@ -568,19 +568,5 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
     result
 }
 fn continuity(context: &Context) -> Result<Output> {
-    if context.other_worktree {
-        return Ok(Output::default());
-    }
-    let value = infra_core::chat_continuity::execute(
-        &infra_core::RuntimeContext::new(
-            context.roots.clone(),
-            std::env::var("PROJECT_BRAIN_OWNER").unwrap_or_else(|_| "local".into()),
-            infra_core::RuntimeConfig::load(&context.roots)?.mode(None)?,
-        )?,
-        &context.host,
-        "hook",
-        &context.raw,
-        &json!({}),
-    )?;
-    Output::envelope(value)
+    memory::continuity(context)
 }

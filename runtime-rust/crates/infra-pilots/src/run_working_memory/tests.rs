@@ -749,3 +749,89 @@ fn real_archived_receipts_pass_the_final_privacy_gate() {
         "24 real archived native receipts pass the final pre-storage privacy gate and report contract"
     );
 }
+
+#[test]
+fn snapshot_store_invalidates_before_ttl_when_citation_or_graph_ir_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = SqliteStore::open(temp.path()).unwrap();
+    let base_validation = SnapshotValidation {
+        citations: vec![Citation {
+            service: "orders".into(),
+            path: "src/Order.php".into(),
+            sha256: "a".repeat(64),
+        }],
+        graph_ir_revisions: BTreeMap::from([("graph_ir.sqlite3".into(), 1)]),
+    };
+    let key = "infra:pilot:run-memory:v1:unit-test";
+    let payload = br#"{"ok":true}"#;
+    store
+        .publish_validated(key, payload, Duration::from_secs(600), &base_validation)
+        .unwrap();
+    assert_eq!(
+        store.load_validated(key, &base_validation).unwrap(),
+        Some(payload.to_vec())
+    );
+
+    // Changing a cited source SHA-256 invalidates before TTL and deletes the stale row.
+    let mut drifted_citation = base_validation.clone();
+    drifted_citation.citations[0].sha256 = "b".repeat(64);
+    assert_eq!(store.load_validated(key, &drifted_citation).unwrap(), None);
+    assert_eq!(
+        store.load(key).unwrap(),
+        None,
+        "mismatch must evict stale row from SqliteStore"
+    );
+
+    // Republish and confirm Graph-IR revision drift also invalidates immediately before TTL.
+    store
+        .publish_validated(key, payload, Duration::from_secs(600), &base_validation)
+        .unwrap();
+    let mut drifted_ir = base_validation.clone();
+    drifted_ir
+        .graph_ir_revisions
+        .insert("graph_ir.sqlite3".into(), 2);
+    assert_eq!(store.load_validated(key, &drifted_ir).unwrap(), None);
+
+    // End-to-end RunWorkingMemory + WAL Graph-IR write_epoch bump transitions hit -> rebuilt.
+    let (_sc_temp, s) = fixture();
+    let service_root = PathBuf::from(s.state["roots"]["orders"].as_str().unwrap());
+    let ir_dir = service_root.join("memory-bank/local");
+    std::fs::create_dir_all(&ir_dir).unwrap();
+    let ir_db = ir_dir.join("graph_ir.sqlite3");
+    let ir_conn = Connection::open(&ir_db).unwrap();
+    ir_conn
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             CREATE TABLE ir_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);\
+             INSERT INTO ir_meta(key, value) VALUES('write_epoch', '1');",
+        )
+        .unwrap();
+
+    let mut m = local(&s);
+    append(&mut m, &s);
+    // `append` publishes the initial view; reading again is a cache hit until Graph-IR bumps.
+    assert_eq!(m.snapshot(&s.state).unwrap().backend, "hit");
+
+    ir_conn
+        .execute("UPDATE ir_meta SET value='2' WHERE key='write_epoch'", [])
+        .unwrap();
+    assert_eq!(m.snapshot(&s.state).unwrap().backend, "rebuilt");
+    assert_eq!(m.snapshot(&s.state).unwrap().backend, "hit");
+
+    // Settled file-stamp citation cache reuses citations outside CITATION_RACY_NS and refreshes on edit.
+    let cited = m.citation("orders", "contract.txt").unwrap();
+    let (_, settled_ns) = file_stamp(&service_root.join("contract.txt")).unwrap();
+    let hit = m
+        .citation_cached_with_now("orders", "contract.txt", settled_ns + CITATION_RACY_NS + 1)
+        .unwrap();
+    assert_eq!(hit, cited);
+    std::fs::write(
+        service_root.join("contract.txt"),
+        "refund.completed: refund_id, order_id, reason\n",
+    )
+    .unwrap();
+    let refreshed = m
+        .citation_cached_with_now("orders", "contract.txt", settled_ns + CITATION_RACY_NS + 2)
+        .unwrap();
+    assert_ne!(refreshed.sha256, cited.sha256);
+}

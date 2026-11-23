@@ -182,3 +182,84 @@ impl Parser<'_> {
         }
     }
 }
+
+/// Computes the lowercase hex SHA-256 digest of a JSON value serialized in canonical form.
+pub fn canonical_sha256(value: &Value) -> Result<String> {
+    let encoded = crate::domain::json::canonical(value)?;
+    Ok(crate::query::sha256(encoded.as_bytes()))
+}
+
+/// Computes the canonical SHA-256 body digest of a sealed JSON object excluding `"seal_sha256"`.
+pub fn seal_digest(protocol: &Value) -> Result<String> {
+    let mut body = protocol.clone();
+    if let Some(members) = body.as_object_mut() {
+        members.remove("seal_sha256");
+    }
+    canonical_sha256(&body)
+}
+
+/// Seals a JSON report object in place at its top-level keys (`schema`, `input_digest`,
+/// `sealed_at`, `seal_sha256`), matching the `treatments` / `sealed_ab` envelope convention.
+pub fn seal_envelope(schema: &str, mut report: Value, input_digest: &str) -> Result<Value> {
+    let obj = report.as_object_mut().ok_or_else(|| {
+        refused(
+            "envelope-type",
+            "Sealed envelope report must be a JSON object.",
+        )
+    })?;
+    obj.insert("schema".into(), Value::String(schema.into()));
+    obj.insert("input_digest".into(), Value::String(input_digest.into()));
+    obj.insert(
+        "sealed_at".into(),
+        Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+    );
+    let digest = seal_digest(&Value::Object(obj.clone()))?;
+    obj.insert("seal_sha256".into(), Value::String(digest));
+    Ok(report)
+}
+
+/// Verifies that a sealed JSON report object carries a matching `"seal_sha256"` over all
+/// remaining top-level and nested keys.
+pub fn verify_sealed_digest(sealed: &Value, mismatch_message: &str) -> Result<()> {
+    if !sealed.is_object() {
+        return Err(RuntimeError::invalid(mismatch_message));
+    }
+    let expected = seal_digest(sealed)?;
+    if sealed["seal_sha256"].as_str() != Some(expected.as_str()) {
+        return Err(RuntimeError::invalid(mismatch_message));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sealed_envelope_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_sha256_and_sealed_envelope_detect_top_level_and_nested_tampering() {
+        let a = json!({"b": 2, "a": {"y": true, "x": 1}});
+        let b = json!({"a": {"x": 1, "y": true}, "b": 2});
+        assert_eq!(canonical_sha256(&a).unwrap(), canonical_sha256(&b).unwrap());
+
+        let input_digest = canonical_sha256(&json!({"case": 1})).unwrap();
+        let mut sealed = seal_envelope(
+            "test-report-v1",
+            json!({"horizon": 2, "metrics": {"tokens": 42}}),
+            &input_digest,
+        )
+        .unwrap();
+        assert_eq!(sealed["schema"], "test-report-v1");
+        assert_eq!(sealed["input_digest"], input_digest);
+        verify_sealed_digest(&sealed, "tampered").unwrap();
+
+        let mut top_tampered = sealed.clone();
+        top_tampered["horizon"] = json!(3);
+        assert!(verify_sealed_digest(&top_tampered, "tampered").is_err());
+
+        sealed["metrics"]["tokens"] = json!(0);
+        assert!(verify_sealed_digest(&sealed, "tampered").is_err());
+        assert!(verify_sealed_digest(&json!(["not-an-object"]), "tampered").is_err());
+        assert!(seal_envelope("test-report-v1", json!([]), &input_digest).is_err());
+    }
+}

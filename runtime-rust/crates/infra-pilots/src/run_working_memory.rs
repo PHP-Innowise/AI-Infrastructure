@@ -21,6 +21,57 @@ const MAX_RECORDS: usize = 256;
 const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TTL_MS: u64 = 86_400_000;
 const JOURNAL: &str = "journal.json";
+const CITATION_RACY_NS: i128 = 2_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    mtime_ns: i128,
+    ctime_ns: i128,
+    len: u64,
+    ino: u64,
+}
+
+fn current_unix_ns() -> i128 {
+    i128::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    )
+    .unwrap_or(0)
+}
+
+fn file_stamp(path: &Path) -> Option<(FileStamp, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mtime_ns = i128::try_from(
+        meta.modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    )
+    .ok()?;
+    #[cfg(unix)]
+    let (ctime_ns, len, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+        (ctime, meta.size(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let (ctime_ns, len, ino) = (mtime_ns, meta.len(), 0u64);
+    let settled = mtime_ns.max(ctime_ns);
+    Some((
+        FileStamp {
+            mtime_ns,
+            ctime_ns,
+            len,
+            ino,
+        },
+        settled,
+    ))
+}
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -167,10 +218,86 @@ struct Journal {
     records: Vec<Record>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotValidation {
+    pub citations: Vec<Citation>,
+    #[serde(default)]
+    pub graph_ir_revisions: BTreeMap<String, i64>,
+}
+
+fn read_graph_ir_epoch(db_path: &Path) -> Option<i64> {
+    let meta = std::fs::symlink_metadata(db_path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let value: String = conn
+        .query_row(
+            "SELECT value FROM ir_meta WHERE key='write_epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    value.parse::<i64>().ok()
+}
+
+fn collect_graph_ir_revisions<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+) -> BTreeMap<String, i64> {
+    let candidates = [
+        "graph_ir.sqlite3",
+        "memory-bank/local/graph_ir.sqlite3",
+        "ir.sqlite",
+        "memory-bank/local/ir.sqlite",
+    ];
+    let mut revisions = BTreeMap::new();
+    for root in roots {
+        for rel in candidates {
+            let db_path = root.join(rel);
+            let Ok(canonical) = infra_core::fs::canonicalize(&db_path) else {
+                continue;
+            };
+            let key = canonical.to_string_lossy().replace('\\', "/");
+            if revisions.contains_key(&key) {
+                continue;
+            }
+            if let Some(epoch) = read_graph_ir_epoch(&canonical) {
+                revisions.insert(key, epoch);
+            }
+        }
+    }
+    revisions
+}
+
 /// Both adapters store a disposable, versioned view. They never acknowledge a worker result.
 pub trait SnapshotStore: Send {
     fn load(&mut self, key: &str) -> Result<Option<Vec<u8>>>;
     fn publish(&mut self, key: &str, bytes: &[u8], ttl: Duration) -> Result<()>;
+
+    fn load_validated(
+        &mut self,
+        key: &str,
+        expected_validation: &SnapshotValidation,
+    ) -> Result<Option<Vec<u8>>> {
+        let _ = expected_validation;
+        self.load(key)
+    }
+
+    fn publish_validated(
+        &mut self,
+        key: &str,
+        bytes: &[u8],
+        ttl: Duration,
+        validation: &SnapshotValidation,
+    ) -> Result<()> {
+        let _ = validation;
+        self.publish(key, bytes, ttl)
+    }
 }
 
 pub struct SqliteStore {
@@ -209,7 +336,10 @@ impl SqliteStore {
         custody.secure_private_file(name)?;
         custody.check()?;
         connection.busy_timeout(Duration::from_millis(100))?;
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS snapshots(key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_ms INTEGER NOT NULL)")?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS snapshots(key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_ms INTEGER NOT NULL);\
+             CREATE TABLE IF NOT EXISTS snapshot_validations(key TEXT PRIMARY KEY, validation TEXT NOT NULL, expires_ms INTEGER NOT NULL);",
+        )?;
         Ok(Self { connection })
     }
 }
@@ -233,6 +363,70 @@ impl SnapshotStore for SqliteStore {
             "INSERT OR REPLACE INTO snapshots(key,value,expires_ms) VALUES(?1,?2,?3)",
             params![key, bytes, now_ms().saturating_add(ttl.as_millis() as u64)],
         )?;
+        Ok(())
+    }
+    fn load_validated(
+        &mut self,
+        key: &str,
+        expected_validation: &SnapshotValidation,
+    ) -> Result<Option<Vec<u8>>> {
+        let now = now_ms();
+        let mut statement = self.connection.prepare(
+            "SELECT s.value, v.validation FROM snapshots s \
+             LEFT JOIN snapshot_validations v ON v.key = s.key AND v.expires_ms > ?2 \
+             WHERE s.key=?1 AND s.expires_ms>?2 AND length(s.value)<=?3",
+        )?;
+        let mut rows = statement.query(params![key, now, SNAPSHOT_BYTES])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let bytes: Vec<u8> = row.get(0)?;
+        let validation_raw: Option<String> = row.get(1)?;
+        drop(rows);
+        drop(statement);
+        let valid = validation_raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<SnapshotValidation>(raw).ok())
+            .is_some_and(|stored| &stored == expected_validation);
+        if !valid {
+            let _ = self
+                .connection
+                .execute("DELETE FROM snapshots WHERE key=?1", [key]);
+            let _ = self
+                .connection
+                .execute("DELETE FROM snapshot_validations WHERE key=?1", [key]);
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+    fn publish_validated(
+        &mut self,
+        key: &str,
+        bytes: &[u8],
+        ttl: Duration,
+        validation: &SnapshotValidation,
+    ) -> Result<()> {
+        if bytes.len() > SNAPSHOT_BYTES {
+            bail!("working_memory_snapshot_bound")
+        }
+        let now = now_ms();
+        let expires_ms = now.saturating_add(ttl.as_millis() as u64);
+        let validation_raw = serde_json::to_string(validation)?;
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute("DELETE FROM snapshots WHERE expires_ms<=?1", [now])?;
+        tx.execute(
+            "DELETE FROM snapshot_validations WHERE expires_ms<=?1",
+            [now],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO snapshots(key,value,expires_ms) VALUES(?1,?2,?3)",
+            params![key, bytes, expires_ms],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO snapshot_validations(key,validation,expires_ms) VALUES(?1,?2,?3)",
+            params![key, validation_raw, expires_ms],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -289,6 +483,64 @@ impl SnapshotStore for RedisStore {
             .query::<()>(&mut self.connection()?)
             .map_err(|_| anyhow::anyhow!("working_memory_redis_write"))
     }
+    fn load_validated(
+        &mut self,
+        key: &str,
+        expected_validation: &SnapshotValidation,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(bytes) = self.load(key)? else {
+            return Ok(None);
+        };
+        let meta_key = format!("{key}:validation");
+        let mut conn = self.connection()?;
+        let meta_raw: Option<Vec<u8>> = redis::cmd("GET")
+            .arg(&meta_key)
+            .query(&mut conn)
+            .map_err(|_| anyhow::anyhow!("working_memory_redis_read"))?;
+        let valid = meta_raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_slice::<SnapshotValidation>(raw).ok())
+            .is_some_and(|stored| &stored == expected_validation);
+        if !valid {
+            let _ = redis::cmd("DEL")
+                .arg(key)
+                .arg(&meta_key)
+                .query::<()>(&mut conn);
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+    fn publish_validated(
+        &mut self,
+        key: &str,
+        bytes: &[u8],
+        ttl: Duration,
+        validation: &SnapshotValidation,
+    ) -> Result<()> {
+        if bytes.len() > SNAPSHOT_BYTES {
+            bail!("working_memory_snapshot_bound")
+        }
+        let ttl_ms = ttl.as_millis().max(1) as u64;
+        let validation_bytes = serde_json::to_vec(validation)?;
+        let meta_key = format!("{key}:validation");
+        let mut conn = self.connection()?;
+        redis::pipe()
+            .atomic()
+            .cmd("SET")
+            .arg(key)
+            .arg(bytes)
+            .arg("PX")
+            .arg(ttl_ms)
+            .ignore()
+            .cmd("SET")
+            .arg(&meta_key)
+            .arg(validation_bytes)
+            .arg("PX")
+            .arg(ttl_ms)
+            .ignore()
+            .query::<()>(&mut conn)
+            .map_err(|_| anyhow::anyhow!("working_memory_redis_write"))
+    }
 }
 
 #[derive(Debug)]
@@ -311,6 +563,7 @@ pub struct RunWorkingMemory {
     scope: Scope,
     roots: BTreeMap<String, PathBuf>,
     store: Box<dyn SnapshotStore>,
+    citation_cache: BTreeMap<(String, String), (FileStamp, Citation)>,
 }
 impl RunWorkingMemory {
     pub fn open(
@@ -369,6 +622,7 @@ impl RunWorkingMemory {
             scope,
             roots,
             store,
+            citation_cache: BTreeMap::new(),
         };
         let _lock = execution::lock(&memory.directory, ".journal.lock")?;
         memory.journal()?;
@@ -455,6 +709,36 @@ impl RunWorkingMemory {
             path: path.into(),
             sha256: strict::sha(&raw),
         })
+    }
+    fn citation_cached_with_now(
+        &mut self,
+        service: &str,
+        path: &str,
+        now_ns: i128,
+    ) -> Result<Citation> {
+        let root = self
+            .roots
+            .get(service)
+            .context("working_memory_source_scope")?;
+        source_path(path)?;
+        let target = root.join(path);
+        let stamp_info = file_stamp(&target);
+        let cache_key = (service.to_string(), path.to_string());
+        if let Some((stamp, settled_ns)) = &stamp_info
+            && now_ns - *settled_ns >= CITATION_RACY_NS
+            && let Some((cached_stamp, cached_citation)) = self.citation_cache.get(&cache_key)
+            && cached_stamp == stamp
+        {
+            return Ok(cached_citation.clone());
+        }
+        let fresh = self.citation(service, path)?;
+        if let Some((stamp, settled_ns)) = stamp_info
+            && now_ns - settled_ns >= CITATION_RACY_NS
+        {
+            self.citation_cache
+                .insert(cache_key, (stamp, fresh.clone()));
+        }
+        Ok(fresh)
     }
     pub fn append(
         &mut self,
@@ -612,6 +896,8 @@ impl RunWorkingMemory {
         }
         let count = latest.len();
         let mut entries = vec![];
+        let mut cited = BTreeMap::<(String, String), Citation>::new();
+        let now_ns = current_unix_ns();
         let mut until = at.saturating_add(1000);
         if state["status"] != "completed" {
             let mut rows = latest.into_values().collect::<Vec<_>>();
@@ -622,13 +908,25 @@ impl RunWorkingMemory {
                 if !receipt_valid[&sequence] || record.created_ms > at || record.expires_ms <= at {
                     continue;
                 }
-                if observation.sources.iter().any(|source| {
-                    self.citation(&source.service, &source.path).as_ref().ok() != Some(source)
-                }) {
+                let mut current_sources = Vec::with_capacity(observation.sources.len());
+                let mut stale = false;
+                for source in &observation.sources {
+                    match self.citation_cached_with_now(&source.service, &source.path, now_ns) {
+                        Ok(current) if &current == source => current_sources.push(current),
+                        _ => {
+                            stale = true;
+                            break;
+                        }
+                    }
+                }
+                if stale {
                     continue;
                 }
                 if entries.len() >= MAX_ENTRIES {
                     continue;
+                }
+                for current in current_sources {
+                    cited.insert((current.service.clone(), current.path.clone()), current);
                 }
                 until = if entries.is_empty() {
                     record.expires_ms
@@ -653,17 +951,26 @@ impl RunWorkingMemory {
             hash(&self.scope)?,
             strict::sha(&expected)
         );
+        let graph_ir_revisions = collect_graph_ir_revisions(
+            std::iter::once(self.run_directory.as_path())
+                .chain(self.roots.values().map(PathBuf::as_path)),
+        );
+        let validation = SnapshotValidation {
+            citations: cited.into_values().collect(),
+            graph_ir_revisions,
+        };
         // Canonical replay and current sources determine the exact allowed view.
         // Backend bytes can never omit/replace a claim or bypass source admission.
-        let backend = match self.store.load(&key) {
+        let backend = match self.store.load_validated(&key, &validation) {
             Ok(Some(raw)) if raw == expected => "hit",
             _ => {
                 if self
                     .store
-                    .publish(
+                    .publish_validated(
                         &key,
                         &expected,
                         Duration::from_millis(until.saturating_sub(at).clamp(1, MAX_TTL_MS)),
+                        &validation,
                     )
                     .is_ok()
                 {

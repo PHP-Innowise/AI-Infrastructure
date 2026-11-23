@@ -187,10 +187,14 @@ pub fn advance(
         .unwrap_or(0);
     if reset_after_edit && count > 0 {
         let modified = std::fs::metadata(&target)?.modified()?;
+        let edit_prefix = format!("edit-{}-", session(payload));
         if std::fs::read_dir(&folder)?
             .filter_map(std::result::Result::ok)
             .any(|entry| {
-                entry.file_name().to_string_lossy().starts_with("edit-")
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&edit_prefix)
                     && owned(&entry.path())
                     && entry
                         .metadata()
@@ -236,12 +240,54 @@ pub fn reset(root: &Path, payload: &Value) -> Result<()> {
             .is_some_and(|age| age > Duration::from_secs(86400));
         if name.starts_with(&format!("cmd-{session}-"))
             || name.starts_with(&format!("edit-{session}-"))
+            || name == format!("sig-{session}")
             || expired
         {
             let _ = std::fs::remove_file(path);
         }
     }
     Ok(())
+}
+pub fn record_signature(root: &Path, payload: &Value, signature: &str) -> Result<()> {
+    let folder = directory(root)?;
+    let target = folder.join(format!("sig-{}", session(payload)));
+    let trimmed = signature.trim();
+    if trimmed.is_empty() {
+        if owned(&target) {
+            let _ = std::fs::remove_file(target);
+        }
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(&target).is_ok() && !owned(&target) {
+        return Err(RuntimeError::policy("Counter target is not owned"));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut output = options.open(&target)?;
+    if !output.metadata()?.is_file() {
+        return Err(RuntimeError::policy("Counter target is not a regular file"));
+    }
+    output.write_all(trimmed.as_bytes())?;
+    Ok(())
+}
+pub fn active_signature(root: &Path, payload: &Value) -> Option<String> {
+    let folder = directory(root).ok()?;
+    let target = folder.join(format!("sig-{}", session(payload)));
+    if !owned(&target) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(&target).ok()?;
+    if fs::linked(&meta) || !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&target).ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 pub fn writer_folder() -> Result<PathBuf> {
     let path = std::env::var_os("SUBAGENT_WRITE_LOCK_DIR")
