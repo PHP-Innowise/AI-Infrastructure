@@ -89,26 +89,6 @@ fn apply_omnigraph_enrichment(links: &mut Value, enrichment: OmnigraphEnrichment
     }
 }
 
-fn is_safe_system_config_rel(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().replace('\\', "/");
-    if trimmed.is_empty()
-        || trimmed.len() > 512
-        || trimmed.chars().any(char::is_control)
-        || trimmed.starts_with('/')
-        || trimmed.contains(':')
-        || !trimmed.ends_with(".json")
-    {
-        return None;
-    }
-    for comp in Path::new(&trimmed).components() {
-        match comp {
-            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    Some(trimmed)
-}
-
 fn collect_registered_system_members(
     store: &SessionStore,
 ) -> Vec<(String, std::collections::BTreeSet<String>)> {
@@ -118,41 +98,7 @@ fn collect_registered_system_members(
     if by_root.is_empty() {
         return Vec::new();
     }
-    let mut extra_configs: HashMap<String, Vec<String>> = HashMap::new();
-    if let Ok(db) = store.connection()
-        && db
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_runs'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .is_ok()
-        && let Ok(mut stmt) = db.prepare("SELECT DISTINCT project_id, data FROM system_runs")
-        && let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
-        })
-    {
-        for row in rows.flatten() {
-            let Ok(doc) = serde_json::from_str::<Value>(&row.1) else {
-                continue;
-            };
-            let pid = row
-                .0
-                .as_deref()
-                .or_else(|| doc["project_id"].as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let Some(pid) = pid else {
-                continue;
-            };
-            if let Some(cfg) = doc["config_path"]
-                .as_str()
-                .and_then(is_safe_system_config_rel)
-            {
-                extra_configs.entry(pid.to_owned()).or_default().push(cfg);
-            }
-        }
-    }
+    let extra_configs = crate::system_graph::extra_system_configs_by_project(store);
 
     let mut groups = Vec::new();
     for (proj_root, sys_pid) in &by_root {

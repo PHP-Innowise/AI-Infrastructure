@@ -168,6 +168,89 @@ fn delta_has_code_changes(delta: &crate::graph_ir::IrUpdateDelta) -> bool {
         || !delta.incoming_caller_files.is_empty()
 }
 
+fn is_safe_system_config_rel(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().replace('\\', "/");
+    if trimmed.is_empty()
+        || trimmed.len() > 512
+        || trimmed.chars().any(char::is_control)
+        || trimmed.starts_with('/')
+        || trimmed.contains(':')
+        || !trimmed.ends_with(".json")
+    {
+        return None;
+    }
+    for comp in Path::new(&trimmed).components() {
+        match comp {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(trimmed)
+}
+
+pub(crate) fn extra_system_configs_by_project(
+    store: &SessionStore,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut extra_configs: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    if let Ok(db) = store.connection()
+        && db
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_runs'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .is_ok()
+        && let Ok(mut stmt) = db.prepare("SELECT DISTINCT project_id, data FROM system_runs")
+        && let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+        })
+    {
+        for row in rows.flatten() {
+            let Ok(doc) = serde_json::from_str::<Value>(&row.1) else {
+                continue;
+            };
+            let pid = row
+                .0
+                .as_deref()
+                .or_else(|| doc["project_id"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let Some(pid) = pid else {
+                continue;
+            };
+            if let Some(cfg) = doc["config_path"]
+                .as_str()
+                .and_then(is_safe_system_config_rel)
+            {
+                let list = extra_configs.entry(pid.to_owned()).or_default();
+                if !list.contains(&cfg) {
+                    list.push(cfg);
+                }
+            }
+        }
+    }
+    extra_configs
+}
+
+fn is_system_config_path(rel_path: &str, config_paths: &[String]) -> bool {
+    let norm = rel_path.trim().replace('\\', "/");
+    let clean = norm.trim_start_matches("./");
+    if clean.is_empty() {
+        return false;
+    }
+    if clean.eq_ignore_ascii_case("system.json")
+        || clean.eq_ignore_ascii_case("ai-system.json")
+        || clean.eq_ignore_ascii_case(".harness/system.json")
+    {
+        return true;
+    }
+    config_paths.iter().any(|cfg| {
+        let cfg_clean = cfg.trim().replace('\\', "/");
+        !cfg_clean.is_empty() && (clean == cfg_clean || clean.ends_with(&format!("/{cfg_clean}")))
+    })
+}
+
 fn delta_touches_root(
     root: &Path,
     canon_root: &Path,
@@ -195,8 +278,11 @@ fn delta_touches_root(
             .chain(delta.incoming_caller_files.iter())
             .any(|p| {
                 let clean = p.replace('\\', "/");
+                let clean = clean.trim_start_matches("./");
                 clean.starts_with(&prefix_slash)
-                    || is_service_or_system_graph_path(&clean, config_paths)
+                    || is_system_config_path(clean, config_paths)
+                    || (!clean.contains('/')
+                        && is_service_or_system_graph_path(clean, config_paths))
             });
     }
     false
@@ -234,7 +320,6 @@ fn collect_affected_system_targets_from_entry(
 ) {
     for target in &entry.target_refs {
         let matches = target.graph_id == project_id
-            || target.system_project_id == project_id
             || delta_touches_root(&target.canon_root, canon_root, &entry.config_paths, delta);
         if matches {
             let service = (target.service_id != "__system__").then(|| target.service_id.clone());
@@ -585,10 +670,9 @@ impl SystemGraphDomain {
         let canon_state = canonical_or_owned(state_dir);
         let canon_root = canonical_or_owned(project_root);
         let has_code_delta = delta_has_code_changes(delta);
-        let has_default_graph_path = delta
-            .changed_paths
-            .iter()
-            .any(|p| is_service_or_system_graph_path(p, &[]));
+        let has_json_or_graph_path = delta.changed_paths.iter().any(|p| {
+            p.to_ascii_lowercase().ends_with(".json") || is_service_or_system_graph_path(p, &[])
+        });
 
         let (active_caches, mut streams): (SummarySubCaches, Vec<Arc<StreamHub>>) =
             if let Some(subs) = SUMMARY_CACHE_SUBSCRIBERS.get()
@@ -625,12 +709,17 @@ impl SystemGraphDomain {
 
         let mut evicted = 0usize;
         let mut affected_targets: BTreeSet<(String, String, Option<String>)> = BTreeSet::new();
+        let mut warm_configs: BTreeSet<(String, String)> = BTreeSet::new();
         for cache in active_caches {
             if let Ok(mut guard) = cache.lock() {
                 let before = guard.len();
                 guard.retain(|entry| {
                     let hit = entry_affected_by_ir_delta(entry, project_id, &canon_root, delta);
                     if hit {
+                        for t in &entry.target_refs {
+                            warm_configs
+                                .insert((t.system_project_id.clone(), t.config_path.clone()));
+                        }
                         collect_affected_system_targets_from_entry(
                             entry,
                             project_id,
@@ -645,11 +734,11 @@ impl SystemGraphDomain {
             }
         }
 
-        if affected_targets.is_empty()
-            && (has_code_delta || has_default_graph_path)
+        if (has_code_delta || has_json_or_graph_path)
             && let Some(store) = store_opt
             && let Ok(projects) = store.projects()
         {
+            let extra_configs = extra_system_configs_by_project(store);
             for proj in projects {
                 let Some(sys_pid) = proj["id"].as_str() else {
                     continue;
@@ -657,12 +746,26 @@ impl SystemGraphDomain {
                 let Some(sys_path) = proj["path"].as_str().map(Path::new) else {
                     continue;
                 };
-                for cfg_candidate in ["system.json", "ai-system.json", ".harness/system.json"] {
-                    if !sys_path.join(cfg_candidate).is_file() {
+                let mut candidates = vec![
+                    "system.json".to_owned(),
+                    "ai-system.json".to_owned(),
+                    ".harness/system.json".to_owned(),
+                ];
+                if let Some(extras) = extra_configs.get(sys_pid) {
+                    for cfg in extras {
+                        if !candidates.contains(cfg) {
+                            candidates.push(cfg.clone());
+                        }
+                    }
+                }
+                for cfg_candidate in candidates {
+                    if warm_configs.contains(&(sys_pid.to_owned(), cfg_candidate.clone()))
+                        || !sys_path.join(&cfg_candidate).is_file()
+                    {
                         continue;
                     }
                     if let Ok((_, cfg_rel, targets)) =
-                        resolve_all_targets(store, None, None, sys_pid, Some(cfg_candidate))
+                        resolve_all_targets(store, None, None, sys_pid, Some(&cfg_candidate))
                     {
                         let cfg_slice = std::slice::from_ref(&cfg_rel);
                         let relevant = has_code_delta
@@ -676,7 +779,6 @@ impl SystemGraphDomain {
                         for target in targets {
                             let canon_target = canonical_or_owned(&target.root);
                             if target.graph_id == project_id
-                                || target.project_id == project_id
                                 || delta_touches_root(&canon_target, &canon_root, cfg_slice, delta)
                             {
                                 let service = (target.service_id != "__system__")
@@ -3177,5 +3279,131 @@ mod domain_cache_tests {
                 "expected cold system_graph_status frame for {cfg_name}"
             );
         }
+    }
+
+    #[test]
+    fn monorepo_ir_delta_scopes_to_touched_service_and_notifies_both_warm_and_cold_custom_configs()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let sys_dir = dir.path().join("mono");
+        let orders_dir = sys_dir.join("services/orders");
+        let billing_dir = sys_dir.join("services/billing");
+        std::fs::create_dir_all(orders_dir.join("src")).unwrap();
+        std::fs::create_dir_all(billing_dir.join("src")).unwrap();
+        std::fs::create_dir_all(sys_dir.join("custom")).unwrap();
+        std::fs::write(
+            orders_dir.join("src/lib.rs"),
+            "pub fn order() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            billing_dir.join("src/lib.rs"),
+            "pub fn bill() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            orders_dir.join("ai-service.json"),
+            r#"{"schema_version":1,"id":"orders","description":"Orders","owner":"team","capabilities":[],"sources":[],"provides":[],"consumes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            billing_dir.join("ai-service.json"),
+            r#"{"schema_version":1,"id":"billing","description":"Billing","owner":"team","capabilities":[],"sources":[],"provides":[],"consumes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sys_dir.join("ai-system.json"),
+            r#"{"schema_version":1,"name":"mono-main","shared_sources":[],"services":[{"id":"orders","root":"services/orders","manifest":"ai-service.json"},{"id":"billing","root":"services/billing","manifest":"ai-service.json"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sys_dir.join("custom/alt.json"),
+            r#"{"schema_version":1,"name":"mono-alt","shared_sources":[],"services":[{"id":"orders","root":"../services/orders","manifest":"ai-service.json"}]}"#,
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let sys_proj = store.register(&sys_dir).unwrap();
+        let sys_pid = sys_proj["id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS system_runs (id TEXT PRIMARY KEY, project_id TEXT, data TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO system_runs (id, project_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "sr-custom",
+                    sys_pid,
+                    json!({"project_id": sys_pid, "config_path": "custom/alt.json"}).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let (system, _, targets) = crate::system_graph::resolve_all_targets(
+            &store,
+            None,
+            None,
+            &sys_pid,
+            Some("ai-system.json"),
+        )
+        .unwrap();
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        let bridge = HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
+        let domain = SystemGraphDomain::new(store.clone(), graphs.clone(), bridge, None);
+        // Warm only `ai-system.json`; `custom/alt.json` remains cold.
+        let _ = domain
+            .build_enriched_system_graph_summaries(&system, &targets, None, None, None)
+            .unwrap();
+
+        let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+        else {
+            panic!("expected frames");
+        };
+        let orders_delta = crate::graph_ir::IrUpdateDelta {
+            changed_paths: vec!["services/orders/src/lib.rs".to_owned()],
+            edited_files: vec!["services/orders/src/lib.rs".to_owned()],
+            ir_revision: 21,
+            ..Default::default()
+        };
+        let evicted = SystemGraphDomain::invalidate_summary_cache_and_notify_for_ir_delta(
+            &store,
+            &sys_pid,
+            &sys_dir,
+            &orders_delta,
+        );
+        assert_eq!(evicted, 1);
+
+        let mut emitted: Vec<(Option<String>, Option<String>)> = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.event == "system_graph_status" {
+                emitted.push((
+                    frame.data["config_path"].as_str().map(str::to_owned),
+                    frame.data["service"].as_str().map(str::to_owned),
+                ));
+            }
+        }
+        assert!(
+            emitted.contains(&(Some("ai-system.json".to_owned()), Some("orders".to_owned()))),
+            "expected warm ai-system.json orders emission: {emitted:?}"
+        );
+        assert!(
+            emitted.contains(&(
+                Some("custom/alt.json".to_owned()),
+                Some("orders".to_owned())
+            )),
+            "expected cold custom/alt.json orders emission even when warm cache hit: {emitted:?}"
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|(_, svc)| svc.as_deref() == Some("billing")),
+            "monorepo orders edit must NOT spam sibling billing service: {emitted:?}"
+        );
+        graphs.close();
     }
 }

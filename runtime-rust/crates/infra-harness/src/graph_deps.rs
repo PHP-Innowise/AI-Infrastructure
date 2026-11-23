@@ -646,6 +646,7 @@ impl ReexportIndex {
         facade_file: &str,
         symbol: &str,
         known_files: &BTreeSet<String>,
+        manifests_opt: Option<&ManifestIndex>,
         crate_map_opt: Option<&CratePackageMap>,
     ) -> Option<(String, String)> {
         let start_file = clean_rel_key(facade_file);
@@ -664,6 +665,7 @@ impl ReexportIndex {
         let mut queue = VecDeque::new();
         queue.push_back((start_file.clone(), symbol.to_owned(), 0usize, false));
         let mut visited: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut terminal_named: Option<(String, String)> = None;
         let mut named_fallback: Option<(String, String)> = None;
         let mut wildcard_candidates: Vec<(String, String)> = Vec::new();
         let mut visits = 0usize;
@@ -685,16 +687,26 @@ impl ReexportIndex {
                 return Some((cur_file, cur_sym));
             }
             if hops >= MAX_REEXPORT_HOPS {
-                if hops > 0 && cur_file != start_file && !via_wildcard && named_fallback.is_none() {
-                    named_fallback = Some((cur_file, cur_sym));
+                if hops > 0 && cur_file != start_file && !via_wildcard {
+                    if terminal_named.is_none() {
+                        terminal_named = Some((cur_file.clone(), cur_sym.clone()));
+                    }
+                    if named_fallback.is_none() {
+                        named_fallback = Some((cur_file, cur_sym));
+                    }
                 }
                 continue;
             }
             let Some(entries) = self.by_file.get(&cur_file) else {
                 if hops > 0 && cur_file != start_file {
-                    if !via_wildcard && named_fallback.is_none() {
-                        named_fallback = Some((cur_file, cur_sym));
-                    } else if via_wildcard {
+                    if !via_wildcard {
+                        if terminal_named.is_none() {
+                            terminal_named = Some((cur_file.clone(), cur_sym.clone()));
+                        }
+                        if named_fallback.is_none() {
+                            named_fallback = Some((cur_file, cur_sym));
+                        }
+                    } else {
                         wildcard_candidates.push((cur_file, cur_sym));
                     }
                 }
@@ -702,14 +714,21 @@ impl ReexportIndex {
             };
 
             let mut matched_named = false;
+            let mut pushed_any = false;
             for entry in entries
                 .iter()
                 .filter(|e| !e.is_wildcard && e.exported_symbol == cur_sym)
             {
-                if let Some((next_file, next_sym)) =
-                    resolve_reexport_step(&cur_file, entry, &cur_sym, &lookup, crate_map_opt)
-                {
+                if let Some((next_file, next_sym)) = resolve_reexport_step(
+                    &cur_file,
+                    entry,
+                    &cur_sym,
+                    &lookup,
+                    manifests_opt,
+                    crate_map_opt,
+                ) {
                     matched_named = true;
+                    pushed_any = true;
                     if named_fallback.is_none() && next_file != start_file {
                         named_fallback = Some((next_file.clone(), next_sym.clone()));
                     }
@@ -719,16 +738,31 @@ impl ReexportIndex {
 
             if !matched_named {
                 for entry in entries.iter().filter(|e| e.is_wildcard) {
-                    if let Some((next_file, next_sym)) =
-                        resolve_reexport_step(&cur_file, entry, &cur_sym, &lookup, crate_map_opt)
-                    {
+                    if let Some((next_file, next_sym)) = resolve_reexport_step(
+                        &cur_file,
+                        entry,
+                        &cur_sym,
+                        &lookup,
+                        manifests_opt,
+                        crate_map_opt,
+                    ) {
+                        pushed_any = true;
                         queue.push_back((next_file, next_sym, hops + 1, true));
                     }
                 }
             }
+
+            if !pushed_any && hops > 0 && cur_file != start_file && !via_wildcard {
+                if terminal_named.is_none() {
+                    terminal_named = Some((cur_file.clone(), cur_sym.clone()));
+                }
+                if named_fallback.is_none() {
+                    named_fallback = Some((cur_file, cur_sym));
+                }
+            }
         }
 
-        named_fallback.or_else(|| {
+        terminal_named.or(named_fallback).or_else(|| {
             if self.declared_by_file.is_empty() && wildcard_candidates.len() == 1 {
                 wildcard_candidates.into_iter().next()
             } else {
@@ -2519,6 +2553,7 @@ fn resolve_reexport_step(
     entry: &ReexportEntry,
     cur_sym: &str,
     lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
     crate_map_opt: Option<&CratePackageMap>,
 ) -> Option<(String, String)> {
     let next_sym = if entry.is_wildcard {
@@ -2568,6 +2603,11 @@ fn resolve_reexport_step(
     // TS/JS re-export `export { Foo } from './bar'`
     let dir = folder_of(cur_file);
     let target = resolve_ts_js_spec(&dir, &entry.source_module_path, lookup)
+        .or_else(|| {
+            manifests_opt.and_then(|m| {
+                m.resolve_ts_import(cur_file, &entry.source_module_path, lookup.known_files)
+            })
+        })
         .or_else(|| resolve_ts_js_alias_fallback(&entry.source_module_path, lookup))?;
     Some((target, next_sym))
 }
@@ -2598,13 +2638,15 @@ pub(crate) fn collect_backward_reexport_barrels(
             original_symbol: "*".to_owned(),
             is_wildcard: true,
         };
-        let resolved_target =
-            resolve_reexport_step(barrel_file, &entry, "*", &lookup, crate_map_opt)
-                .map(|(t, _)| t)
-                .or_else(|| {
-                    manifests_opt
-                        .and_then(|m| m.resolve_ts_import(barrel_file, orig_path, known_files))
-                });
+        let resolved_target = resolve_reexport_step(
+            barrel_file,
+            &entry,
+            "*",
+            &lookup,
+            manifests_opt,
+            crate_map_opt,
+        )
+        .map(|(t, _)| t);
         if let Some(target_file) = resolved_target {
             reverse_adj
                 .entry(target_file)
@@ -2838,8 +2880,13 @@ fn resolve_php_ir(
             return (None, None);
         };
         if let Some(reexports) = reexports_opt
-            && let Some((rt, orig_sym)) =
-                reexports.resolve_reexport_target(&target, sym_hint, lookup.known_files, None)
+            && let Some((rt, orig_sym)) = reexports.resolve_reexport_target(
+                &target,
+                sym_hint,
+                lookup.known_files,
+                manifests_opt,
+                None,
+            )
         {
             return (Some(rt), Some(orig_sym));
         }
@@ -3300,6 +3347,7 @@ fn resolve_rust_ir(
                     &target,
                     &orig_sym,
                     lookup.known_files,
+                    None,
                     crate_map_opt,
                 )
             {
@@ -3371,6 +3419,7 @@ fn resolve_rust_ir(
                         &target,
                         &sym,
                         lookup.known_files,
+                        None,
                         crate_map_opt,
                     )
                 {
@@ -3401,6 +3450,7 @@ fn resolve_rust_ir(
                     facade,
                     trimmed,
                     lookup.known_files,
+                    None,
                     crate_map_opt,
                 ) {
                     return Some((rt, rs));
@@ -3654,8 +3704,13 @@ fn resolve_ts_js_ir(
                 let mut orig_sym = sym.clone();
                 if let Some(ref facade) = target_opt
                     && let Some(reexports) = reexports_opt
-                    && let Some((rt, rs)) =
-                        reexports.resolve_reexport_target(facade, sym, lookup.known_files, None)
+                    && let Some((rt, rs)) = reexports.resolve_reexport_target(
+                        facade,
+                        sym,
+                        lookup.known_files,
+                        manifests_opt,
+                        None,
+                    )
                 {
                     target_opt = Some(rt.clone());
                     orig_sym = rs;

@@ -193,6 +193,31 @@ fn unnumbered(text: &str) -> String {
     }
 }
 
+fn has_contiguous_outer_quotes(body: &str, quote_ch: char) -> bool {
+    let mut chars = body.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return false;
+    };
+    if first != quote_ch {
+        return false;
+    }
+    let mut escaped = false;
+    for (idx, ch) in chars {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote_ch == '"' && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote_ch {
+            return idx + ch.len_utf8() == body.len();
+        }
+    }
+    false
+}
+
 pub fn unwrap_shell_command(command: &str) -> &str {
     static SHELL: OnceLock<Regex> = OnceLock::new();
     let trimmed = command.trim();
@@ -205,11 +230,12 @@ pub fn unwrap_shell_command(command: &str) -> &str {
         && let Some(inner) = captures.get(1)
     {
         let body = inner.as_str().trim();
-        if body.len() >= 2
-            && ((body.starts_with('\'') && body.ends_with('\''))
-                || (body.starts_with('"') && body.ends_with('"')))
-        {
-            return body[1..body.len() - 1].trim();
+        if body.starts_with('\'') || body.starts_with('"') {
+            let quote_ch = if body.starts_with('\'') { '\'' } else { '"' };
+            if body.len() >= 2 && has_contiguous_outer_quotes(body, quote_ch) {
+                return body[1..body.len() - 1].trim();
+            }
+            return trimmed;
         }
         return body;
     }
@@ -245,6 +271,13 @@ pub fn step_shell_command(step: &Value) -> Option<&str> {
 /// deterministic `&&` / `;` / `|` chains outside quotes. Returns `None` for
 /// redirects, command substitution, subshells, backgrounding, or unclosed quotes.
 pub fn split_read_only_shell_chain(command: &str) -> Option<Vec<String>> {
+    split_shell_chain_inner(command, 0)
+}
+
+fn split_shell_chain_inner(command: &str, depth: usize) -> Option<Vec<String>> {
+    if depth > 3 {
+        return None;
+    }
     let mut body = command.trim();
     for _ in 0..2 {
         let unwrapped = unwrap_shell_command(body);
@@ -345,7 +378,15 @@ pub fn split_read_only_shell_chain(command: &str) -> Option<Vec<String>> {
         return None;
     }
     segments.push(tail.to_owned());
-    Some(segments)
+    let mut flattened = Vec::with_capacity(segments.len());
+    for seg in segments {
+        if unwrap_shell_command(&seg) != seg {
+            flattened.extend(split_shell_chain_inner(&seg, depth + 1)?);
+        } else {
+            flattened.push(seg);
+        }
+    }
+    Some(flattened)
 }
 
 fn reads_python_inline(body: &str) -> bool {
@@ -1379,6 +1420,17 @@ mod tests {
         assert_eq!(
             split_read_only_shell_chain("cat a.txt | grep foo"),
             Some(vec!["cat a.txt".to_string(), "grep foo".to_string()])
+        );
+        assert_eq!(
+            unwrap_shell_command("bash -lc 'git status' && bash -lc 'cat composer.json'"),
+            "bash -lc 'git status' && bash -lc 'cat composer.json'"
+        );
+        assert_eq!(
+            split_read_only_shell_chain("bash -lc 'git status' && bash -lc 'cat composer.json'"),
+            Some(vec![
+                "git status".to_string(),
+                "cat composer.json".to_string()
+            ])
         );
         for unsafe_cmd in [
             "cat a.txt > out.txt",

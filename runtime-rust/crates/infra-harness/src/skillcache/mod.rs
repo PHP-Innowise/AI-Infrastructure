@@ -394,7 +394,7 @@ pub(crate) fn staleness_in_state(
         }
     }
     let project_id = capsule["project_id"].as_str().unwrap_or("");
-    if manifest.ir_revision > 0 && !project_id.is_empty() {
+    if !project_id.is_empty() {
         let resolved_state = state
             .map(Path::to_path_buf)
             .or_else(|| infer_state_dir(capsule));

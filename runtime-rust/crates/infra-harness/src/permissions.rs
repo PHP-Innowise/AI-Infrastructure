@@ -580,12 +580,10 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
     if command.is_empty() || command.len() > 2048 {
         return Err("command length out of bounds".into());
     }
-    if command.chars().any(|c| {
-        matches!(
-            c,
-            '|' | ';' | '&' | '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'
-        )
-    }) {
+    if command
+        .chars()
+        .any(|c| matches!(c, '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'))
+    {
         return Err("shell operators are not permitted in deterministic read-only commands".into());
     }
     let mut tokens = Vec::new();
@@ -609,6 +607,11 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
             Some(_) => {
                 cur.push(c);
                 in_token = true;
+            }
+            None if matches!(c, '|' | ';' | '&') => {
+                return Err(
+                    "shell operators are not permitted in deterministic read-only commands".into(),
+                );
             }
             None if c.is_whitespace() => {
                 if in_token {
@@ -1049,6 +1052,38 @@ fn has_mutating_flag(tokens: &[String]) -> bool {
     })
 }
 
+fn has_cli_output_or_exec_override(tokens: &[String]) -> bool {
+    let Some(cmd) = tokens.first().map(|s| {
+        std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s.as_str())
+    }) else {
+        return false;
+    };
+    let lower = cmd.to_ascii_lowercase();
+    let args = &tokens[1..];
+    match lower.as_str() {
+        "sort" => args.iter().any(|arg| {
+            arg == "-o"
+                || arg == "--output"
+                || arg.starts_with("--output=")
+                || (!arg.starts_with("--") && arg.starts_with('-') && arg[1..].contains('o'))
+        }),
+        "rg" => args
+            .iter()
+            .any(|arg| arg == "--pre" || arg.starts_with("--pre=")),
+        "git" => args.iter().any(|arg| {
+            arg == "--output"
+                || arg.starts_with("--output=")
+                || arg == "--ext-diff"
+                || arg == "-c"
+                || arg.starts_with("-c=")
+        }),
+        _ => false,
+    }
+}
+
 fn is_known_read_only_cli(tokens: &[String]) -> bool {
     let Some(cmd) = tokens.first().map(|s| {
         std::path::Path::new(s)
@@ -1058,7 +1093,7 @@ fn is_known_read_only_cli(tokens: &[String]) -> bool {
     }) else {
         return false;
     };
-    if has_mutating_flag(tokens) {
+    if has_mutating_flag(tokens) || has_cli_output_or_exec_override(tokens) {
         return false;
     }
     let lower = cmd.to_ascii_lowercase();
@@ -1154,6 +1189,9 @@ pub fn classify_read_only_program_command_in_store(
         && check_read_only_capsule_program(ws, store, &tokens)?
     {
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
+    }
+    if has_mutating_flag(&tokens) || has_cli_output_or_exec_override(&tokens) {
+        return Ok(None);
     }
     let generator_safe = workspace
         .and_then(cached_command_analyzer)
@@ -1944,6 +1982,28 @@ mod tests {
             None
         );
         assert!(classify_read_only_program_command(Some(&ws), "find . -exec rm {} ;").is_err());
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "sort -o out.txt composer.json").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "rg --pre=./evil.sh echo src").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "git rm -r src").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "git diff --output=out.txt").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "rg 'a|b' src")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:rg a|b src")
+        );
 
         let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
         let project_id = store.register(&ws).unwrap()["id"]

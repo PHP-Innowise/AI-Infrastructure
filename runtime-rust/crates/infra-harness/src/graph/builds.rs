@@ -448,7 +448,7 @@ impl Graphs {
         let incremental_index = if !is_sync_delta
             && let Some(ref delta) = delta
             && let Some(prev_index) = self.maps.latest_live_ir_index(project)
-            && let Some(ir_delta) = ir.export_ir_delta_for_files(delta)?
+            && let Some(ir_delta) = ir.export_ir_delta_for_files_with_root(Some(root), delta)?
         {
             let shared_delta = Arc::new(ir_delta.clone());
             prev_index

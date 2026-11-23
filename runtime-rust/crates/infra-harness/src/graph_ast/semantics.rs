@@ -775,6 +775,12 @@ pub(super) fn extract_di_targets(
 /// Rejects empty (`${}`) or unclosed interpolations and any whitespace outside `${...}`.
 /// Returns `(collapsed, leading_template_slash)` where `leading_template_slash` is `true`
 /// when `raw` starts with `${...}` immediately followed by `/`.
+struct TemplateExprState {
+    brace_depth: usize,
+    quote: Option<u8>,
+    escaped: bool,
+}
+
 fn collapse_route_template_interpolations(raw: &str, placeholder: &str) -> Option<(String, bool)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -783,48 +789,57 @@ fn collapse_route_template_interpolations(raw: &str, placeholder: &str) -> Optio
     let bytes = trimmed.as_bytes();
     let mut out = String::with_capacity(trimmed.len());
     let mut idx = 0usize;
-    let mut leading_template_slash = false;
 
     while idx < bytes.len() {
         if bytes[idx] == b'$' && idx + 1 < bytes.len() && bytes[idx + 1] == b'{' {
             let expr_start = idx + 2;
             let mut cursor = expr_start;
-            let mut depth = 1usize;
-            let mut quote_stack: Vec<u8> = Vec::new();
-            let mut escaped = false;
-            while cursor < bytes.len() && depth > 0 {
+            let mut stack = vec![TemplateExprState {
+                brace_depth: 1,
+                quote: None,
+                escaped: false,
+            }];
+            while cursor < bytes.len() && !stack.is_empty() {
                 let b = bytes[cursor];
-                if let Some(&q) = quote_stack.last() {
-                    if escaped {
-                        escaped = false;
+                let frame = stack.last_mut().expect("stack non-empty");
+                if let Some(q) = frame.quote {
+                    if frame.escaped {
+                        frame.escaped = false;
                     } else if b == b'\\' {
-                        escaped = true;
+                        frame.escaped = true;
                     } else if q == b'`'
                         && b == b'$'
                         && cursor + 1 < bytes.len()
                         && bytes[cursor + 1] == b'{'
                     {
-                        depth += 1;
-                        cursor += 1;
+                        stack.push(TemplateExprState {
+                            brace_depth: 1,
+                            quote: None,
+                            escaped: false,
+                        });
+                        cursor += 2;
+                        continue;
                     } else if b == q {
-                        quote_stack.pop();
+                        frame.quote = None;
                     }
                     cursor += 1;
                     continue;
                 }
                 match b {
-                    b'\'' | b'"' | b'`' => quote_stack.push(b),
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
+                    b'\'' | b'"' | b'`' => frame.quote = Some(b),
+                    b'{' => frame.brace_depth += 1,
+                    b'}' => {
+                        frame.brace_depth -= 1;
+                        if frame.brace_depth == 0 {
+                            stack.pop();
+                        }
+                    }
                     _ => {}
                 }
                 cursor += 1;
             }
-            if depth != 0 || trimmed[expr_start..cursor - 1].trim().is_empty() {
+            if !stack.is_empty() || trimmed[expr_start..cursor - 1].trim().is_empty() {
                 return None;
-            }
-            if idx == 0 && bytes.get(cursor) == Some(&b'/') {
-                leading_template_slash = true;
             }
             out.push_str(placeholder);
             idx = cursor;
@@ -838,14 +853,22 @@ fn collapse_route_template_interpolations(raw: &str, placeholder: &str) -> Optio
         idx += ch.len_utf8();
     }
 
+    let leading_template_slash =
+        out.starts_with(placeholder) && out.trim_start_matches(placeholder).starts_with('/');
     Some((out, leading_template_slash))
 }
 
-fn find_closing_delim(chars: &[char], open_idx: usize, close: char) -> Option<usize> {
+fn find_closing_delim(chars: &[char], open_idx: usize, open: char, close: char) -> Option<usize> {
     let mut i = open_idx + 1;
+    let mut depth = 1usize;
     while i < chars.len() {
-        if chars[i] == close {
-            return (i > open_idx + 1).then_some(i);
+        if chars[i] == open {
+            depth += 1;
+        } else if chars[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return (i > open_idx + 1).then_some(i);
+            }
         }
         i += 1;
     }
@@ -868,7 +891,7 @@ fn normalize_route_segment(seg: &str, placeholder: &str) -> String {
             _ => None,
         };
         if let Some(close_ch) = close
-            && let Some(end) = find_closing_delim(&chars, i, close_ch)
+            && let Some(end) = find_closing_delim(&chars, i, chars[i], close_ch)
         {
             out.push_str(placeholder);
             i = end + 1;
@@ -897,7 +920,7 @@ pub(crate) fn normalize_route_contract(
             None => "/",
         }
     } else if leading_template_slash {
-        collapsed.strip_prefix("{param}").unwrap_or(&collapsed)
+        collapsed.trim_start_matches("{param}")
     } else if collapsed.starts_with('/') {
         collapsed.as_str()
     } else if require_leading_slash_or_http {

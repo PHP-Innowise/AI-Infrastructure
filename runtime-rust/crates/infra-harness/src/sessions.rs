@@ -1203,12 +1203,13 @@ impl Sessions {
         let probe_ws = probe_root.join("work");
         let evidence_dir = probe_root.join("evidence");
         infra_core::fs::ensure_directory(&probe_ws, true)?;
+        infra_core::fs::ensure_directory(&probe_ws.join(".harness-tmp"), true)?;
         infra_core::fs::ensure_directory(&evidence_dir, true)?;
         let probe_file = evidence_dir.join("probe.txt");
         infra_core::fs::atomic_write(&probe_file, b"ok\n")?;
         let canon_probe_ws = infra_core::fs::canonicalize(&probe_ws)?;
         let canon_evidence = infra_core::fs::canonicalize(&evidence_dir)?;
-        let probe_engine = protected_cfg.engine.clone().or_else(|| warm.engine.clone());
+        let probe_engine = warm.engine.clone().or_else(|| protected_cfg.engine.clone());
         let helper_path = match &probe_engine {
             Some(path) => path.clone(),
             None => infra_host::sandbox::trusted_helper(&canon_probe_ws)?,
@@ -2567,7 +2568,8 @@ impl Sessions {
                     let _ = self.lifecycle.abort(&binding, "failed");
                     return Err(error);
                 }
-                let warm_run = warm.clone();
+                let warm_run =
+                    warm.with_engine(protected_cfg.as_ref().and_then(|cfg| cfg.engine.clone()));
                 let ws_run = workspace.clone();
                 let gen_run = job.generation.clone();
                 let cancel_run = cancel.clone();
@@ -7176,5 +7178,23 @@ mod phase3c_approvals_tests {
             "{}",
             launch_err.message
         );
+    }
+
+    #[test]
+    fn warm_with_engine_rebinds_engine_and_preserves_direct_dispatch() {
+        let mut warm =
+            crate::skillcache::warm::Warm::for_changes_test(PathBuf::from("/tmp/sc-state"));
+        warm.capsule_id = "cap-prot-1".into();
+        warm.name = "check-ws".into();
+        warm.direct_dispatch = true;
+        assert!(warm.engine.is_none());
+
+        let rebound = warm.with_engine(Some(PathBuf::from("/opt/infra-engine")));
+        assert_eq!(rebound.engine, Some(PathBuf::from("/opt/infra-engine")));
+        assert!(rebound.direct_dispatch);
+
+        let preserved = rebound.with_engine(Some(PathBuf::from("/other/engine")));
+        assert_eq!(preserved.engine, Some(PathBuf::from("/opt/infra-engine")));
+        assert!(preserved.direct_dispatch);
     }
 }

@@ -423,9 +423,14 @@ struct CheckedClaimLine {
 
 fn is_claim_file_token(token: &str) -> bool {
     const EXTS: &[&str] = &[
-        ".rs", ".php", ".ts", ".tsx", ".mts", ".cjs", ".mjs", ".js", ".jsx", ".py", ".go", ".java",
-        ".kt", ".kts", ".cs", ".rb", ".swift", ".scala", ".sc", ".phtml", ".inc", ".md", ".json",
-        ".toml", ".yaml", ".yml", ".sql", ".sh",
+        ".rs", ".php", ".ts", ".tsx", ".mts", ".cts", ".cjs", ".mjs", ".js", ".jsx", ".py", ".pyi",
+        ".go", ".java", ".kt", ".kts", ".cs", ".rb", ".swift", ".scala", ".sc", ".phtml", ".inc",
+        ".md", ".json", ".jsonc", ".toml", ".yaml", ".yml", ".sql", ".sh", ".bash", ".zsh", ".css",
+        ".scss", ".sass", ".less", ".html", ".htm", ".svg", ".vue", ".svelte", ".astro",
+        ".graphql", ".gql", ".proto", ".lock", ".sum", ".mod", ".env", ".ini", ".conf", ".cfg",
+        ".xml", ".csv", ".txt", ".log", ".hcl", ".tf", ".tfvars", ".prisma", ".sol", ".ex", ".exs",
+        ".erl", ".hrl", ".lua", ".r", ".jl", ".hs", ".ml", ".mli", ".zig", ".nim", ".dart", ".c",
+        ".h", ".cc", ".cpp", ".hpp", ".hh", ".m", ".mm", ".wasm",
     ];
     const EXACT_BASENAMES: &[&str] = &[
         "Dockerfile",
@@ -434,6 +439,19 @@ fn is_claim_file_token(token: &str) -> bool {
         "Gemfile",
         "Rakefile",
         "Procfile",
+        "Cargo.lock",
+        "go.sum",
+        "go.mod",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "composer.lock",
+        "poetry.lock",
+        "Gemfile.lock",
+        "Pipfile.lock",
+        "LICENSE",
+        "README",
+        "CHANGELOG",
     ];
     let trimmed = token.trim().trim_start_matches("./");
     if trimmed.is_empty()
@@ -498,6 +516,52 @@ fn is_ignored_bare_claim_word(token: &str) -> bool {
             | "any"
             | "unknown"
             | "never"
+            | "completed"
+            | "cancelled"
+            | "canceled"
+            | "pending"
+            | "running"
+            | "waiting"
+            | "idle"
+            | "failed"
+            | "ready"
+            | "stale"
+            | "building"
+            | "updated"
+            | "active"
+            | "archived"
+            | "draft"
+            | "done"
+            | "skipped"
+            | "passed"
+            | "blocked"
+            | "status"
+            | "state"
+            | "reason"
+            | "action"
+            | "kind"
+            | "mode"
+            | "error"
+            | "warning"
+            | "info"
+            | "debug"
+            | "default"
+            | "enabled"
+            | "disabled"
+            | "off"
+            | "on"
+            | "ir_delta"
+            | "graph_status"
+            | "system_graph_status"
+            | "session_status"
+            | "sdd_staleness"
+            | "waiting_counts"
+            | "project_id"
+            | "session_id"
+            | "config_path"
+            | "direct_dispatch"
+            | "read_only"
+            | "allow_ignored"
     )
 }
 
@@ -736,6 +800,14 @@ fn verify_checked_claims(
             .collect();
 
         for sym in &claim.symbols {
+            if sym.contains('.')
+                && !sym.contains("::")
+                && root.is_some_and(|r| {
+                    resolve_claimed_file_on_disk(r, &claim.doc_path, sym).is_some()
+                })
+            {
+                continue;
+            }
             if let Some(store) = ir
                 && ir_has_symbols
             {
@@ -1373,6 +1445,12 @@ mod tests {
             "src/mod.mts",
             "config.cjs",
             "spec.md",
+            "styles.css",
+            "index.html",
+            "schema.graphql",
+            "user.proto",
+            "Cargo.lock",
+            "go.sum",
         ] {
             assert!(
                 is_claim_file_token(file_tok),
@@ -1403,7 +1481,21 @@ mod tests {
         }
 
         for non_sym in [
-            "T001", "t42", "FR-001", "GET", "POST", "true", "null", "id", ".rs",
+            "T001",
+            "t42",
+            "FR-001",
+            "GET",
+            "POST",
+            "true",
+            "null",
+            "id",
+            ".rs",
+            "completed",
+            "ir_delta",
+            "styles.css",
+            "index.html",
+            "schema.graphql",
+            "Cargo.lock",
         ] {
             assert!(
                 !is_claim_symbol_token(non_sym),

@@ -173,6 +173,7 @@ struct Stand {
     root: PathBuf,
     project_id: String,
     store: SessionStore,
+    sessions: Arc<Sessions>,
     services: Arc<NativeServices>,
     port: u16,
     token: String,
@@ -412,6 +413,7 @@ impl Stand {
             root,
             project_id,
             store,
+            sessions,
             services,
             port,
             token,
@@ -3001,8 +3003,132 @@ async fn tool_chain_observe_compile_and_warm_reuse() {
     assert!(
         fallback_sc
             .iter()
-            .any(|ev| ev["reason"] == "direct_fallback"),
+            .any(|ev| ev["reason"] == "direct_fallback"
+                && ev["text"].as_str().is_some_and(
+                    |t| t.contains("program_failed") && !t.contains("sandbox_unavailable")
+                )),
         "{fallback_sc:?}"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tool_chain_direct_dispatch_protected_verifies_harness_tmp_and_completes() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let project = stand.project();
+    let secret_dir = stand.root.join("secret-vault");
+    fs::create_dir_all(&secret_dir).unwrap();
+    fs::write(secret_dir.join("key.txt"), "top-secret\n").unwrap();
+
+    let ro_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "native-tc-prot"}),
+        json!({"type": "assistant", "session_id": "native-tc-prot", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "Total", "path": project.join("invoices")}}
+        ]}}),
+        json!({"type": "user", "session_id": "native-tc-prot", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "a.txt ok", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Total: 10.00", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "native-tc-prot", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Checked invoices total."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Checked invoices total.", "session_id": "native-tc-prot", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &ro_turn);
+    let sid = stand
+        .turn(
+            "Inspect invoices total cleanly",
+            json!({"mode": "observe", "tool_chain": true}),
+        )
+        .await;
+    let generation = stand.skillcache_events(&sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tc_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "inspect-protected", "description": "Inspect invoices under protected sandbox"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "description": "Inspect invoices",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/main.py",
+            "content": "import json, sys\nif '--check' in sys.argv:\n    print(json.dumps({'status': 'complete', 'result': {}}))\n    sys.exit(0)\nwith open('invoices/a.txt') as f:\n    lines = [ln.strip() for ln in f if ln.strip()]\nprint(json.dumps({'status': 'complete', 'result': {'summary': f'Checked invoices total ({len(lines)} protected lines).'}}))\n"
+        }],
+        "examples": {"bindings": {}, "steps": {}}
+    });
+    stand.compiler(1, &tc_answer);
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+
+    // Enable protected-path boundary enforcement: `verify_direct_protected` must create
+    // `.harness-tmp` inside `probe_ws` before launching `sandbox::gate` (`Profile::Gate`)
+    // and execute direct dispatch without spawning the provider CLI.
+    stand
+        .sessions
+        .install_protected(vec![secret_dir], Some(PathBuf::from(FIXTURE)))
+        .unwrap();
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let (status, created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": stand.project_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true},
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let direct_sid = created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&direct_sid, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "protected direct dispatch should skip spawning provider CLI"
+    );
+    let direct_events = stand.store.events(&direct_sid, 0).unwrap();
+    let direct_sc = stand.skillcache_events(&direct_sid);
+    assert!(
+        direct_sc
+            .iter()
+            .any(|ev| ev["phase"] == "hit" && ev["direct_dispatch"] == true),
+        "{direct_sc:?}"
+    );
+    assert!(
+        direct_events.iter().any(|ev| {
+            ev["kind"] == "text"
+                && ev["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Checked invoices total (2 protected lines)."))
+        }),
+        "{direct_events:?}"
     );
     stand.close().await;
 }

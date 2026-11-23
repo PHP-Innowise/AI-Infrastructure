@@ -226,7 +226,7 @@ pub(super) fn sandbox_environment(
     }
     environment.insert(env_filter::GENERATION.into(), generation.to_owned());
     // The host's home is not in the gate's root; programs get a scratch one.
-    for name in ["HOME", "TMPDIR", "TMP", "TEMP"] {
+    for name in ["HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP"] {
         environment.insert(name.into(), text(scratch));
     }
     environment

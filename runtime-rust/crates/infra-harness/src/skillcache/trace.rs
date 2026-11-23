@@ -1355,12 +1355,14 @@ mod tests {
         assert_eq!(tools, 2);
         assert!(tree_sha.is_some());
 
-        // Claude `Bash` + Cursor `shell` / `shellToolCall` read-only turns also qualify.
+        // Claude `Bash` + Cursor `shell` / `shellToolCall` read-only turns also qualify,
+        // including quoted pipes (`rg 'a|b' src`) and compound `bash -lc` chains.
         let claude_cursor_ro = Trace {
             provider: "claude".into(),
             steps: vec![
                 json!({"kind": "tool", "tool": "Bash", "input": {"command": "git status --short"}}),
-                json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "rg echo src"}}),
+                json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "/bin/sh -c \"ls -la; rg 'a|b' src\""}}),
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status' && bash -lc 'cat composer.json'"}}),
                 json!({"kind": "tool", "tool": "shell", "input": {"command": "ls -la"}}),
             ],
             skills: vec![],
@@ -1380,13 +1382,23 @@ mod tests {
             .is_ok()
         );
 
-        // Mutating shell commands, redirects, inline eval, and out-of-workspace absolute paths are rejected.
+        // Mutating shell commands, mutating git/sort/rg flags, redirects, inline eval, and out-of-workspace absolute paths are rejected.
         for bad_step in [
             json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status && rm -rf src'"}}),
             json!({"kind": "tool", "tool": "Bash", "input": {"command": "cat composer.json > copy.json"}}),
             json!({"kind": "tool", "tool": "Bash", "input": {"command": "python3 -c 'print(1)'"}}),
             json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "cat /etc/passwd"}}),
             json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git commit -m oops"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git rm -r src"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git mv a b"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git branch -D main"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git apply patch.diff"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git worktree remove wt"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git gc --prune=now"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git diff --output=out.txt"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "sort -o out.txt composer.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "sort --output=out.txt composer.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "rg --pre=./evil.sh App src"}}),
         ] {
             let mut bad = codex_ro.clone();
             bad.steps.push(bad_step.clone());

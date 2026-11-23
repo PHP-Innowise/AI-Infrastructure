@@ -287,89 +287,100 @@ fn collect_code_graph_overlay_with_hit(
             let mut sem_rows = Vec::new();
             let mut ir_edges = Vec::new();
             let mut ir_nodes_links = None;
+            let mut ir_read_failed = false;
             if let Some(ref ir) = ir_opt {
-                if let Ok((_, raw_sem_rows)) = ir.semantic_edges_for_system() {
-                    for (idx, (file_path, kind, target, src_sym, line, evidence)) in
-                        raw_sem_rows.into_iter().enumerate()
-                    {
-                        let src_sym_str = src_sym.as_deref().unwrap_or("").to_owned();
-                        let value = json!({
-                            "id": format!("sem:{file_path}:{kind}:{target}:{line}:{idx}"),
-                            "file_path": file_path,
-                            "source": file_path,
-                            "source_file": file_path,
-                            "source_symbol": src_sym,
-                            "target": target,
-                            "kind": kind,
-                            "relation": kind,
-                            "line": line,
-                            "evidence": evidence,
-                        });
-                        sem_rows.push(CachedSemOverlayRow {
-                            file_path,
-                            kind,
-                            target,
-                            source_symbol: src_sym_str,
-                            evidence,
-                            value,
-                        });
+                match ir.semantic_edges_for_system() {
+                    Ok((_, raw_sem_rows)) => {
+                        for (idx, (file_path, kind, target, src_sym, line, evidence)) in
+                            raw_sem_rows.into_iter().enumerate()
+                        {
+                            let src_sym_str = src_sym.as_deref().unwrap_or("").to_owned();
+                            let value = json!({
+                                "id": format!("sem:{file_path}:{kind}:{target}:{line}:{idx}"),
+                                "file_path": file_path,
+                                "source": file_path,
+                                "source_file": file_path,
+                                "source_symbol": src_sym,
+                                "target": target,
+                                "kind": kind,
+                                "relation": kind,
+                                "line": line,
+                                "evidence": evidence,
+                            });
+                            sem_rows.push(CachedSemOverlayRow {
+                                file_path,
+                                kind,
+                                target,
+                                source_symbol: src_sym_str,
+                                evidence,
+                                value,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        ir_read_failed = true;
                     }
                 }
-                if let Ok((nodes, links, _, _)) = ir.export_ir_graph_elements() {
-                    let node_by_id: HashMap<&str, &crate::graph_ir::IrNodeSpec> =
-                        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-                    let mut seen_edges = BTreeSet::new();
-                    for link in &links {
-                        let rel = link.relation.as_deref().unwrap_or("depends_on");
-                        if is_semantic_relation(rel) {
-                            continue;
+                match ir.export_ir_graph_elements() {
+                    Ok((nodes, links, _, _)) => {
+                        let node_by_id: HashMap<&str, &crate::graph_ir::IrNodeSpec> =
+                            nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+                        let mut seen_edges = BTreeSet::new();
+                        for link in &links {
+                            let rel = link.relation.as_deref().unwrap_or("depends_on");
+                            if is_semantic_relation(rel) {
+                                continue;
+                            }
+                            let src_node = node_by_id.get(link.source.as_str()).copied();
+                            let dst_node = node_by_id.get(link.target.as_str()).copied();
+                            let src_file = src_node
+                                .map(|n| n.source_file.as_str())
+                                .or(link.source_file.as_deref())
+                                .unwrap_or("");
+                            let dst_file = dst_node.map(|n| n.source_file.as_str()).unwrap_or("");
+                            let src_label = src_node
+                                .map(|n| n.label.as_str())
+                                .unwrap_or(link.source.as_str());
+                            let dst_label = dst_node
+                                .map(|n| n.label.as_str())
+                                .unwrap_or(link.target.as_str());
+                            if !seen_edges.insert((
+                                link.source.clone(),
+                                link.target.clone(),
+                                rel.to_owned(),
+                            )) {
+                                continue;
+                            }
+                            let intra_file = !src_file.is_empty() && src_file == dst_file;
+                            let value = json!({
+                                "id": format!("ir:{}->{}:{}", link.source, link.target, rel),
+                                "source": link.source,
+                                "target": link.target,
+                                "from": link.source,
+                                "to": link.target,
+                                "source_file": src_file,
+                                "target_file": dst_file,
+                                "source_label": src_label,
+                                "target_label": dst_label,
+                                "kind": rel,
+                                "relation": rel,
+                                "confidence": link.confidence,
+                                "intra_file": intra_file,
+                            });
+                            ir_edges.push(CachedIrOverlayEdge {
+                                source_file: src_file.to_owned(),
+                                target_file: dst_file.to_owned(),
+                                source_label: src_label.to_owned(),
+                                target_label: dst_label.to_owned(),
+                                relation: rel.to_owned(),
+                                value,
+                            });
                         }
-                        let src_node = node_by_id.get(link.source.as_str()).copied();
-                        let dst_node = node_by_id.get(link.target.as_str()).copied();
-                        let src_file = src_node
-                            .map(|n| n.source_file.as_str())
-                            .or(link.source_file.as_deref())
-                            .unwrap_or("");
-                        let dst_file = dst_node.map(|n| n.source_file.as_str()).unwrap_or("");
-                        let src_label = src_node
-                            .map(|n| n.label.as_str())
-                            .unwrap_or(link.source.as_str());
-                        let dst_label = dst_node
-                            .map(|n| n.label.as_str())
-                            .unwrap_or(link.target.as_str());
-                        if !seen_edges.insert((
-                            link.source.clone(),
-                            link.target.clone(),
-                            rel.to_owned(),
-                        )) {
-                            continue;
-                        }
-                        let intra_file = !src_file.is_empty() && src_file == dst_file;
-                        let value = json!({
-                            "id": format!("ir:{}->{}:{}", link.source, link.target, rel),
-                            "source": link.source,
-                            "target": link.target,
-                            "from": link.source,
-                            "to": link.target,
-                            "source_file": src_file,
-                            "target_file": dst_file,
-                            "source_label": src_label,
-                            "target_label": dst_label,
-                            "kind": rel,
-                            "relation": rel,
-                            "confidence": link.confidence,
-                            "intra_file": intra_file,
-                        });
-                        ir_edges.push(CachedIrOverlayEdge {
-                            source_file: src_file.to_owned(),
-                            target_file: dst_file.to_owned(),
-                            source_label: src_label.to_owned(),
-                            target_label: dst_label.to_owned(),
-                            relation: rel.to_owned(),
-                            value,
-                        });
+                        ir_nodes_links = Some((nodes, links));
                     }
-                    ir_nodes_links = Some((nodes, links));
+                    Err(_) => {
+                        ir_read_failed = true;
+                    }
                 }
             }
 
@@ -425,7 +436,7 @@ fn collect_code_graph_overlay_with_hit(
                 violation_files,
                 blast_cache: StdMutex::new(HashMap::new()),
             });
-            if let Ok(mut guard) = overlay_snapshot_cache().lock() {
+            if !ir_read_failed && let Ok(mut guard) = overlay_snapshot_cache().lock() {
                 guard.retain(|entry| entry.key != cache_key);
                 if guard.len() >= MAX_OVERLAY_CACHE_ENTRIES {
                     guard.remove(0);

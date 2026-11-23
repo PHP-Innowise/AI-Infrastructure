@@ -1380,6 +1380,7 @@ pub fn attach_wheel_listeners() {
     attach_system_wheel_listeners();
     if !GRAPH_HOOKS_WIRED.with(|wired| wired.replace(true)) {
         crate::api::on_sse("graph_status", crate::graph::on_graph_status_sse);
+        crate::api::on_sse("system_graph_status", crate::graph::on_graph_status_sse);
         crate::api::on_sse("resync", crate::graph::on_graph_resync_sse);
         crate::session::register_failure_localizer(crate::graph_map::localize_failure_request);
     }

@@ -577,45 +577,140 @@ pub(in crate::graph_map) fn build_overlay_extras(
     }
 }
 
+fn resolve_system_service_member_project(sys_pid: &str, service_id: &str) -> Option<String> {
+    if service_id.is_empty() || service_id == "__system__" {
+        return (!sys_pid.is_empty()).then(|| sys_pid.to_owned());
+    }
+    let status = m::data("system-graph-status");
+    let status_pid = m::text(&status, "project_id");
+    let ui_sys_pid = if cfg!(target_arch = "wasm32") {
+        dom::value("system-project")
+    } else {
+        String::new()
+    };
+    if sys_pid.is_empty() || status_pid == sys_pid || ui_sys_pid == sys_pid {
+        if let Some(gid) = status["services"][service_id]["graph_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            return Some(gid.to_owned());
+        }
+    }
+    let catalog = m::data("system-catalog")["catalog"].clone();
+    for svc in m::array(&catalog["services"]) {
+        if m::text(&svc, "id") != service_id {
+            continue;
+        }
+        if let Some(gid) = svc["graph_id"].as_str().filter(|s| !s.is_empty()) {
+            return Some(gid.to_owned());
+        }
+        let svc_root = normalize_fs_path(&m::text(&svc, "root"));
+        if svc_root.is_empty() {
+            continue;
+        }
+        let sys_path = normalize_fs_path(m::text(&m::project(sys_pid), "path").as_str());
+        let is_abs =
+            svc_root.starts_with('/') || (svc_root.len() >= 2 && svc_root.as_bytes()[1] == b':');
+        let resolved_root = if !is_abs && !sys_path.is_empty() {
+            normalize_fs_path(&format!(
+                "{}/{}",
+                sys_path.trim_end_matches('/'),
+                svc_root.trim_start_matches("./")
+            ))
+        } else {
+            svc_root
+        };
+        for proj in m::read(|s| m::array(&s.boot["projects"])) {
+            let p_path = normalize_fs_path(&m::text(&proj, "path"));
+            if !p_path.is_empty() && p_path == resolved_root {
+                let pid = m::text(&proj, "id");
+                if !pid.is_empty() {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn surface_matches_live_project(
+    surface: MapSurface,
+    target_project: &str,
+    live_project: &str,
+) -> bool {
+    if target_project.is_empty() {
+        return true;
+    }
+    if surface.name == "session" {
+        return live_project.is_empty() || live_project == target_project;
+    }
+    if let Some(stored) = GraphTargetScope::from_json(&m::data(surface.scope_model_key)) {
+        match &stored {
+            GraphTargetScope::SingleProject { project_id } => {
+                let eff = if surface.name == "modal" && !live_project.is_empty() {
+                    live_project
+                } else {
+                    project_id.as_str()
+                };
+                return eff.is_empty() || eff == target_project;
+            }
+            GraphTargetScope::SystemService {
+                project_id,
+                service_id,
+                ..
+            } => {
+                if project_id.is_empty() || project_id == target_project {
+                    return true;
+                }
+                if resolve_system_service_member_project(project_id, service_id).as_deref()
+                    == Some(target_project)
+                {
+                    return true;
+                }
+                if service_id == "__system__" {
+                    let status = m::data("system-graph-status");
+                    let cat = m::data("system-catalog")["catalog"].clone();
+                    let sys_meta = m::project(project_id);
+                    let ev_meta = m::project(target_project);
+                    return system_project_matches(
+                        target_project,
+                        project_id,
+                        &status,
+                        &cat,
+                        sys_meta["path"].as_str(),
+                        ev_meta["path"].as_str(),
+                    );
+                }
+                return false;
+            }
+        }
+    }
+    live_project.is_empty() || live_project == target_project
+}
+
 pub(crate) fn show_non_destructive_stale_banner(project_id: &str, message: &str) {
     let text = if message.trim().is_empty() {
         "Graph updated — Refresh"
     } else {
         message.trim()
     };
-    if open() {
-        let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
-        if project_id.is_empty() || modal_proj.is_empty() || modal_proj == project_id {
-            dom::text("graph-map-stale-text", text);
-            dom::hidden("graph-map-stale-banner", false);
-        }
+    let live_project = dom::value("project");
+    if open() && surface_matches_live_project(MODAL_SURFACE, project_id, &live_project) {
+        dom::text("graph-map-stale-text", text);
+        dom::hidden("graph-map-stale-banner", false);
     }
     for surface in [
         SESSION_SURFACE,
         SYSTEM_EMBEDDED_SURFACE,
         SYSTEM_CHANGE_SURFACE,
     ] {
-        if dom::get(surface.canvas).is_some() {
-            let surf_proj = surface_scope(surface).project_id().to_owned();
-            if project_id.is_empty() || surf_proj.is_empty() || surf_proj == project_id {
-                dom::text(&format!("{}-stale-text", surface.id_prefix), text);
-                dom::hidden(&format!("{}-stale-banner", surface.id_prefix), false);
-            }
+        if dom::get(surface.canvas).is_some()
+            && surface_matches_live_project(surface, project_id, &live_project)
+        {
+            dom::text(&format!("{}-stale-text", surface.id_prefix), text);
+            dom::hidden(&format!("{}-stale-banner", surface.id_prefix), false);
         }
     }
-}
-
-fn resolved_surface_project_for_invalidation(surface: MapSurface, live_project: &str) -> String {
-    if surface.name == "session" {
-        return live_project.to_owned();
-    }
-    if let Some(stored) = GraphTargetScope::from_json(&m::data(surface.scope_model_key)) {
-        if stored.is_system() || live_project.is_empty() {
-            return stored.project_id().to_owned();
-        }
-        return live_project.to_owned();
-    }
-    live_project.to_owned()
 }
 
 pub(crate) fn invalidate_surface_analysis_caches_for_live_project(
@@ -628,8 +723,7 @@ pub(crate) fn invalidate_surface_analysis_caches_for_live_project(
         SYSTEM_EMBEDDED_SURFACE,
         SYSTEM_CHANGE_SURFACE,
     ] {
-        let surf_proj = resolved_surface_project_for_invalidation(surface, live_project);
-        if project_id.is_empty() || surf_proj.is_empty() || surf_proj == project_id {
+        if surface_matches_live_project(surface, project_id, live_project) {
             m::next(surface.changes_epoch);
             m::next(surface.impact_epoch);
             m::set(surface.changes_key, V::Null);
@@ -749,7 +843,7 @@ fn dom_visible(id: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn refresh_active_external_views(proj: &str) {
+fn refresh_active_external_views(proj: &str, poll_system_status: bool) {
     let active_view = m::read(|s| s.view.clone());
     if matches!(active_view.as_str(), "systems" | "system-changes") {
         let sys_project = dom::value("system-project");
@@ -766,6 +860,11 @@ fn refresh_active_external_views(proj: &str) {
             sys_proj_meta["path"].as_str(),
             ev_proj_meta["path"].as_str(),
         ) {
+            if poll_system_status {
+                spawn_local(async {
+                    crate::systems::poll_system_graph_status(false).await;
+                });
+            }
             if active_view == "systems"
                 && dom_visible("system-map-canvas")
                 && (cat.is_object() || m::data("system-map-doc")["nodes"].is_array())
@@ -822,6 +921,15 @@ fn refresh_active_external_views(proj: &str) {
             });
         }
     }
+}
+
+pub(crate) fn refresh_external_views_for_stale_sse(project_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        refresh_active_external_views(project_id, true);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = project_id;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -961,24 +1069,45 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         let proj = project_id.to_owned();
-        dom::later("graph-sse-idle-refresh", 250, move || {
+        let timer_key = if proj.is_empty() {
+            "graph-sse-idle-refresh".to_owned()
+        } else {
+            format!("graph-sse-idle-refresh:{proj}")
+        };
+        dom::later(&timer_key, 250, move || {
             if any_graph_drag_active() {
                 return;
             }
-            let raw_event = m::data("graph-sse-status");
+            let raw_event = if proj.is_empty() {
+                m::data("graph-sse-status")
+            } else {
+                let per_proj = m::data(&format!("graph-sse-status:{proj}"));
+                if per_proj.is_object() {
+                    per_proj
+                } else {
+                    m::data("graph-sse-status")
+                }
+            };
             let delta = crate::graph::extract_sse_delta_payload(&raw_event);
-            let delta_meta = m::data("graph-sse-delta-meta");
+            let delta_meta = if proj.is_empty() {
+                m::data("graph-sse-delta-meta")
+            } else {
+                let per_proj = m::data(&format!("graph-sse-delta-meta:{proj}"));
+                if per_proj.is_object() {
+                    per_proj
+                } else {
+                    m::data("graph-sse-delta-meta")
+                }
+            };
             let prev_nodes = delta_meta["prev_nodes"].as_u64();
             let prev_edges = delta_meta["prev_edges"].as_u64();
+            let live_project = dom::value("project");
 
             let mut need_full_modal = false;
-            if open() {
-                let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
-                if project_scope_matches(&proj, &modal_proj) {
-                    need_full_modal =
-                        patch_surface_sse_delta(MODAL_SURFACE, &delta, prev_nodes, prev_edges)
-                            == SseRefreshMode::FullReload;
-                }
+            if open() && surface_matches_live_project(MODAL_SURFACE, &proj, &live_project) {
+                need_full_modal =
+                    patch_surface_sse_delta(MODAL_SURFACE, &delta, prev_nodes, prev_edges)
+                        == SseRefreshMode::FullReload;
             }
 
             let mut embedded_full = Vec::new();
@@ -987,14 +1116,12 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
                 SYSTEM_EMBEDDED_SURFACE,
                 SYSTEM_CHANGE_SURFACE,
             ] {
-                if dom::get(surface.canvas).is_some() {
-                    let surf_proj = surface_scope(surface).project_id().to_owned();
-                    if project_scope_matches(&proj, &surf_proj)
-                        && patch_surface_sse_delta(surface, &delta, prev_nodes, prev_edges)
-                            == SseRefreshMode::FullReload
-                    {
-                        embedded_full.push(surface);
-                    }
+                if dom::get(surface.canvas).is_some()
+                    && surface_matches_live_project(surface, &proj, &live_project)
+                    && patch_surface_sse_delta(surface, &delta, prev_nodes, prev_edges)
+                        == SseRefreshMode::FullReload
+                {
+                    embedded_full.push(surface);
                 }
             }
 
@@ -1025,7 +1152,10 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
                     });
                 }
             }
-            refresh_active_external_views(&proj);
+            let from_sys_status = !m::text(&raw_event, "source_project_id").is_empty()
+                || !m::text(&raw_event, "member_project_id").is_empty()
+                || m::text(&raw_event, "action") == "ir_delta";
+            refresh_active_external_views(&proj, !from_sys_status);
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1654,5 +1784,65 @@ mod tests {
             plan_sse_graph_refresh(&inc, Some(2), Some(0), &layers_view, &base_state),
             SseRefreshMode::FullReload
         );
+    }
+
+    #[test]
+    fn system_service_surfaces_match_member_graph_id_for_sse_invalidation() {
+        m::set(
+            "system-graph-status",
+            json!({
+                "project_id": "proj-sys",
+                "services": {
+                    "api": { "service": "api", "graph_id": "proj-api", "state": "ready" },
+                    "worker": { "service": "worker", "graph_id": "proj-worker", "state": "ready" }
+                }
+            }),
+        );
+        let api_scope = GraphTargetScope::SystemService {
+            project_id: "proj-sys".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "api".to_owned(),
+            services: vec!["api".to_owned(), "worker".to_owned()],
+            run_id: None,
+            run_title: None,
+            launches: Vec::new(),
+        };
+        m::set(SYSTEM_EMBEDDED_SURFACE.scope_model_key, api_scope.to_json());
+        m::set(
+            SYSTEM_EMBEDDED_SURFACE.changes_key,
+            json!({"data": {"files": []}}),
+        );
+
+        assert!(surface_matches_live_project(
+            SYSTEM_EMBEDDED_SURFACE,
+            "proj-api",
+            "proj-other"
+        ));
+        assert!(!surface_matches_live_project(
+            SYSTEM_EMBEDDED_SURFACE,
+            "proj-worker",
+            "proj-other"
+        ));
+        invalidate_surface_analysis_caches_for_live_project("proj-api", "proj-other");
+        assert!(m::data(SYSTEM_EMBEDDED_SURFACE.changes_key).is_null());
+
+        let sys_root_scope = GraphTargetScope::SystemService {
+            project_id: "proj-sys".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "__system__".to_owned(),
+            services: vec!["api".to_owned(), "worker".to_owned()],
+            run_id: None,
+            run_title: None,
+            launches: Vec::new(),
+        };
+        m::set(
+            SYSTEM_CHANGE_SURFACE.scope_model_key,
+            sys_root_scope.to_json(),
+        );
+        assert!(surface_matches_live_project(
+            SYSTEM_CHANGE_SURFACE,
+            "proj-api",
+            "proj-other"
+        ));
     }
 }

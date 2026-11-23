@@ -782,6 +782,14 @@ pub(crate) fn extract_sse_delta_payload(event: &V) -> SseDeltaPayload {
     }
 }
 
+fn sse_event_member_project(event: &V) -> String {
+    let src = m::text(event, "source_project_id");
+    if !src.is_empty() {
+        return src;
+    }
+    m::text(event, "member_project_id")
+}
+
 pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> GraphSseAction {
     let active_view = m::read(|s| s.view.clone());
     apply_graph_status_sse_event_for_view(event, current_project, &active_view)
@@ -796,15 +804,22 @@ pub(crate) fn apply_graph_status_sse_event_for_view(
         return GraphSseAction::Ignored;
     }
     let delta = extract_sse_delta_payload(event);
-    let event_project = delta.project_id.clone();
-    let same_or_global_project =
-        event_project.is_empty() || current_project.is_empty() || event_project == current_project;
+    let owner_project = delta.project_id.clone();
+    let member_project = sse_event_member_project(event);
+    let event_project = if !member_project.is_empty() {
+        member_project.clone()
+    } else {
+        owner_project.clone()
+    };
+    let same_or_global_project = event_project.is_empty()
+        || current_project.is_empty()
+        || event_project == current_project
+        || (!owner_project.is_empty() && owner_project == current_project);
     let external_multi_project_view =
         matches!(active_view, "systems" | "system-changes" | "omnigraph");
     if !same_or_global_project && !external_multi_project_view {
         return GraphSseAction::Ignored;
     }
-    m::set("graph-sse-status", event.clone());
     let state = delta.state.clone();
     let reason = delta.reason.clone();
     let message = m::text(event, "message");
@@ -851,6 +866,12 @@ pub(crate) fn apply_graph_status_sse_event_for_view(
             &event_project,
             current_project,
         );
+        if !owner_project.is_empty() && owner_project != event_project {
+            crate::graph_map::invalidate_surface_analysis_caches_for_live_project(
+                &owner_project,
+                current_project,
+            );
+        }
     }
     let banner_text = if !message.is_empty() {
         message
@@ -859,20 +880,28 @@ pub(crate) fn apply_graph_status_sse_event_for_view(
     } else {
         "Graph updated — Refresh".to_owned()
     };
+    if !event_project.is_empty() {
+        m::set(&format!("graph-sse-status:{event_project}"), event.clone());
+    }
     if same_or_global_project {
+        m::set("graph-sse-status", event.clone());
         let mut synth_status = m::data("graph");
         if !synth_status.is_object() {
             synth_status = json!({});
         }
         let prev_nodes = synth_status["graph"]["nodes"].as_u64();
         let prev_edges = synth_status["graph"]["edges"].as_u64();
-        m::set(
-            "graph-sse-delta-meta",
-            json!({
-                "prev_nodes": prev_nodes,
-                "prev_edges": prev_edges,
-            }),
-        );
+        let meta = json!({
+            "prev_nodes": prev_nodes,
+            "prev_edges": prev_edges,
+        });
+        if !event_project.is_empty() {
+            m::set(
+                &format!("graph-sse-delta-meta:{event_project}"),
+                meta.clone(),
+            );
+        }
+        m::set("graph-sse-delta-meta", meta);
         synth_status["state"] = json!(if state.is_empty() {
             "ready"
         } else {
@@ -904,14 +933,20 @@ pub(crate) fn apply_graph_status_sse_event_for_view(
     }
 }
 
-/// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
+/// Processes SSE `event: "graph_status"` and `event: "system_graph_status"` updates without
+/// destroying user camera or selection.
 pub(crate) fn on_graph_status_sse(event: &V) {
     let current_project = dom::value("project");
     match apply_graph_status_sse_event(event, &current_project) {
         GraphSseAction::Ignored => {}
         GraphSseAction::Building => {
             let ev_proj = m::text(event, "project_id");
-            if ev_proj.is_empty() || current_project.is_empty() || ev_proj == current_project {
+            let member_proj = sse_event_member_project(event);
+            if ev_proj.is_empty()
+                || current_project.is_empty()
+                || ev_proj == current_project
+                || (!member_proj.is_empty() && member_proj == current_project)
+            {
                 render();
             }
         }
@@ -929,6 +964,8 @@ pub(crate) fn on_graph_status_sse(event: &V) {
             crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
             if schedule_idle {
                 crate::graph_map::maybe_schedule_idle_refresh(&event_project);
+            } else {
+                crate::graph_map::refresh_external_views_for_stale_sse(&event_project);
             }
         }
     }
@@ -1772,6 +1809,53 @@ mod tests {
                 schedule_idle: true,
             }
         );
+
+        // External project and `building` events must NOT clobber primary project's singleton `graph-sse-status`.
+        let primary_ready = json!({
+            "project_id": "proj-primary",
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "changed_files": ["src/main.rs"]
+        });
+        assert!(matches!(
+            apply_graph_status_sse_event_for_view(&primary_ready, "proj-primary", "systems"),
+            GraphSseAction::RefreshCandidate { .. }
+        ));
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
+
+        let ext_building = json!({
+            "project_id": "svc-member",
+            "state": "building",
+            "reason": "build_started",
+        });
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&ext_building, "proj-primary", "systems"),
+            GraphSseAction::Building
+        );
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
+
+        let sys_member_ir_delta = json!({
+            "project_id": "sys-owner",
+            "source_project_id": "proj-api",
+            "service": "api",
+            "state": "updated",
+            "reason": "ir_delta",
+            "ir_revision": 91,
+        });
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&sys_member_ir_delta, "proj-primary", "systems"),
+            GraphSseAction::RefreshCandidate {
+                event_project: "proj-api".to_owned(),
+                banner_text: "Graph updated — Refresh".to_owned(),
+                schedule_idle: true,
+            }
+        );
+        assert_eq!(
+            m::data("graph-sse-status:proj-api")["ir_revision"],
+            json!(91)
+        );
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
 
         m::write(|s| s.view = "sessions".to_owned());
     }

@@ -606,6 +606,18 @@ export async function loadOrder(id: string, a: string, b: string) {
         .as_deref(),
         Some("route:POST /api/prefix-{param}/{param}")
     );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${`foo/${bar}`}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${PROTO}${HOST}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "/users/{id:[0-9]{2,4}}", true).as_deref(),
+        Some("route:GET /users/{param}")
+    );
     // Bare template expression without `/` and prose whitespace outside `${...}` must stay rejected.
     assert_eq!(normalize_route_contract(Some("get"), "${url}", true), None);
     assert_eq!(

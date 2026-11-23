@@ -251,5 +251,6 @@ pub(super) use state_urls::{build_map_path, progressive_lod_for_state};
 #[allow(unused_imports)]
 pub(crate) use state_urls::{
     invalidate_surface_analysis_caches, invalidate_surface_analysis_caches_for_live_project,
-    maybe_schedule_idle_refresh, show_non_destructive_stale_banner,
+    maybe_schedule_idle_refresh, refresh_external_views_for_stale_sse,
+    show_non_destructive_stale_banner,
 };

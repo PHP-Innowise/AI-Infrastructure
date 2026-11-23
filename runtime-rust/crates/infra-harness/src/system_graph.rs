@@ -8,6 +8,7 @@ mod resolver;
 mod semantics;
 
 pub use domain::SystemGraphDomain;
+pub(crate) use domain::extra_system_configs_by_project;
 pub use live_bridge::HarnessCodeGraphBridge;
 pub(crate) use resolver::sysrun_launches;
 pub use resolver::{

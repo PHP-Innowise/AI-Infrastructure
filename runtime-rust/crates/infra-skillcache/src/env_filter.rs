@@ -18,7 +18,7 @@ pub const GENERATION: &str = "SKILLCACHE_GENERATION";
 /// Whether a variable is withheld from programs: its name contains a
 /// credential, session, connection-string, or secret-store pattern
 /// (`KEY`, `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`, `PASSWD`, `AUTH`,
-/// `DATABASE_URL`, `_URI`, `DSN`, `PGPASS`, `JWT`, `BEARER`, `COOKIE`,
+/// `DATABASE_URL`, `_URL`, `_URI`, `DSN`, `PGPASS`, `JWT`, `BEARER`, `COOKIE`,
 /// `PRIVATE_KEY`, `KUBECONFIG`, `NETRC`, `DOCKER_CONFIG`) in any letter case.
 pub fn withheld(name: &str) -> bool {
     let name = name.to_uppercase();
@@ -31,6 +31,7 @@ pub fn withheld(name: &str) -> bool {
         "PASSWD",
         "AUTH",
         "DATABASE_URL",
+        "_URL",
         "_URI",
         "DSN",
         "PGPASS",
@@ -211,6 +212,13 @@ mod tests {
             "basic_auth",
             "DATABASE_URL",
             "test_database_url",
+            "REDIS_URL",
+            "POSTGRES_URL",
+            "MYSQL_URL",
+            "MONGO_URL",
+            "AMQP_URL",
+            "WEBHOOK_URL",
+            "PIP_INDEX_URL",
             "REDIS_URI",
             "mongo_uri",
             "SENTRY_DSN",

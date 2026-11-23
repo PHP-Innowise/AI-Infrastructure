@@ -1029,7 +1029,12 @@ async fn qualify_with_dry_run(
                     )
                 } else if allow_dry_run {
                     let dry_snap_state = round.state.join("dry-snapshot");
-                    let _ = snapshot::take(&dry_snap_state, &workspace_root, "dry-run");
+                    let _ = snapshot::take_with_allowlist(
+                        &dry_snap_state,
+                        &workspace_root,
+                        "dry-run",
+                        &candidate.capsule.capabilities.allow_ignored,
+                    );
                     let result = gates::gate3_with_options(
                         &runtime.engine(),
                         &round,

@@ -87,6 +87,25 @@ impl Warm {
         self.eval_arm.as_deref() == Some("skillcache_agent")
     }
 
+    pub(crate) fn with_engine(&self, engine: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            capsule_id: self.capsule_id.clone(),
+            form: self.form,
+            eval_arm: self.eval_arm.clone(),
+            name: self.name.clone(),
+            block: self.block.clone(),
+            environment: self.environment.clone(),
+            bin: self.bin.clone(),
+            package: self.package.clone(),
+            state_dir: self.state_dir.clone(),
+            engine: self.engine.clone().or(engine),
+            codex: self.codex.clone(),
+            direct_dispatch: self.direct_dispatch,
+            seen: AtomicU64::new(self.seen.load(Ordering::Relaxed)),
+            seen_changes: AtomicU64::new(self.seen_changes.load(Ordering::Relaxed)),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn for_changes_test(state_dir: PathBuf) -> Self {
         Self {
@@ -646,9 +665,9 @@ fn is_mu_stopword(tok: &str) -> bool {
 }
 
 fn tokenize_mu(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|tok| tok.len() >= 3)
-        .map(|tok| tok.to_ascii_lowercase())
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|tok| tok.chars().count() >= 3)
+        .map(str::to_lowercase)
         .filter(|tok| !is_mu_stopword(tok))
         .collect()
 }
@@ -3598,10 +3617,24 @@ mod tests {
                     reason,
                     program_failed,
                 } => {
-                    assert!(
-                        program_failed || reason.starts_with("sandbox_unavailable:"),
-                        "unexpected fallback reason={reason} program_failed={program_failed}"
-                    );
+                    if program_failed {
+                        // Mock engine ran under guardian + sandbox and surfaced program failure.
+                    } else if infra_host::sandbox::available() {
+                        // Unit tests (`--lib`) do not configure `use_guardian`, so `guardian()`
+                        // resolves to the `--lib` test binary which cannot serve `internal-guard`;
+                        // real sandboxed `program_failed` is verified in `tests/skillcache_harness.rs`.
+                        assert!(
+                            reason.contains(
+                                "The native guardian exited without a valid native exit receipt."
+                            ),
+                            "unexpected fallback reason on sandbox-capable host: reason={reason} program_failed={program_failed}"
+                        );
+                    } else {
+                        assert!(
+                            reason.starts_with("sandbox_unavailable:"),
+                            "expected sandbox_unavailable when sandbox unavailable, got reason={reason} program_failed={program_failed}"
+                        );
+                    }
                 }
                 DirectDispatchOutcome::Completed { .. } => {
                     panic!("expected fallback when direct execution failed");
@@ -4151,6 +4184,13 @@ mod tests {
             env.get("TMPDIR").map(String::as_str),
             Some(canon_scratch.to_string_lossy().as_ref())
         );
+        assert_eq!(
+            env.get("USERPROFILE").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        let unicode_tokens = tokenize_mu("Prüfen PHP-Routen überprüfen");
+        assert!(unicode_tokens.contains("prüfen"), "{unicode_tokens:?}");
+        assert!(unicode_tokens.contains("überprüfen"), "{unicode_tokens:?}");
         let _ = package::remove(&pkg_dir);
     }
 }

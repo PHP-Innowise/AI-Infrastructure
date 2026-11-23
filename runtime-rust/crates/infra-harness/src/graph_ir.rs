@@ -955,6 +955,7 @@ impl GraphIrStore {
 
             let summary = recompute_summary(&tx, &now, truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
+            upsert_meta(&tx, "workspace_root", &real_root.to_string_lossy())?;
             upsert_meta(&tx, "manifest_stamp", &manifest_stamp)?;
             if let Some(ref head) = git_head {
                 upsert_meta(&tx, "git_head", head)?;
@@ -1186,14 +1187,25 @@ impl GraphIrStore {
                 let (re_resolve_paths, pre_tx_incoming) =
                     if !affected_targets.is_empty() || manifest_changed {
                         let callers = query_incoming_callers_from_conn(&conn, &affected_targets)?;
+                        let bundle_key = (
+                            existing_files.len(),
+                            graph_deps::known_files_hash(&existing_files),
+                        );
+                        if cached_bundle_key != Some(bundle_key) {
+                            let (m, cm) =
+                                graph_deps::cached_manifests_for_root(&real_root, &existing_files);
+                            manifests = m;
+                            crate_map = cm;
+                            cached_bundle_key = Some(bundle_key);
+                        }
                         let re_resolve = collect_affected_dependents(
                             &conn,
                             &affected_targets,
                             &skip_re_resolve,
                             manifest_changed,
                             &manifest_lang_vec,
-                            None,
-                            None,
+                            Some(&manifests),
+                            Some(&crate_map),
                         )?;
                         (re_resolve, callers)
                     } else {
@@ -1372,6 +1384,7 @@ impl GraphIrStore {
                 && existing_files.len() >= MAX_IR_FILES;
             let summary = recompute_summary(&tx, &now, prev_truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
+            upsert_meta(&tx, "workspace_root", &real_root.to_string_lossy())?;
             if let Some(stamp) = &manifest_stamp {
                 upsert_meta(&tx, "manifest_stamp", stamp)?;
             }
@@ -2055,8 +2068,20 @@ impl GraphIrStore {
 
     /// Exports incremental nodes/links for `Index::update_files`, supporting regular code
     /// edges, `ir_reexports` propagation, and `ir_semantic_edges` (`sem:*` & `di_binds`).
+    #[cfg(test)]
     pub(crate) fn export_ir_delta_for_files(
         &self,
+        delta: &IrUpdateDelta,
+    ) -> Result<Option<IrDeltaElements>> {
+        self.export_ir_delta_for_files_with_root(None, delta)
+    }
+
+    /// Like [`Self::export_ir_delta_for_files`], resolving tsconfig/package/crate manifest
+    /// aliases from `root_opt` (or persisted `ir_meta.workspace_root`) during re-export
+    /// propagation.
+    pub(crate) fn export_ir_delta_for_files_with_root(
+        &self,
+        root_opt: Option<&Path>,
         delta: &IrUpdateDelta,
     ) -> Result<Option<IrDeltaElements>> {
         if delta.manifest_changed {
@@ -2095,8 +2120,31 @@ impl GraphIrStore {
             if delta.reexport_changed {
                 let mut reexp_seeds: BTreeSet<String> = effective_edited.clone();
                 reexp_seeds.extend(removed_files.iter().cloned());
-                let (chain_deps, _) =
-                    collect_reexport_chain_dependents(conn, &reexp_seeds, &dirty_files, None, None)?;
+                let resolved_root = root_opt.map(Path::to_path_buf).or_else(|| {
+                    conn.query_row(
+                        "SELECT value FROM ir_meta WHERE key = 'workspace_root'",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                });
+                let bundle = resolved_root.as_deref().map(|ws_root| {
+                    let known: BTreeSet<String> = files.iter().cloned().collect();
+                    graph_deps::cached_manifests_for_root(ws_root, &known)
+                });
+                let manifests_opt = bundle.as_ref().map(|(m, _)| m.as_ref());
+                let crate_map_opt = bundle.as_ref().map(|(_, cm)| cm.as_ref());
+                let (chain_deps, _) = collect_reexport_chain_dependents(
+                    conn,
+                    &reexp_seeds,
+                    &dirty_files,
+                    manifests_opt,
+                    crate_map_opt,
+                )?;
                 dirty_files.extend(chain_deps);
             }
 
@@ -3341,6 +3389,8 @@ fn candidate_path_tokens(rel_path: &str) -> Vec<String> {
     }
 
     push_unique(without_ext.to_owned());
+    push_unique(format!("./{file_stem}"));
+    push_unique(format!("../{file_stem}"));
     let parent_path = segs[..segs.len() - 1].join("/");
     if parent_path.contains('/') {
         push_unique(parent_path);
@@ -3361,9 +3411,11 @@ fn candidate_path_tokens(rel_path: &str) -> Vec<String> {
         }
         if file_stem == "lib" && parent_dir == "src" {
             push_unique(format!("{grand}::lib"));
+            push_unique(format!("::{grand}"));
+            push_unique(format!("crate::{grand}"));
         }
     }
-    if parent_dir != "src" {
+    if parent_dir != "src" || segs.len() == 2 {
         push_unique(format!("./{parent_dir}"));
         push_unique(format!("../{parent_dir}"));
         if file_stem == "mod" {
@@ -7688,6 +7740,70 @@ function helper(v: number): number { return v + 1; }
         assert!(
             store.export_ir_delta_for_files(&d_lib).unwrap().is_some(),
             "crates/core/src/lib.rs edit must stay incremental"
+        );
+
+        let src_index_tokens = candidate_path_tokens("src/index.ts");
+        assert!(src_index_tokens.contains(&"./index".to_owned()));
+        assert!(src_index_tokens.contains(&"./src".to_owned()));
+        let crate_lib_tokens = candidate_path_tokens("crates/core/src/lib.rs");
+        assert!(crate_lib_tokens.contains(&"::core".to_owned()));
+        assert!(crate_lib_tokens.contains(&"crate::core".to_owned()));
+    }
+
+    #[test]
+    fn incremental_reexport_propagates_through_tsconfig_path_alias_barrel() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@acme/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/leaf_a.ts"), "export const val = 1;\n").unwrap();
+        std::fs::write(root.join("src/leaf_b.ts"), "export const val = 2;\n").unwrap();
+        std::fs::write(root.join("src/mid.ts"), "export { val } from './leaf_a';\n").unwrap();
+        std::fs::write(
+            root.join("src/outer.ts"),
+            "export { val } from '@acme/mid';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { val } from './outer';\nexport const out = val;\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "p-alias-reexp").unwrap();
+        store.sync_workspace_with_delta(&root).unwrap();
+        assert!(
+            store
+                .all_resolved_file_edges()
+                .unwrap()
+                .contains(&("src/consumer.ts".to_owned(), "src/leaf_a.ts".to_owned()))
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(root.join("src/mid.ts"), "export { val } from './leaf_b';\n").unwrap();
+        let delta = store
+            .update_paths_with_delta(&root, &["src/mid.ts".to_owned()])
+            .unwrap();
+        assert!(delta.reexport_changed);
+        assert!(
+            delta
+                .re_resolved_files
+                .contains(&"src/consumer.ts".to_owned()),
+            "expected tsconfig-aliased outer barrel consumer in re_resolved_files: {:?}",
+            delta.re_resolved_files
+        );
+        assert!(store.export_ir_delta_for_files(&delta).unwrap().is_some());
+        assert!(
+            store
+                .all_resolved_file_edges()
+                .unwrap()
+                .contains(&("src/consumer.ts".to_owned(), "src/leaf_b.ts".to_owned()))
         );
     }
 }
