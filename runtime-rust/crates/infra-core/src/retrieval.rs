@@ -2197,11 +2197,18 @@ fn prune_manifests(directory: &Path, retention: usize) -> Result<()> {
 }
 
 #[cfg(test)]
-static QUERY_PLAN_CACHE_HITS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static QUERY_PLAN_CACHE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static QUERY_PLAN_CACHE_MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 #[cfg(test)]
-static QUERY_PLAN_CACHE_MISSES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+fn query_plan_cache_hits() -> usize {
+    QUERY_PLAN_CACHE_HITS.with(|cell| cell.get())
+}
+#[cfg(test)]
+fn query_plan_cache_misses() -> usize {
+    QUERY_PLAN_CACHE_MISSES.with(|cell| cell.get())
+}
 
 #[expect(
     clippy::too_many_arguments,
@@ -2263,7 +2270,7 @@ fn cached_or_rank_candidates(
         && let Some(hit) = crate::storage::QueryPlanCache::lookup(&store.conn, key)
     {
         #[cfg(test)]
-        QUERY_PLAN_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        QUERY_PLAN_CACHE_HITS.with(|cell| cell.set(cell.get() + 1));
         trace.evidence_terms = hit.evidence_terms;
         trace.required_terms = hit.required_terms;
         if let Some(events) = hit.funnel_events {
@@ -2278,7 +2285,7 @@ fn cached_or_rank_candidates(
     }
 
     #[cfg(test)]
-    QUERY_PLAN_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    QUERY_PLAN_CACHE_MISSES.with(|cell| cell.set(cell.get() + 1));
 
     let (candidates, diagnostics) =
         query::rank_candidates_observed(&store.conn, query, limit, scope, Some(trace))?;
@@ -2292,7 +2299,6 @@ fn cached_or_rank_candidates(
 mod query_plan_cache_tests {
     use super::*;
     use crate::domain::uuid4;
-    use std::sync::atomic::Ordering;
 
     struct OwnedDir(PathBuf);
     impl Drop for OwnedDir {
@@ -2337,8 +2343,8 @@ mod query_plan_cache_tests {
         let roots = crate::Roots::discover(&root, &root).unwrap();
         let config = RuntimeConfig::load(&roots).unwrap();
         let mut t1 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
-        let before_misses = QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed);
-        let before_hits = QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed);
+        let before_misses = query_plan_cache_misses();
+        let before_hits = query_plan_cache_hits();
 
         let (first, d1) = cached_or_rank_candidates(
             &mut store,
@@ -2352,11 +2358,8 @@ mod query_plan_cache_tests {
             &mut t1,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
-            before_misses + 1
-        );
-        assert_eq!(QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed), before_hits);
+        assert_eq!(query_plan_cache_misses(), before_misses + 1);
+        assert_eq!(query_plan_cache_hits(), before_hits);
         assert_eq!(first.len(), 1);
 
         let mut t2 = crate::observability::Trace::new(config.clone(), &[]).unwrap();
@@ -2372,10 +2375,7 @@ mod query_plan_cache_tests {
             &mut t2,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed),
-            before_hits + 1
-        );
+        assert_eq!(query_plan_cache_hits(), before_hits + 1);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].document.path, first[0].document.path);
         assert_eq!(second[0].snippet, first[0].snippet);
@@ -2402,10 +2402,7 @@ mod query_plan_cache_tests {
             &mut t3,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
-            before_misses + 2
-        );
+        assert_eq!(query_plan_cache_misses(), before_misses + 2);
         assert_eq!(third.len(), 1);
 
         // Changing capsule_profile or index_generation invalidates cache cleanly.
@@ -2434,18 +2431,15 @@ mod query_plan_cache_tests {
             &mut t4,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
-            before_misses + 3
-        );
+        assert_eq!(query_plan_cache_misses(), before_misses + 3);
         assert_eq!(fourth.len(), 1);
 
         // Trace-scoped calls hit the cache when trace_paths match and miss when they differ.
         let watched = vec!["memory-bank/chunks/MEM-20260101-abcd1234-invoice.md".to_string()];
         let mut tw1 = crate::observability::Trace::new(config.clone(), &watched).unwrap();
         let _ = tw1.watch(&store.conn);
-        let hits_before_trace = QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed);
-        let misses_before_trace = QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed);
+        let hits_before_trace = query_plan_cache_hits();
+        let misses_before_trace = query_plan_cache_misses();
         let (trace_first, _) = cached_or_rank_candidates(
             &mut store,
             "invoice numbering",
@@ -2458,10 +2452,7 @@ mod query_plan_cache_tests {
             &mut tw1,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
-            misses_before_trace + 1
-        );
+        assert_eq!(query_plan_cache_misses(), misses_before_trace + 1);
         assert_eq!(trace_first.len(), 1);
 
         let mut tw2 = crate::observability::Trace::new(config.clone(), &watched).unwrap();
@@ -2478,10 +2469,7 @@ mod query_plan_cache_tests {
             &mut tw2,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_HITS.load(Ordering::Relaxed),
-            hits_before_trace + 1
-        );
+        assert_eq!(query_plan_cache_hits(), hits_before_trace + 1);
         assert_eq!(trace_second.len(), 1);
         assert_eq!(tw2.records, tw1.records);
         assert_eq!(tw2.order, tw1.order);
@@ -2502,10 +2490,7 @@ mod query_plan_cache_tests {
             &mut tw3,
         )
         .unwrap();
-        assert_eq!(
-            QUERY_PLAN_CACHE_MISSES.load(Ordering::Relaxed),
-            misses_before_trace + 2
-        );
+        assert_eq!(query_plan_cache_misses(), misses_before_trace + 2);
         assert!(tw3.records.contains_key("docs/other.md"));
         assert_eq!(tw3.records["docs/other.md"]["state"], "unavailable");
     }
