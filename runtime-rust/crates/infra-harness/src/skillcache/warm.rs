@@ -616,19 +616,15 @@ fn decide_toolchain_candidate(
     message: &str,
 ) -> std::result::Result<(Value, String), Decision> {
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let tree_sha = match trace::workspace_tree_sha(workspace) {
-        Ok(sha) => sha,
-        Err(_) => return Err(miss("no_single_skill", "the message names no skill")),
-    };
     let candidates = match runtime.store.connection().and_then(|db| match arm {
-        None => db::active_toolchain_capsules(&db, project_id, &tree_sha, None),
+        None => db::active_toolchain_capsules_for_project(&db, project_id, None),
         Some("written_procedure" | "skillcache_no_replay") => {
-            db::active_toolchain_capsules(&db, project_id, &tree_sha, arm)
+            db::active_toolchain_capsules_for_project(&db, project_id, arm)
         }
         Some("skillcache_agent" | "skillcache_executor") => {
-            let dedicated = db::active_toolchain_capsules(&db, project_id, &tree_sha, arm)?;
+            let dedicated = db::active_toolchain_capsules_for_project(&db, project_id, arm)?;
             Ok(if dedicated.is_empty() {
-                db::active_toolchain_capsules(&db, project_id, &tree_sha, None)?
+                db::active_toolchain_capsules_for_project(&db, project_id, None)?
             } else {
                 dedicated
             })
@@ -670,16 +666,24 @@ fn decide_toolchain_candidate(
     } else {
         eligible
     };
-    let chosen = match eligible.len() {
-        0 if plan_only && had_provider_eligible => {
+    if eligible.is_empty() {
+        if plan_only && had_provider_eligible {
             return Err(miss(
                 "plan_mode",
                 "a capsule's programs write, and this is a read-only turn",
             ));
         }
-        0 => return Err(miss("no_single_skill", "the message names no skill")),
-        1 => eligible[0].clone(),
-        _ => best_by_health_and_recency(&runtime.store, &eligible),
+        return Err(miss("no_single_skill", "the message names no skill"));
+    }
+    let fresh: Vec<Value> = eligible
+        .iter()
+        .filter(|capsule| staleness(capsule, workspace).is_none())
+        .cloned()
+        .collect();
+    let pool = if fresh.is_empty() { &eligible } else { &fresh };
+    let chosen = match pool.len() {
+        1 => pool[0].clone(),
+        _ => best_by_health_and_recency(&runtime.store, pool),
     };
     Ok((chosen, String::new()))
 }
@@ -754,6 +758,18 @@ fn decide_for(
         } else {
             None
         };
+        let requested_skill_name = route
+            .requests
+            .first()
+            .and_then(|req| req["name"].as_str())
+            .unwrap_or("");
+        let requested_tree_sha = requested_skill_path
+            .as_deref()
+            .and_then(|path| trace::skill_file(workspace, path))
+            .and_then(|file| file.parent().map(Path::to_path_buf))
+            .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
+            .map(|tree| tree.sha256)
+            .unwrap_or_default();
         let row = match runtime
             .store
             .connection()
@@ -766,9 +782,14 @@ fn decide_for(
         if row["project_id"] != project_id
             || row["status"] != "active"
             || !capsule_matches_arm(&row, arm)
-            || requested_skill_path
-                .as_deref()
-                .is_some_and(|path| row["skill_path"] != path)
+            || requested_skill_path.as_deref().is_some_and(|path| {
+                !db::capsule_matches_skill_or_mirror(
+                    &row,
+                    path,
+                    requested_skill_name,
+                    &requested_tree_sha,
+                )
+            })
         {
             return miss(
                 "no_capsule",
@@ -817,15 +838,49 @@ fn decide_for(
                 "the routed skill is not a skill folder of this project or of your home",
             );
         };
+        let skill_name = request["name"].as_str().unwrap_or("");
+        let skill_tree_sha = trace::skill_file(workspace, &skill_path)
+            .and_then(|file| file.parent().map(Path::to_path_buf))
+            .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
+            .map(|tree| tree.sha256)
+            .unwrap_or_default();
         let candidates = match runtime.store.connection().and_then(|db| match arm {
-            None => db::active_capsules(&db, project_id, &skill_path),
+            None => db::active_capsules_for_skill_or_mirror(
+                &db,
+                project_id,
+                &skill_path,
+                skill_name,
+                &skill_tree_sha,
+                None,
+            ),
             Some("written_procedure" | "skillcache_no_replay") => {
-                db::active_capsules_for_eval(&db, project_id, &skill_path, arm)
+                db::active_capsules_for_skill_or_mirror(
+                    &db,
+                    project_id,
+                    &skill_path,
+                    skill_name,
+                    &skill_tree_sha,
+                    arm,
+                )
             }
             Some("skillcache_agent" | "skillcache_executor") => {
-                let dedicated = db::active_capsules_for_eval(&db, project_id, &skill_path, arm)?;
+                let dedicated = db::active_capsules_for_skill_or_mirror(
+                    &db,
+                    project_id,
+                    &skill_path,
+                    skill_name,
+                    &skill_tree_sha,
+                    arm,
+                )?;
                 Ok(if dedicated.is_empty() {
-                    db::active_capsules(&db, project_id, &skill_path)?
+                    db::active_capsules_for_skill_or_mirror(
+                        &db,
+                        project_id,
+                        &skill_path,
+                        skill_name,
+                        &skill_tree_sha,
+                        None,
+                    )?
                 } else {
                     dedicated
                 })
@@ -1342,6 +1397,7 @@ impl Warm {
                     )
                     .is_ok()
                 {
+                    let _ = db::mark_capsule_needs_trace(&db, &self.capsule_id);
                     let project_id = cap["project_id"]
                         .as_str()
                         .filter(|id| !id.is_empty())
@@ -1360,6 +1416,7 @@ impl Warm {
                     "project_id": project_id,
                     "capsule_id": self.capsule_id,
                     "reason": reason,
+                    "needs_trace": true,
                 }),
             );
             let _ = emit(json!({
@@ -2435,5 +2492,331 @@ mod tests {
                 reason(&other)
             ),
         }
+    }
+
+    #[test]
+    fn mirror_skills_deduplicate_capsules_by_canonical_name_and_digest() {
+        let root = crate::skillcache::test_support::scratch();
+        let wt = root.path().join("wt");
+        let skill_md =
+            "---\nname: pdf\ndescription: Extract PDF rows\n---\n# PDF\nRead invoices.\n";
+        for dir in [
+            ".claude/skills/pdf",
+            ".agents/skills/pdf",
+            ".cursor/skills/pdf",
+        ] {
+            std::fs::create_dir_all(wt.join(dir)).unwrap();
+            std::fs::write(wt.join(dir).join("SKILL.md"), skill_md).unwrap();
+        }
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&wt).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let route_claude = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let resolved = trace::resolve_skills(
+            &wt,
+            &route_claude,
+            "$pdf extract",
+            &infra_skillcache::trace::Trace {
+                provider: "codex".into(),
+                steps: Vec::new(),
+                skills: Vec::new(),
+                counters: Default::default(),
+                complete: true,
+            },
+        );
+        let tree_sha = resolved[0]["tree_sha256"].as_str().unwrap().to_owned();
+
+        let warm_root = root.path().join("artifacts/mirror-1");
+        let warm_dir = warm_root.join("warm");
+        let capsule_val = json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "pdf-mirror", "description": "Extract PDF rows"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": tree_sha}]},
+        });
+        let cap = SkillCapsule::from_value(&capsule_val).unwrap();
+        let pkg_sha = infra_skillcache::package::write_warm(
+            &warm_dir,
+            &cap,
+            Some(b"# PDF\nUse cached workflow.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+        let loaded = infra_skillcache::package::load(&warm_dir).unwrap();
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+        {
+            let db = store.connection().unwrap();
+            let skill_ref = json!({
+                "name": "pdf",
+                "path": ".claude/skills/pdf/SKILL.md",
+                "tree_sha256": tree_sha
+            });
+            db::begin_capsule(
+                &db,
+                "cap-mirror",
+                "cmp-mirror",
+                &project_id,
+                "s1",
+                "g1",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-mirror",
+                    mu_name: "pdf-mirror",
+                    mu_description: "Extract PDF rows",
+                    form: "textual",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: warm_root.to_str().unwrap(),
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-mirror", 1, gate, true, &json!({"passed": true}))
+                    .unwrap();
+            }
+        }
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let sess = json!({
+            "id": "s-mirror",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": settings::validate(&json!({"mode": "warm_only"})).unwrap(),
+        });
+        for mirror_path in [".agents/skills/pdf/SKILL.md", ".cursor/skills/pdf/SKILL.md"] {
+            let route = ResolvedCommand {
+                mode: "text".into(),
+                text: "pdf".into(),
+                requests: vec![json!({"name": "pdf", "path": mirror_path})],
+                notice: None,
+            };
+            match decide_for(&rt, &sess, &route, "$pdf extract", &wt, None) {
+                Decision::Hit(warm) => assert_eq!(warm.capsule_id, "cap-mirror"),
+                other => panic!(
+                    "expected mirror hit for {mirror_path}, got {}",
+                    reason(&other)
+                ),
+            }
+        }
+
+        // Changing a mirror's content digest must prevent stale reuse.
+        std::fs::write(
+            wt.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf\n---\nChanged instructions\n",
+        )
+        .unwrap();
+        let route_drifted = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess,
+                &route_drifted,
+                "$pdf extract",
+                &wt,
+                None
+            )),
+            "no_capsule"
+        );
+    }
+
+    #[test]
+    fn toolchain_capsule_survives_unrelated_git_commit_and_invalidates_on_dirty_touched_file() {
+        let root = crate::skillcache::test_support::scratch();
+        let wt = root.path().join("repo");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("composer.json"), r#"{"name":"acme/app"}"#).unwrap();
+        std::fs::write(wt.join("src/App.php"), "<?php echo 1;\n").unwrap();
+        std::fs::write(wt.join("README.md"), "Docs\n").unwrap();
+
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "init"]);
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&wt).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let initial_tree = trace::workspace_tree_sha(&wt).unwrap();
+        let snapshot = trace::toolchain_manifest_snapshot(
+            &wt,
+            &[json!({"kind": "tool", "tool": "Read", "input": {"file_path": "src/App.php"}})],
+        );
+        let warm_root = root.path().join("artifacts/tc-manifest");
+        let warm_dir = warm_root.join("warm");
+        let capsule_val = json!({
+            "schema_version": 1,
+            "form": "textual",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-app", "description": "Inspect PHP app"},
+            "source": {"skills": [], "tool_chain": {"tree_sha256": initial_tree}},
+        });
+        let cap = SkillCapsule::from_value(&capsule_val).unwrap();
+        let pkg_sha = infra_skillcache::package::write_warm(
+            &warm_dir,
+            &cap,
+            Some(b"# Inspect\nInspect `src/App.php`.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+        let loaded = infra_skillcache::package::load(&warm_dir).unwrap();
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+        {
+            let db = store.connection().unwrap();
+            let tc_ref =
+                json!({"name": "tool-chain", "path": ".tool_chain", "tree_sha256": initial_tree});
+            db::begin_capsule(
+                &db,
+                "cap-tc-m",
+                "cmp-tc-m",
+                &project_id,
+                "s1",
+                "g1",
+                &tc_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-tc-m",
+                    mu_name: "inspect-app",
+                    mu_description: "Inspect PHP app",
+                    form: "textual",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: warm_root.to_str().unwrap(),
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-tc-m", "tool_chain", &initial_tree).unwrap();
+            db::set_dependency_manifest(
+                &db,
+                "cap-tc-m",
+                &db::ArtifactDependencyManifest {
+                    skill_paths: Vec::new(),
+                    watched_globs: Vec::new(),
+                    manifest_files: vec!["composer.json".into()],
+                    ast_selectors: Vec::new(),
+                    route_selectors: Vec::new(),
+                    table_selectors: Vec::new(),
+                    caller_files: vec!["src/App.php".into()],
+                    path_hashes: snapshot,
+                    ir_revision: 1,
+                    verified_ns: 1,
+                },
+            )
+            .unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-tc-m", 1, gate, true, &json!({"passed": true})).unwrap();
+            }
+        }
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect php app".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let sess = json!({
+            "id": "s-tc-m",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+
+        // Commit an unrelated docs change: HEAD^{tree} changed, yet capsule still hits via path_hashes!
+        std::fs::write(wt.join("README.md"), "Changed unrelated docs\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "docs"]);
+        assert_ne!(trace::workspace_tree_sha(&wt).unwrap(), initial_tree);
+        match decide_for(&rt, &sess, &route, "inspect php app", &wt, None) {
+            Decision::Hit(warm) => assert_eq!(warm.capsule_id, "cap-tc-m"),
+            other => panic!(
+                "expected hit despite unrelated commit, got {}",
+                reason(&other)
+            ),
+        }
+
+        // Dirtying a touched file in the working tree invalidates the tool_chain capsule.
+        std::fs::write(wt.join("src/App.php"), "<?php echo 999;\n").unwrap();
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess,
+                &route,
+                "inspect php app",
+                &wt,
+                None
+            )),
+            "stale"
+        );
     }
 }

@@ -11,11 +11,12 @@ use crate::{
 };
 use infra_host::{process::RunObserver, provider::RunEvents};
 use infra_skillcache::{
-    env_filter, fingerprint,
+    env_filter, executor, fingerprint,
     trace::{Recorder, Redactor, SkillRef, Trace},
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -75,20 +76,287 @@ pub fn should_snapshot_for_observation_in_store(
             && crate::skillcache::settings::tool_chain_enabled(store, session))
 }
 
-/// Stable 64-hex tree digest shared across subagents and linked worktrees on the same commit.
+const TOOLCHAIN_MANIFEST_FILES: [&str; 8] = [
+    "composer.json",
+    "composer.lock",
+    "package.json",
+    "package-lock.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "symfony.lock",
+    "artisan",
+];
+
+fn hash_workspace_target(path: &Path) -> String {
+    const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_DIR_FILES: usize = 10_000;
+    const MAX_DIR_BYTES: u64 = 64 * 1024 * 1024;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return "absent".into(),
+        Err(_) => return "unreadable".into(),
+    };
+    if infra_core::fs::linked(&meta) {
+        let target = std::fs::read_link(path)
+            .map(|t| t.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return format!("link:{}", fingerprint::sha256(target.as_bytes()));
+    }
+    if meta.is_file() {
+        if meta.len() > MAX_FILE_BYTES {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            return format!("file-large:{}:{mtime}", meta.len());
+        }
+        return match std::fs::read(path) {
+            Ok(bytes) => format!("file:{}", fingerprint::sha256(&bytes)),
+            Err(_) => "unreadable".into(),
+        };
+    }
+    if !meta.is_dir() {
+        return "other".into();
+    }
+    let mut stack = vec![path.to_path_buf()];
+    let mut entries = BTreeMap::<String, String>::new();
+    let mut total_bytes = 0u64;
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            return "unreadable".into();
+        };
+        let mut items: Vec<_> = read_dir.flatten().collect();
+        items.sort_by_key(|entry| entry.file_name());
+        for entry in items {
+            let child = entry.path();
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if executor::is_ignored_workspace_name(name_str)
+                || (dir == path && (name_str == ".harness-tmp" || name_str == "target"))
+            {
+                continue;
+            }
+            let Ok(child_meta) = std::fs::symlink_metadata(&child) else {
+                continue;
+            };
+            let Ok(rel) = child.strip_prefix(path) else {
+                continue;
+            };
+            let rel_key = rel.to_string_lossy().replace('\\', "/");
+            if infra_core::fs::linked(&child_meta) {
+                let target = std::fs::read_link(&child)
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                entries.insert(rel_key, format!("link:{target}"));
+            } else if child_meta.is_dir() {
+                stack.push(child);
+            } else if child_meta.is_file() {
+                total_bytes = total_bytes.saturating_add(child_meta.len());
+                if entries.len() >= MAX_DIR_FILES || total_bytes > MAX_DIR_BYTES {
+                    return "dir-overflow".into();
+                }
+                let digest = if child_meta.len() <= MAX_FILE_BYTES {
+                    std::fs::read(&child)
+                        .map(|bytes| fingerprint::sha256(&bytes))
+                        .unwrap_or_else(|_| "unreadable".into())
+                } else {
+                    format!("len:{}", child_meta.len())
+                };
+                entries.insert(rel_key, format!("file:{digest}"));
+            }
+        }
+    }
+    let summary = entries
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}\n"))
+        .collect::<String>();
+    format!("dir:{}", fingerprint::sha256(summary.as_bytes()))
+}
+
+fn rel_touched_path(workspace: &Path, raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 512 {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    let rel = if path.is_absolute() {
+        let Ok(stripped) = path.strip_prefix(workspace) else {
+            return None;
+        };
+        stripped.to_string_lossy().replace('\\', "/")
+    } else {
+        trimmed.replace('\\', "/")
+    };
+    let stripped = rel.trim_start_matches("./").trim_end_matches('/');
+    if stripped == "." || stripped.is_empty() {
+        return Some(".".to_owned());
+    }
+    if stripped.starts_with("..") || stripped.contains("/../") {
+        return None;
+    }
+    Some(stripped.to_owned())
+}
+
+/// Captures tracked+dirty disk content hashes for the `ToolChain` trace's
+/// touched paths and root project manifests.
+pub(crate) fn toolchain_manifest_snapshot(
+    workspace: &Path,
+    steps: &[Value],
+) -> BTreeMap<String, String> {
+    let mut hashes = BTreeMap::new();
+    for name in TOOLCHAIN_MANIFEST_FILES {
+        hashes.insert(
+            name.to_owned(),
+            hash_workspace_target(&workspace.join(name)),
+        );
+    }
+    let mut touched_paths = 0usize;
+    let mut touched_root = false;
+    for step in steps {
+        if step["kind"] != "tool" {
+            continue;
+        }
+        let Some(input) = step["input"].as_object() else {
+            continue;
+        };
+        for field in [
+            "file_path",
+            "path",
+            "dir",
+            "directory",
+            "TargetFile",
+            "SearchPath",
+            "SearchDirectory",
+        ] {
+            let Some(raw) = input.get(field).and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(rel) = rel_touched_path(workspace, raw) else {
+                continue;
+            };
+            if rel == "." {
+                touched_root = true;
+            } else {
+                touched_paths += 1;
+                hashes
+                    .entry(rel.clone())
+                    .or_insert_with(|| hash_workspace_target(&workspace.join(&rel)));
+            }
+        }
+    }
+    if (touched_root || touched_paths == 0)
+        && let Ok(tree_sha) = workspace_tree_sha(workspace)
+    {
+        hashes.insert(".".to_owned(), tree_sha);
+    }
+    hashes
+}
+
+/// Verifies whether every path recorded in `path_hashes` still matches on disk.
+pub(crate) fn verify_toolchain_manifest(
+    workspace: &Path,
+    path_hashes: &BTreeMap<String, String>,
+) -> bool {
+    if path_hashes.is_empty() {
+        return false;
+    }
+    for (rel, expected) in path_hashes {
+        if rel == "." {
+            if workspace_tree_sha(workspace).ok().as_deref() != Some(expected.as_str()) {
+                return false;
+            }
+        } else if hash_workspace_target(&workspace.join(rel)) != *expected {
+            return false;
+        }
+    }
+    true
+}
+
+/// Stable 64-hex working-tree digest (committed tree plus dirty/untracked edits)
+/// shared across worktrees on the same checkout state.
 pub fn workspace_tree_sha(workspace: &Path) -> Result<String> {
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(located) = std::process::Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .args(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+        .args(["rev-parse", "--show-toplevel", "--show-prefix"])
         .output()
-        && output.status.success()
+        && located.status.success()
     {
-        let tree_oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !tree_oid.is_empty() {
-            return Ok(fingerprint::sha256(
-                format!("git-tree:{tree_oid}").as_bytes(),
-            ));
+        let loc_text = String::from_utf8_lossy(&located.stdout);
+        let mut lines = loc_text.lines();
+        if let Some(top_raw) = lines.next().map(str::trim).filter(|s| !s.is_empty()) {
+            let top = PathBuf::from(top_raw);
+            let prefix = lines
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('/')
+                .to_owned();
+            let tree_ref = if prefix.is_empty() {
+                "HEAD^{tree}".to_owned()
+            } else {
+                format!("HEAD:{prefix}")
+            };
+            let tree_oid = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&top)
+                .args(["rev-parse", "--verify", "--quiet", &tree_ref])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "UNBORN".to_owned());
+            if let Ok(status_out) = std::process::Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args([
+                    "-c",
+                    "core.quotePath=false",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--no-renames",
+                    "--",
+                    ".",
+                ])
+                .output()
+                && status_out.status.success()
+            {
+                let prefix_slash = if prefix.is_empty() {
+                    String::new()
+                } else {
+                    format!("{prefix}/")
+                };
+                let mut dirty = Vec::new();
+                for record in status_out.stdout.split(|b| *b == 0) {
+                    if record.len() < 4 {
+                        continue;
+                    }
+                    let xy = String::from_utf8_lossy(&record[..2]).into_owned();
+                    let repo_rel = String::from_utf8_lossy(&record[3..]).into_owned();
+                    let ws_rel = if prefix_slash.is_empty() {
+                        repo_rel.clone()
+                    } else {
+                        repo_rel
+                            .strip_prefix(&prefix_slash)
+                            .unwrap_or(&repo_rel)
+                            .to_owned()
+                    };
+                    let digest = hash_workspace_target(&top.join(&repo_rel));
+                    dirty.push((ws_rel, xy, digest));
+                }
+                dirty.sort();
+                let mut payload = format!("git-worktree-v1:{tree_oid}\n");
+                for (ws_rel, xy, digest) in dirty {
+                    payload.push_str(&format!("{xy}\t{ws_rel}\t{digest}\n"));
+                }
+                return Ok(fingerprint::sha256(payload.as_bytes()));
+            }
         }
     }
     Ok(fingerprint::tree_sha256(workspace)?.sha256)
@@ -187,12 +455,7 @@ impl SessionRedactor {
         let mut secrets = environment
             .into_iter()
             .filter(|(name, value)| {
-                let name = name.to_uppercase();
-                value.chars().count() >= SECRET_CHARS
-                    && (env_filter::withheld(&name)
-                        || ["SECRET", "CREDENTIAL", "PASSWD", "AUTH"]
-                            .iter()
-                            .any(|part| name.contains(part)))
+                value.chars().count() >= SECRET_CHARS && env_filter::withheld(name)
             })
             .map(|(_, value)| value)
             .collect::<Vec<_>>();
@@ -569,8 +832,10 @@ pub fn save(
     let mut redaction = trace.redaction();
     redaction["complete"] = trace.complete.into();
     if let Some(tree_sha) = &tool_chain_tree_sha {
+        let manifest_hashes = toolchain_manifest_snapshot(turn.workspace, &trace.steps);
         redaction["trace_kind"] = "tool_chain".into();
         redaction["tool_chain_tree_sha"] = tree_sha.clone().into();
+        redaction["tool_chain_manifest_hashes"] = json!(manifest_hashes);
     }
     let steps = Value::Array(trace.steps);
     let db = store.connection()?;
@@ -881,5 +1146,88 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(mutating["reason"], "mutating_tool_chain");
+    }
+
+    #[test]
+    fn toolchain_cache_key_detects_dirty_worktree_and_ignores_unrelated_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("composer.json"), r#"{"name":"acme/app"}"#).unwrap();
+        std::fs::write(repo.join("src/App.php"), "<?php echo 1;\n").unwrap();
+        std::fs::write(repo.join("README.md"), "Initial\n").unwrap();
+
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+
+        let clean_sha = workspace_tree_sha(&repo).unwrap();
+        let snapshot = toolchain_manifest_snapshot(
+            &repo,
+            &[json!({"kind": "tool", "tool": "Read", "input": {"file_path": "src/App.php"}})],
+        );
+        assert!(verify_toolchain_manifest(&repo, &snapshot));
+
+        // Uncommitted edit changes workspace_tree_sha and invalidates touched-path manifest.
+        std::fs::write(repo.join("src/App.php"), "<?php echo 2;\n").unwrap();
+        assert_ne!(workspace_tree_sha(&repo).unwrap(), clean_sha);
+        assert!(!verify_toolchain_manifest(&repo, &snapshot));
+
+        // Restoring touched file restores manifest match.
+        std::fs::write(repo.join("src/App.php"), "<?php echo 1;\n").unwrap();
+        assert_eq!(workspace_tree_sha(&repo).unwrap(), clean_sha);
+        assert!(verify_toolchain_manifest(&repo, &snapshot));
+
+        // An unrelated git commit changes HEAD^{tree}, yet manifest verification remains valid.
+        std::fs::write(repo.join("README.md"), "Updated docs\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "docs"]);
+        assert_ne!(workspace_tree_sha(&repo).unwrap(), clean_sha);
+        assert!(verify_toolchain_manifest(&repo, &snapshot));
+
+        // Dirtying composer.json invalidates the manifest snapshot.
+        std::fs::write(repo.join("composer.json"), r#"{"name":"acme/app","v":2}"#).unwrap();
+        assert!(!verify_toolchain_manifest(&repo, &snapshot));
+    }
+
+    #[test]
+    fn session_redactor_withholds_secret_credential_passwd_and_auth() {
+        let redactor = SessionRedactor::new(
+            Path::new("/work/project"),
+            [
+                ("APP_SECRET".to_string(), "sec-value-9999".to_string()),
+                (
+                    "SERVICE_CREDENTIAL".to_string(),
+                    "cred-value-8888".to_string(),
+                ),
+                ("SUDO_PASSWD".to_string(), "pwd-value-7777".to_string()),
+                ("OAUTH_HEADER".to_string(), "auth-value-6666".to_string()),
+                ("SAFE_VAR".to_string(), "visible-safe-5555".to_string()),
+            ],
+        );
+        let (out, count) = redactor.redact(
+            "s=sec-value-9999 c=cred-value-8888 p=pwd-value-7777 h=auth-value-6666 ok=visible-safe-5555",
+        );
+        assert_eq!(count, 4, "{out}");
+        assert!(!out.contains("sec-value-9999"));
+        assert!(!out.contains("cred-value-8888"));
+        assert!(!out.contains("pwd-value-7777"));
+        assert!(!out.contains("auth-value-6666"));
+        assert!(out.contains("visible-safe-5555"));
     }
 }

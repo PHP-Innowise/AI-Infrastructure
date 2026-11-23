@@ -515,6 +515,7 @@ fn take_with_options(
         "workspace": workspace,
         "ignored_complete": ignored_complete,
         "ignored_snapshotted_files": ignored_copied.files,
+        "allow_ignored": allowlist,
     });
     infra_core::fs::atomic_json(&root.join("snapshot.json"), &snapshot)?;
     Ok(Some(snapshot))
@@ -741,12 +742,21 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
         }
     }
     let ignored_complete = snapshot["ignored_complete"].as_bool() == Some(true);
+    let allowlist: Vec<String> = snapshot["allow_ignored"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     let contaminated = crate::skillcache::replay_result::contaminated_hashes(root);
     for relative in git_ignored_paths(&top, &prefix) {
         if path_has_always_ignored_or_root(&relative, depth_offset) {
             continue;
         }
-        if ignored_complete && !path_hits_default_ignored(&relative, &[]) {
+        if ignored_complete && !path_hits_default_ignored(&relative, &allowlist) {
             continue;
         }
         let _ = copy_entry(
@@ -1410,6 +1420,64 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(replay_deleted.join("out/existing-input.txt")).unwrap(),
             "keep\n"
+        );
+    }
+
+    #[test]
+    fn git_materialize_respects_allowlist_for_frozen_ignored_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let project = base.join("repo");
+        let state = base.join("state");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q"], &[]).unwrap();
+        std::fs::write(project.join(".gitignore"), "dist/\nnode_modules/\n").unwrap();
+        std::fs::write(project.join("input.txt"), "hello\n").unwrap();
+        std::fs::create_dir_all(project.join("dist")).unwrap();
+        std::fs::write(project.join("dist/bundle.js"), "console.log(1);\n").unwrap();
+        std::fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        std::fs::write(project.join("node_modules/pkg/index.js"), "1;\n").unwrap();
+        git(&project, &["add", ".gitignore", "input.txt"], &[]).unwrap();
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+            &[],
+        )
+        .unwrap();
+
+        let allow = vec!["dist".to_string()];
+        let snap = take_with_allowlist(&state, &project, "gen-allow", &allow)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap["allow_ignored"], json!(["dist"]));
+        // Simulate cold turn creating a new file in the allowlisted `dist/` dir and mutating
+        // the pre-existing `dist/bundle.js`.
+        std::fs::write(project.join("dist/bundle.js"), "console.log(2);\n").unwrap();
+        std::fs::write(project.join("dist/cold-only.js"), "leaked\n").unwrap();
+
+        let replay = base.join("replay-allow");
+        materialize(&state, "gen-allow", &replay).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replay.join("dist/bundle.js")).unwrap(),
+            "console.log(1);\n"
+        );
+        assert!(
+            !replay.join("dist/cold-only.js").exists(),
+            "allowlisted frozen dir must not copy post-snapshot files from live workspace"
+        );
+        // Non-allowlisted default-ignored dirs (node_modules) still fall back as dependencies.
+        assert_eq!(
+            std::fs::read_to_string(replay.join("node_modules/pkg/index.js")).unwrap(),
+            "1;\n"
         );
     }
 }
