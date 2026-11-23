@@ -897,6 +897,13 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
             ui_root.join("runtime-rust/target/wasm-ui").display()
         ));
     }
+    let infra_engine = find_infra_engine_bin(&repo);
+    if infra_engine.is_none() {
+        missing.push(format!(
+            "infra-engine binary not found under {} (build `cargo build --manifest-path runtime-rust/Cargo.toml --release --bin infra-engine`)",
+            repo.join("runtime-rust/target").display()
+        ));
+    }
 
     if !missing.is_empty() {
         let reason = missing.join("; ");
@@ -909,6 +916,7 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
 
     let chrome = chrome.expect("chrome checked");
     let node = node.expect("node checked");
+    let infra_engine = infra_engine.expect("infra-engine checked");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let state_root = temp.path().join("e2e-state");
@@ -931,19 +939,16 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
     let commit_b = receipt["commit_b"].as_str().expect("receipt commit_b");
     let system_run_id = receipt["system_run_id"].as_str().unwrap_or("");
 
-    let review_server = find_infra_engine_bin(&repo).map(|engine| {
-        let review_ws = temp.path().join("eval-review-e2e-ws");
-        let benchmark = seed_eval_review_workspace(&review_ws);
-        let ui_assets = ui_root.join("runtime-rust/target/wasm-ui");
-        let (guard, review_url) =
-            spawn_eval_review_server(&engine, &review_ws, &benchmark, &ui_assets);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("build review http client");
-        verify_eval_review_server_http(&client, &review_url);
-        (guard, review_url)
-    });
+    let review_ws = temp.path().join("eval-review-e2e-ws");
+    let benchmark = seed_eval_review_workspace(&review_ws);
+    let ui_assets = ui_root.join("runtime-rust/target/wasm-ui");
+    let (review_guard, review_url) =
+        spawn_eval_review_server(&infra_engine, &review_ws, &benchmark, &ui_assets);
+    let review_client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("build review http client");
+    verify_eval_review_server_http(&review_client, &review_url);
 
     let mut command = Command::new(&node);
     command
@@ -960,15 +965,14 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .arg(secondary_project_id)
         .arg("--secondary-session-id")
         .arg(secondary_session_id)
+        .arg("--eval-viewer-url")
+        .arg(&review_url)
         .arg("--commit-a")
         .arg(commit_a)
         .arg("--commit-b")
         .arg(commit_b);
     if !system_run_id.is_empty() {
         command.arg("--system-run-id").arg(system_run_id);
-    }
-    if let Some((_, ref review_url)) = review_server {
-        command.arg("--eval-viewer-url").arg(review_url);
     }
     if let Some(capsule) = receipt["skillcache_capsule_id"].as_str() {
         command.arg("--skillcache-capsule-id").arg(capsule);
@@ -984,7 +988,7 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .output()
         .expect("execute browser_e2e.mjs");
 
-    drop(review_server);
+    drop(review_guard);
     let shutdown_status = guard.shutdown_gracefully(Duration::from_secs(10));
     let fixture_stderr = stderr_handle.join().unwrap_or_default();
     let node_stdout = String::from_utf8_lossy(&output.stdout);
