@@ -12,9 +12,10 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const TARGET_BUDGET: usize = 8000;
@@ -124,23 +125,240 @@ fn admit_for(
     let (_, missing) = source_changes(&context.roots, &document.source_fingerprints)?;
     Ok((!missing.is_empty()).then(|| "source-missing".into()))
 }
+const MAP_DRIFT_RACY_NS: i128 = 2_000_000_000;
+const MAP_DRIFT_CACHE_CAP: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MapGitFileStamp {
+    exists: bool,
+    len: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MapDriftGitStamp {
+    head: MapGitFileStamp,
+    head_bytes: Vec<u8>,
+    ref_target: Option<MapGitFileStamp>,
+    packed_refs: MapGitFileStamp,
+    reftable: MapGitFileStamp,
+    index: MapGitFileStamp,
+}
+
+#[derive(Clone, Debug)]
+struct CachedMapDrift {
+    stamp: MapDriftGitStamp,
+    drift: Option<u64>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct MapDriftCache {
+    seq: u64,
+    entries: HashMap<(PathBuf, String, Option<String>), CachedMapDrift>,
+}
+
+fn map_drift_cache() -> &'static Mutex<MapDriftCache> {
+    static CACHE: OnceLock<Mutex<MapDriftCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(MapDriftCache::default()))
+}
+
+#[cfg(test)]
+fn map_drift_git_calls() -> &'static std::sync::atomic::AtomicUsize {
+    static CALLS: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    CALLS.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
+
+fn map_drift_now_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+fn stat_git_file_settled(
+    path: &Path,
+    now_ns: i128,
+    require_exists: bool,
+) -> Option<MapGitFileStamp> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !require_exists => {
+            return Some(MapGitFileStamp {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+                ctime_ns: 0,
+            });
+        }
+        Err(_) => return None,
+    };
+    if fs::linked(&meta) || !meta.is_file() {
+        return None;
+    }
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())?;
+    #[cfg(unix)]
+    let ctime_ns = {
+        use std::os::unix::fs::MetadataExt;
+        i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec())
+    };
+    #[cfg(not(unix))]
+    let ctime_ns = mtime_ns;
+    if now_ns <= MAP_DRIFT_RACY_NS
+        || mtime_ns <= 0
+        || mtime_ns > now_ns - MAP_DRIFT_RACY_NS
+        || ctime_ns > now_ns - MAP_DRIFT_RACY_NS
+    {
+        return None;
+    }
+    Some(MapGitFileStamp {
+        exists: true,
+        len: meta.len(),
+        mtime_ns,
+        ctime_ns,
+    })
+}
+
+fn capture_map_drift_stamp(project: &Path, now_ns: i128) -> Option<(PathBuf, MapDriftGitStamp)> {
+    let canonical = fs::canonicalize(project).ok()?;
+    let snap = crate::git::branch_snapshot(&canonical)?;
+    let admin = snap.admin;
+    let common_admin = {
+        let commondir_path = admin.join("commondir");
+        match std::fs::symlink_metadata(&commondir_path) {
+            Ok(meta) if !fs::linked(&meta) && meta.is_file() && meta.len() <= 4096 => {
+                let raw = std::fs::read_to_string(&commondir_path).ok()?;
+                let rel = raw.trim();
+                if rel.is_empty() {
+                    admin.clone()
+                } else {
+                    let candidate = Path::new(rel);
+                    fs::canonicalize(if candidate.is_absolute() {
+                        candidate.to_path_buf()
+                    } else {
+                        admin.join(candidate)
+                    })
+                    .ok()?
+                }
+            }
+            Ok(_) => return None,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => admin.clone(),
+            Err(_) => return None,
+        }
+    };
+    let head_path = admin.join("HEAD");
+    let head = stat_git_file_settled(&head_path, now_ns, true)?;
+    if head.len > 1024 {
+        return None;
+    }
+    let head_bytes = std::fs::read(&head_path).ok()?;
+    let head_text = std::str::from_utf8(&head_bytes).ok()?.trim();
+    let ref_target = if let Some(target_ref) = head_text.strip_prefix("ref: ").map(str::trim) {
+        if target_ref.is_empty()
+            || target_ref.starts_with('/')
+            || target_ref.contains('\\')
+            || target_ref
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return None;
+        }
+        let local_ref = admin.join(target_ref);
+        if std::fs::symlink_metadata(&local_ref).is_ok() {
+            Some(stat_git_file_settled(&local_ref, now_ns, true)?)
+        } else {
+            let common_ref = common_admin.join(target_ref);
+            Some(stat_git_file_settled(&common_ref, now_ns, false)?)
+        }
+    } else {
+        None
+    };
+    let packed_refs = stat_git_file_settled(&common_admin.join("packed-refs"), now_ns, false)?;
+    let reftable =
+        stat_git_file_settled(&common_admin.join("reftable/tables.list"), now_ns, false)?;
+    let index = stat_git_file_settled(&admin.join("index"), now_ns, false)?;
+    Some((
+        canonical,
+        MapDriftGitStamp {
+            head,
+            head_bytes,
+            ref_target,
+            packed_refs,
+            reftable,
+            index,
+        },
+    ))
+}
+
+fn map_commit_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"(?m)^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Invalid map expression"))
+}
+
+fn map_scope_re() -> Result<&'static regex::Regex> {
+    static PATTERN: OnceLock<std::result::Result<regex::Regex, regex::Error>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| regex::Regex::new(r"(?m)^mapped_scope:\s*(\S+)\s*$"))
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Invalid map scope expression"))
+}
+
 pub(crate) fn map_drift(context: &RuntimeContext, text: &str) -> Result<Option<u64>> {
-    let commit = regex::Regex::new(r"(?m)^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$")
-        .map_err(|_| RuntimeError::invalid("Invalid map expression"))?;
+    map_drift_with_now(context, text, map_drift_now_ns())
+}
+
+pub(crate) fn map_drift_with_now(
+    context: &RuntimeContext,
+    text: &str,
+    now_ns: i128,
+) -> Result<Option<u64>> {
+    let commit = map_commit_re()?;
     let Some(recorded) = commit.captures(text).and_then(|captures| captures.get(1)) else {
         return Ok(None);
     };
-    let mut arguments = crate::git::strings(&[
-        "rev-list",
-        "--count",
-        &format!("{}..HEAD", recorded.as_str()),
-    ]);
-    let scope = regex::Regex::new(r"(?m)^mapped_scope:\s*(\S+)\s*$")
-        .map_err(|_| RuntimeError::invalid("Invalid map scope expression"))?;
-    if let Some(scope) = scope.captures(text).and_then(|captures| captures.get(1)) {
-        arguments.push("--".into());
-        arguments.push(scope.as_str().into());
+    let recorded_str = recorded.as_str();
+    let scope_re = map_scope_re()?;
+    let scope_str = scope_re
+        .captures(text)
+        .and_then(|captures| captures.get(1))
+        .map(|m| m.as_str());
+
+    let stamp_info = capture_map_drift_stamp(&context.roots.project, now_ns);
+    if let Some((ref canonical, ref stamp)) = stamp_info
+        && let Ok(mut cache) = map_drift_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let use_seq = cache.seq;
+        let key = (
+            canonical.clone(),
+            recorded_str.to_owned(),
+            scope_str.map(str::to_owned),
+        );
+        if let Some(hit) = cache.entries.get_mut(&key)
+            && hit.stamp == *stamp
+        {
+            hit.last_used = use_seq;
+            return Ok(hit.drift);
+        }
     }
+
+    let mut arguments =
+        crate::git::strings(&["rev-list", "--count", &format!("{recorded_str}..HEAD")]);
+    if let Some(scope) = scope_str {
+        arguments.push("--".into());
+        arguments.push(scope.into());
+    }
+    #[cfg(test)]
+    map_drift_git_calls().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let output = crate::git::run(
         &context.roots.project,
         &arguments,
@@ -148,12 +366,46 @@ pub(crate) fn map_drift(context: &RuntimeContext, text: &str) -> Result<Option<u
         Duration::from_secs(5),
         16384,
     )?;
-    if output.code != 0 {
-        return Ok(None);
+    let drift = if output.code != 0 {
+        None
+    } else {
+        std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+    };
+    if let Some((canonical, stamp)) = capture_map_drift_stamp(&context.roots.project, now_ns)
+        && stamp_info
+            .as_ref()
+            .is_some_and(|(_, before)| *before == stamp)
+        && let Ok(mut cache) = map_drift_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let use_seq = cache.seq;
+        let key = (
+            canonical,
+            recorded_str.to_owned(),
+            scope_str.map(str::to_owned),
+        );
+        if cache.entries.len() >= MAP_DRIFT_CACHE_CAP
+            && !cache.entries.contains_key(&key)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(
+            key,
+            CachedMapDrift {
+                stamp,
+                drift,
+                last_used: use_seq,
+            },
+        );
     }
-    Ok(std::str::from_utf8(&output.stdout)
-        .ok()
-        .and_then(|text| text.trim().parse().ok()))
+    Ok(drift)
 }
 pub(crate) fn filter_observed(
     context: &RuntimeContext,
@@ -2493,5 +2745,106 @@ mod query_plan_cache_tests {
         assert_eq!(query_plan_cache_misses(), misses_before_trace + 2);
         assert!(tw3.records.contains_key("docs/other.md"));
         assert_eq!(tw3.records["docs/other.md"]["state"], "unavailable");
+    }
+
+    #[test]
+    fn map_drift_caches_settled_head_and_index_and_invalidates_on_racy_or_commit_changes() {
+        let dir = std::env::temp_dir().join(format!("infra-core-map-drift-{}", uuid4()));
+        std::fs::create_dir_all(dir.join("project-brain/config")).unwrap();
+        std::fs::create_dir_all(dir.join("memory-bank")).unwrap();
+        std::fs::write(dir.join("project-brain/config/runtime.json"), "{}").unwrap();
+        std::fs::write(dir.join("README.md"), "v1\n").unwrap();
+
+        let run_git = |args: &[&str]| {
+            let out = crate::git::run(
+                &dir,
+                &crate::git::strings(args),
+                None,
+                Duration::from_secs(5),
+                16384,
+            )
+            .unwrap();
+            assert_eq!(out.code, 0, "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run_git(&["init", "-b", "main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-m", "init"]);
+        let base_commit = run_git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.join("README.md"), "v2\n").unwrap();
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-m", "second"]);
+
+        let ctx = RuntimeContext::new(crate::Roots::installed(&dir).unwrap(), "agent", "governed")
+            .unwrap();
+        let text = format!("mapped_commit: {base_commit}\nmapped_scope: README.md\n");
+
+        // Capture settled timestamp beyond MAP_DRIFT_RACY_NS.
+        let (_, stamp) = capture_map_drift_stamp(&dir, i128::MAX / 2).expect("git stamp");
+        let max_mtime = [
+            stamp.head.mtime_ns,
+            stamp.ref_target.as_ref().map_or(0, |s| s.mtime_ns),
+            stamp.packed_refs.mtime_ns,
+            stamp.reftable.mtime_ns,
+            stamp.index.mtime_ns,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+
+        let before = map_drift_git_calls().load(std::sync::atomic::Ordering::Relaxed);
+        // Inside RACY_NS window -> never populates or hits cache.
+        let racy_now = max_mtime + MAP_DRIFT_RACY_NS - 1;
+        assert_eq!(map_drift_with_now(&ctx, &text, racy_now).unwrap(), Some(1));
+        assert_eq!(map_drift_with_now(&ctx, &text, racy_now).unwrap(), Some(1));
+        assert_eq!(
+            map_drift_git_calls().load(std::sync::atomic::Ordering::Relaxed),
+            before + 2
+        );
+
+        // Outside RACY_NS window -> 1st call runs git, 2nd call hits cache (0 git calls).
+        let settled_now = max_mtime + MAP_DRIFT_RACY_NS + 10;
+        assert_eq!(
+            map_drift_with_now(&ctx, &text, settled_now).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            map_drift_git_calls().load(std::sync::atomic::Ordering::Relaxed),
+            before + 3
+        );
+        assert_eq!(
+            map_drift_with_now(&ctx, &text, settled_now + 5).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            map_drift_git_calls().load(std::sync::atomic::Ordering::Relaxed),
+            before + 3
+        );
+
+        // New commit updates ref + index -> invalidates and returns updated drift 2.
+        std::fs::write(dir.join("README.md"), "v3\n").unwrap();
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-m", "third"]);
+        let (_, stamp2) = capture_map_drift_stamp(&dir, i128::MAX / 2).expect("stamp2");
+        let max2 = [
+            stamp2.head.mtime_ns,
+            stamp2.ref_target.as_ref().map_or(0, |s| s.mtime_ns),
+            stamp2.index.mtime_ns,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        assert_eq!(
+            map_drift_with_now(&ctx, &text, max2 + MAP_DRIFT_RACY_NS + 10).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            map_drift_git_calls().load(std::sync::atomic::Ordering::Relaxed),
+            before + 4
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

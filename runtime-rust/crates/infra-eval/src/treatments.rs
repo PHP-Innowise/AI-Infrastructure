@@ -245,6 +245,16 @@ fn configured(root: &Path, variant: &str) -> Result<()> {
     config["automatic_consolidation_verification"] = (variant == "consolidate-verify").into();
     artifact::write_json(&p, &config)
 }
+fn event_expression_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\[event ([a-f0-9-]+)\]").expect("valid event regex"))
+}
+
+fn token_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"[a-z0-9]{3,}").expect("valid token regex"))
+}
+
 pub fn consolidation(
     source: &Path,
     root: &Path,
@@ -319,7 +329,6 @@ fn consolidation_inner(
     let inventory = brain.inventory(true)?;
     let promotions = infra_core::bank::promotion::list(&bank, false)?;
     let mut mappings = vec![];
-    let event_expression = regex::Regex::new(r"\[event ([a-f0-9-]+)\]");
     for r in inventory.records {
         let r = r.record;
         if r["type"] == "finding"
@@ -339,9 +348,7 @@ fn consolidation_inner(
                 })
                 .map(|p| p["destination_memory_id"].clone())
                 .collect::<Vec<_>>();
-            let events = event_expression
-                .as_ref()
-                .map_err(|_| artifact::invalid("event expression"))?
+            let events = event_expression_re()
                 .captures_iter(r["progress"].as_str().unwrap_or(""))
                 .map(|m| m[1].to_string())
                 .collect::<BTreeSet<_>>();
@@ -387,14 +394,11 @@ fn tokens(s: &str) -> BTreeSet<String> {
         "when", "why", "are", "was", "were", "has", "have", "had", "you", "your", "into", "over",
         "under", "about", "its", "not",
     ];
-    regex::Regex::new(r"[a-z0-9]{3,}")
-        .map(|r| {
-            r.find_iter(&s.to_lowercase())
-                .map(|m| m.as_str().to_string())
-                .filter(|s| !stop.contains(&s.as_str()))
-                .collect()
-        })
-        .unwrap_or_default()
+    token_re()
+        .find_iter(&s.to_lowercase())
+        .map(|m| m.as_str().to_string())
+        .filter(|s| !stop.contains(&s.as_str()))
+        .collect()
 }
 pub fn rerank(candidates: &[Value], query: &str, limit: usize) -> Vec<Value> {
     let wanted = tokens(query);
@@ -829,5 +833,26 @@ mod sealed_ab_tests {
             con_report["variant"] = json!("tampered");
             assert!(verify_treatment_report(&con_report).is_err());
         }
+    }
+
+    #[test]
+    fn hoisted_treatment_regexes_extract_tokens_and_event_ids() {
+        let t = tokens("The invoice numbering sequence and event-12");
+        assert!(t.contains("invoice"));
+        assert!(t.contains("numbering"));
+        assert!(!t.contains("the"));
+        let caps: Vec<String> = event_expression_re()
+            .captures_iter("notes [event abc123-def4] [event 99]")
+            .map(|c| c[1].to_string())
+            .collect();
+        assert_eq!(caps, vec!["abc123-def4", "99"]);
+        assert_eq!(
+            token_re() as *const regex::Regex,
+            token_re() as *const regex::Regex
+        );
+        assert_eq!(
+            event_expression_re() as *const regex::Regex,
+            event_expression_re() as *const regex::Regex
+        );
     }
 }

@@ -121,15 +121,19 @@ pub fn executable(
     }
     Ok(name.into())
 }
+fn slug_non_alnum_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new("[^a-z0-9]+").expect("valid slug regex"))
+}
+
 pub fn write_probe_skill(
     config: &PlatformConfig,
     workspace: &Path,
     name: &str,
     description: &str,
 ) -> Result<(PathBuf, String)> {
-    let regex = regex::Regex::new("[^a-z0-9]+").unwrap();
     let lower = name.to_lowercase();
-    let raw = regex.replace_all(&lower, "-");
+    let raw = slug_non_alnum_re().replace_all(&lower, "-");
     let slug = common::chars(raw.trim_matches('-'), 40);
     let slug = if slug.is_empty() {
         "skill".into()

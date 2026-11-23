@@ -187,6 +187,7 @@ pub fn completion_usage(raw: &[u8]) -> Value {
         ),
     }
 }
+#[derive(Clone)]
 pub struct CompletionCapture {
     consumed: bool,
     observation: Value,

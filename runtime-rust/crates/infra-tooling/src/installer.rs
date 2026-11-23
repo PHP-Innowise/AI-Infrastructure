@@ -1,5 +1,5 @@
 //! Closed-payload native installer. Reads/writes stay rooted in PublicationFiles.
-use crate::{common, file_modes::FileModes};
+use crate::{common, file_modes::FileModes, mirrors::check_receipts};
 use infra_core::{
     Result, RuntimeError,
     bank::publication::{
@@ -12,9 +12,234 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
+
+const INVENTORY_RACY_NS: i128 = 2_000_000_000;
+const INVENTORY_CACHE_CAP: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InventoryFileStamp {
+    exists: bool,
+    len: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+    mode: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InventoryTreeStamp {
+    inv_json: InventoryFileStamp,
+    gitattributes: InventoryFileStamp,
+    git_index: InventoryFileStamp,
+    git_config: InventoryFileStamp,
+    engine: InventoryFileStamp,
+    base_dir: InventoryFileStamp,
+    sources: Vec<(PathBuf, InventoryFileStamp)>,
+}
+
+#[derive(Clone)]
+struct CachedInventoryEntry {
+    stamp: InventoryTreeStamp,
+    inventory: Inventory,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct InventoryMemoCache {
+    seq: u64,
+    entries: HashMap<(PathBuf, PathBuf, String, Vec<String>), CachedInventoryEntry>,
+}
+
+fn inventory_memo_cache() -> &'static Mutex<InventoryMemoCache> {
+    static CACHE: OnceLock<Mutex<InventoryMemoCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(InventoryMemoCache::default()))
+}
+
+#[cfg(test)]
+fn inventory_live_builds() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
+
+fn stat_settled_entry(
+    path: &Path,
+    now_ns: i128,
+    allow_missing: bool,
+    expect_dir: bool,
+) -> Option<InventoryFileStamp> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && allow_missing => {
+            return Some(InventoryFileStamp {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+                ctime_ns: 0,
+                mode: 0,
+            });
+        }
+        Err(_) => return None,
+    };
+    if safe::linked_at(path, &meta).unwrap_or(true) {
+        return None;
+    }
+    if expect_dir && !meta.is_dir() || !expect_dir && !meta.is_file() {
+        return None;
+    }
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(check_receipts::time_to_unix_ns)?;
+    #[cfg(unix)]
+    let (ctime_ns, mode) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            meta.mode(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ctime_ns, mode) = (mtime_ns, 0u32);
+    if now_ns <= INVENTORY_RACY_NS
+        || mtime_ns <= 0
+        || mtime_ns > now_ns - INVENTORY_RACY_NS
+        || ctime_ns > now_ns - INVENTORY_RACY_NS
+    {
+        return None;
+    }
+    Some(InventoryFileStamp {
+        exists: true,
+        len: meta.len(),
+        mtime_ns,
+        ctime_ns,
+        mode,
+    })
+}
+
+fn capture_git_admin_stamps(
+    base: &Path,
+    now_ns: i128,
+) -> Option<(InventoryFileStamp, InventoryFileStamp)> {
+    let canonical = infra_core::fs::canonicalize(base).ok()?;
+    let mut checkout = None;
+    for ancestor in canonical.ancestors() {
+        let marker = ancestor.join(".git");
+        let meta = match std::fs::symlink_metadata(&marker) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        if safe::linked(&meta) || safe::linked_at(&marker, &meta).unwrap_or(true) {
+            return None;
+        }
+        if meta.is_dir() {
+            if std::fs::read_dir(&marker).ok()?.next().is_none() {
+                continue;
+            }
+        } else if !meta.is_file() {
+            return None;
+        }
+        checkout = Some(ancestor.to_path_buf());
+        break;
+    }
+    let Some(checkout) = checkout else {
+        let absent = InventoryFileStamp {
+            exists: false,
+            len: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            mode: 0,
+        };
+        return Some((absent.clone(), absent));
+    };
+    let frame = infra_core::git::GitFrame::discover(&canonical).ok()??;
+    if frame.top != checkout {
+        return None;
+    }
+    let idx = stat_settled_entry(&frame.admin.join("index"), now_ns, true, false)?;
+    let cfg = stat_settled_entry(&frame.admin.join("config"), now_ns, true, false)?;
+    Some((idx, cfg))
+}
+
+fn verify_cached_inventory_stamp(
+    inv_json_path: &Path,
+    base: &Path,
+    engine_path: &Path,
+    expected: &InventoryTreeStamp,
+    now_ns: i128,
+) -> bool {
+    let Some(inv_json) = stat_settled_entry(inv_json_path, now_ns, false, false) else {
+        return false;
+    };
+    if inv_json != expected.inv_json {
+        return false;
+    }
+    let Some(gitattributes) = stat_settled_entry(&base.join(".gitattributes"), now_ns, true, false)
+    else {
+        return false;
+    };
+    if gitattributes != expected.gitattributes {
+        return false;
+    }
+    let Some((git_index, git_config)) = capture_git_admin_stamps(base, now_ns) else {
+        return false;
+    };
+    if git_index != expected.git_index || git_config != expected.git_config {
+        return false;
+    }
+    let Some(engine) = stat_settled_entry(engine_path, now_ns, false, false) else {
+        return false;
+    };
+    if engine != expected.engine {
+        return false;
+    }
+    let Some(base_dir) = stat_settled_entry(base, now_ns, false, true) else {
+        return false;
+    };
+    if base_dir != expected.base_dir {
+        return false;
+    }
+    expected.sources.iter().all(|(path, stamp)| {
+        stat_settled_entry(path, now_ns, false, false).is_some_and(|live| live == *stamp)
+    })
+}
+
+fn capture_inventory_stamp(
+    inv_json_path: &Path,
+    base: &Path,
+    engine_path: &Path,
+    inventory: &Inventory,
+    now_ns: i128,
+) -> Option<InventoryTreeStamp> {
+    let inv_json = stat_settled_entry(inv_json_path, now_ns, false, false)?;
+    let gitattributes = stat_settled_entry(&base.join(".gitattributes"), now_ns, true, false)?;
+    let (git_index, git_config) = capture_git_admin_stamps(base, now_ns)?;
+    let engine = stat_settled_entry(engine_path, now_ns, false, false)?;
+    let base_dir = stat_settled_entry(base, now_ns, false, true)?;
+    let mut seen = BTreeSet::new();
+    let mut sources = Vec::new();
+    for item in &inventory.files {
+        if item.path == ENGINE {
+            continue;
+        }
+        if seen.insert(item.source.clone()) {
+            let stamp = stat_settled_entry(&item.source, now_ns, false, false)?;
+            sources.push((item.source.clone(), stamp));
+        }
+    }
+    Some(InventoryTreeStamp {
+        inv_json,
+        gitattributes,
+        git_index,
+        git_config,
+        engine,
+        base_dir,
+        sources,
+    })
+}
 const FILE_LIMIT: usize = 512 * 1024 * 1024;
 const RECORD: &str = "memory-bank/local/accelerator-install.json";
 const ENGINE: &str = if cfg!(windows) {
@@ -261,6 +486,15 @@ impl Installer {
         Ok(self)
     }
     pub fn inventory(&self, edition: &str, tools: &[String]) -> Result<Inventory> {
+        self.inventory_with_now(edition, tools, check_receipts::now_unix_ns())
+    }
+
+    pub(crate) fn inventory_with_now(
+        &self,
+        edition: &str,
+        tools: &[String],
+        now_ns: i128,
+    ) -> Result<Inventory> {
         let edition = common::edition(edition)?;
         if edition == "Infrastructure-Creator" {
             return Err(RuntimeError::invalid(
@@ -274,11 +508,40 @@ impl Installer {
         {
             return Err(RuntimeError::invalid("Select at least one supported host"));
         }
-        let data = common::read_json(
-            &self
-                .source
-                .join(format!("install/inventories/{}.json", slug(edition))),
-        )?;
+        let inv_json_path = self
+            .source
+            .join(format!("install/inventories/{}.json", slug(edition)));
+        let base = self.source.join(edition);
+        let bypass = check_receipts::is_cache_bypassed();
+        let cache_key = (
+            self.source.clone(),
+            self.engine.clone(),
+            edition.to_string(),
+            tools.to_vec(),
+        );
+        if !bypass
+            && let Ok(mut cache) = inventory_memo_cache().lock()
+            && let Some(hit) = cache.entries.get(&cache_key).cloned()
+            && verify_cached_inventory_stamp(
+                &inv_json_path,
+                &base,
+                &self.engine,
+                &hit.stamp,
+                now_ns,
+            )
+        {
+            cache.seq = cache.seq.saturating_add(1);
+            let use_seq = cache.seq;
+            if let Some(entry) = cache.entries.get_mut(&cache_key) {
+                entry.last_used = use_seq;
+            }
+            return Ok(hit.inventory);
+        }
+
+        #[cfg(test)]
+        inventory_live_builds().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let data = common::read_json(&inv_json_path)?;
         if ![2, 3].contains(&data["schema_version"].as_u64().unwrap_or(0))
             || data["edition"] != edition
         {
@@ -325,7 +588,6 @@ impl Installer {
                 "Inventory component order is invalid",
             ));
         }
-        let base = self.source.join(edition);
         let modes = FileModes::read(&base)?;
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
@@ -412,11 +674,38 @@ impl Installer {
             executable: true,
             component: "shared".into(),
         });
-        Ok(Inventory {
+        let built = Inventory {
             edition: edition.into(),
             release,
             files,
-        })
+        };
+        if !bypass
+            && let Some(stamp) =
+                capture_inventory_stamp(&inv_json_path, &base, &self.engine, &built, now_ns)
+            && let Ok(mut cache) = inventory_memo_cache().lock()
+        {
+            cache.seq = cache.seq.saturating_add(1);
+            let use_seq = cache.seq;
+            if cache.entries.len() >= INVENTORY_CACHE_CAP
+                && !cache.entries.contains_key(&cache_key)
+                && let Some(evict) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, v)| v.last_used)
+                    .map(|(k, _)| k.clone())
+            {
+                cache.entries.remove(&evict);
+            }
+            cache.entries.insert(
+                cache_key,
+                CachedInventoryEntry {
+                    stamp,
+                    inventory: built.clone(),
+                    last_used: use_seq,
+                },
+            );
+        }
+        Ok(built)
     }
     pub fn detect_edition(&self, target: &Path) -> Result<Option<String>> {
         if !target.is_dir() {
@@ -2581,5 +2870,107 @@ mod rollback_attention_tests {
                 assert!(error.message.contains(message));
             }
         }
+    }
+
+    #[test]
+    fn installer_inventory_memoizes_by_settled_inventory_and_edition_tree_stamps() {
+        let dir = crate::temp::Temporary::new("infra-installer-memo").unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("install/inventories")).unwrap();
+        std::fs::create_dir_all(root.join("PHP Core")).unwrap();
+        std::fs::write(root.join("PHP Core/AGENTS.md"), "# Policy\n").unwrap();
+        let engine = root.join("infra-engine");
+        std::fs::write(&engine, b"#!/bin/sh\necho engine\n").unwrap();
+
+        let inv_json = json!({
+            "schema_version": 2,
+            "edition": "PHP Core",
+            "release": "1.0.0",
+            "excluded_tracked_paths": [],
+            "source_overrides": {},
+            "installed": {
+                "shared": ["AGENTS.md"],
+                "claude": [],
+                "cursor": [],
+                "codex": []
+            }
+        });
+        let inv_path = root.join("install/inventories/php-core.json");
+        std::fs::write(&inv_path, serde_json::to_vec_pretty(&inv_json).unwrap()).unwrap();
+
+        let installer = Installer::new(root).unwrap().with_engine(&engine).unwrap();
+        let tools = vec!["claude".to_string()];
+
+        let inv_stamp = stat_settled_entry(&inv_path, i128::MAX / 2, false, false).unwrap();
+        let ed_stamp = stat_settled_entry(
+            &root.join("PHP Core/AGENTS.md"),
+            i128::MAX / 2,
+            false,
+            false,
+        )
+        .unwrap();
+        let eng_stamp = stat_settled_entry(&engine, i128::MAX / 2, false, false).unwrap();
+        let max_mtime = [
+            inv_stamp.mtime_ns,
+            inv_stamp.ctime_ns,
+            ed_stamp.mtime_ns,
+            ed_stamp.ctime_ns,
+            eng_stamp.mtime_ns,
+            eng_stamp.ctime_ns,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+
+        let before = inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed);
+        // Inside INVENTORY_RACY_NS -> rebuilds live every time.
+        let racy_now = max_mtime + INVENTORY_RACY_NS - 1;
+        let _ = installer
+            .inventory_with_now("PHP Core", &tools, racy_now)
+            .unwrap();
+        let _ = installer
+            .inventory_with_now("PHP Core", &tools, racy_now)
+            .unwrap();
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 2
+        );
+
+        // Settled beyond INVENTORY_RACY_NS -> 1st builds, 2nd hits memo.
+        let settled_now = max_mtime + INVENTORY_RACY_NS + 10;
+        let first = installer
+            .inventory_with_now("PHP Core", &tools, settled_now)
+            .unwrap();
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 3
+        );
+        let second = installer
+            .inventory_with_now("PHP Core", &tools, settled_now + 5)
+            .unwrap();
+        assert_eq!(second.release, first.release);
+        assert_eq!(second.files.len(), first.files.len());
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 3
+        );
+
+        // Editing inventory JSON invalidates immediately.
+        let mut inv2 = inv_json.clone();
+        inv2["release"] = json!("1.0.1");
+        std::fs::write(&inv_path, serde_json::to_vec_pretty(&inv2).unwrap()).unwrap();
+        let inv2_stamp = stat_settled_entry(&inv_path, i128::MAX / 2, false, false).unwrap();
+        let third = installer
+            .inventory_with_now(
+                "PHP Core",
+                &tools,
+                inv2_stamp.mtime_ns.max(inv2_stamp.ctime_ns) + INVENTORY_RACY_NS + 10,
+            )
+            .unwrap();
+        assert_eq!(third.release, "1.0.1");
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 4
+        );
     }
 }

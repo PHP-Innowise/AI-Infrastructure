@@ -160,6 +160,83 @@ pub fn improvement_prompt(
     );
     prompt
 }
+const DEFAULT_MIN_MARGINAL_ROI: f64 = 0.01;
+const DEFAULT_ROI_PATIENCE: usize = 2;
+
+fn gate1_candidate_issue(name: &str, description: &str) -> Option<String> {
+    let count = description.chars().count();
+    let prefilter_err = evaluation::static_prefilter_description(name, description).err();
+    match (count > 1024, prefilter_err) {
+        (false, None) => None,
+        (true, None) => Some(format!(
+            "at {count} characters is over the 1024-character hard limit"
+        )),
+        (false, Some(err)) => Some(format!("failed Gate-1 static prefilter ({err})")),
+        (true, Some(err)) => Some(format!(
+            "at {count} characters is over the 1024-character hard limit and failed Gate-1 static prefilter ({err})"
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OptimizationRoiTracker {
+    min_marginal_roi: f64,
+    roi_patience: usize,
+    baseline_seen: bool,
+    best_rate: f64,
+    stalled_rounds: usize,
+}
+
+impl OptimizationRoiTracker {
+    fn new(min_marginal_roi: f64, roi_patience: usize) -> Self {
+        Self {
+            min_marginal_roi: min_marginal_roi.max(0.0),
+            roi_patience: roi_patience.max(1),
+            baseline_seen: false,
+            best_rate: 0.0,
+            stalled_rounds: 0,
+        }
+    }
+
+    fn observe_round(&mut self, iteration: usize, passed: u64, total: u64) -> Option<String> {
+        let rate = if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64
+        };
+        if !self.baseline_seen {
+            self.baseline_seen = true;
+            self.best_rate = rate;
+            self.stalled_rounds = 0;
+            return None;
+        }
+        if rate - self.best_rate > self.min_marginal_roi {
+            self.best_rate = rate;
+            self.stalled_rounds = 0;
+            None
+        } else {
+            self.stalled_rounds += 1;
+            if self.stalled_rounds >= self.roi_patience {
+                Some(format!(
+                    "marginal_roi_early_stop (iteration {iteration}, best_pass_rate={:.3}, stalled={})",
+                    self.best_rate, self.stalled_rounds
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn candidate_already_evaluated(history: &[Value], candidate: &str) -> bool {
+    let needle = candidate.trim();
+    history.iter().any(|entry| {
+        entry["description"]
+            .as_str()
+            .is_some_and(|prior| prior.trim() == needle)
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Preserve the public optimization API: skill content, observed evaluation/history, optional test context, model and transcript destination remain explicit inputs."
@@ -176,15 +253,17 @@ pub fn improve_description(
     log_dir: Option<&Path>,
     iteration: Option<usize>,
 ) -> Result<String> {
+    evaluation::static_prefilter_description(name, current)?;
     let prompt = improvement_prompt(config, name, content, current, eval, history, test);
     let response = platform_cli::call_model(config, &prompt, model, Duration::from_secs(300))?;
     let mut description = parse_description(&response);
     let count = description.chars().count();
-    let mut transcript = json!({"iteration":iteration,"prompt":prompt,"response":response,"parsed_description":description,"char_count":count,"over_limit":count>1024});
-    // One explicit shortening attempt is part of the measured protocol, not a retry.
-    if count > 1024 {
+    let gate_issue = gate1_candidate_issue(name, &description);
+    let mut transcript = json!({"iteration":iteration,"prompt":prompt,"response":response,"parsed_description":description,"char_count":count,"over_limit":count>1024,"gate1_issue":gate_issue});
+    // One explicit repair/shortening attempt is part of the closed-loop Gate-1 protocol, not a blind retry.
+    if let Some(issue) = gate_issue {
         let shorten = format!(
-            "{prompt}\n\n---\n\nA previous attempt produced this description, which at {count} characters is over the 1024-character hard limit:\n\n\"{description}\"\n\nRewrite it to be under 1024 characters while keeping the most important trigger words and intent coverage. Respond with only the new description in <new_description> tags."
+            "{prompt}\n\n---\n\nA previous attempt produced this description, which {issue}:\n\n\"{description}\"\n\nRewrite it to be under 1024 characters, non-empty, free of secrets or sensitive labels, while keeping the most important trigger words and intent coverage. Respond with only the new description in <new_description> tags."
         );
         let response = platform_cli::call_model(config, &shorten, model, Duration::from_secs(300))?;
         description = parse_description(&response);
@@ -193,7 +272,9 @@ pub fn improve_description(
         transcript["rewrite_description"] = json!(description);
         transcript["rewrite_char_count"] = json!(description.chars().count());
     }
+    let gate_result = evaluation::static_prefilter_description(name, &description);
     transcript["final_description"] = json!(description);
+    transcript["gate1_passed"] = json!(gate_result.is_ok());
     if let Some(path) = log_dir {
         std::fs::create_dir_all(path)?;
         common::write_json(
@@ -207,6 +288,7 @@ pub fn improve_description(
             false,
         )?;
     }
+    gate_result?;
     Ok(description)
 }
 pub fn improve_execute(v: &Value) -> Result<Value> {
@@ -319,6 +401,11 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
         .filter(|s| !s.is_empty())
         .unwrap_or(&skill.description)
         .to_owned();
+    // Gate-1 static prefilter before opening reports or launching eval_set probe rounds.
+    evaluation::static_prefilter(&skill.name, &current, eval)?;
+    let min_marginal_roi = common::number(v, "min_marginal_roi", DEFAULT_MIN_MARGINAL_ROI)?;
+    let roi_patience = common::positive(v, "roi_patience", DEFAULT_ROI_PATIENCE)?;
+    let mut roi_tracker = OptimizationRoiTracker::new(min_marginal_roi, roi_patience);
     let mut history = vec![];
     let mut log = String::new();
     let verbose = common::flag(v, "verbose");
@@ -367,6 +454,10 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
             ));
         }
         let all = train.iter().chain(&test).cloned().collect::<Vec<_>>();
+        if let Err(err) = evaluation::static_prefilter_description(&skill.name, &current) {
+            reason = format!("gate1_prefilter_blocked (iteration {iteration}: {err})");
+            break;
+        }
         let started = Instant::now();
         let all_results =
             match evaluation::run_eval(&all, &skill.name, &current, &project, &options, &mut log) {
@@ -441,6 +532,17 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
             reason = format!("max_iterations ({iterations})");
             break;
         }
+        let train_passed = train_summary["passed"].as_u64().unwrap_or(0);
+        let train_total = train_summary["total"].as_u64().unwrap_or(0);
+        if let Some(early_stop_reason) =
+            roi_tracker.observe_round(iteration, train_passed, train_total)
+        {
+            if verbose {
+                log.push_str(&format!("\nEarly stop: {early_stop_reason}\n"));
+            }
+            reason = early_stop_reason;
+            break;
+        }
         // The optimizer sees training observations only. Held-out scores may select the reported best, never the next prompt.
         let blind = history
             .iter()
@@ -455,7 +557,7 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
                 )
             })
             .collect::<Vec<_>>();
-        current = improve_description(
+        let next = improve_description(
             &options.config,
             &skill.name,
             &skill.content,
@@ -467,6 +569,16 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
             logs.as_deref(),
             Some(iteration),
         )?;
+        if candidate_already_evaluated(&history, &next) {
+            if verbose {
+                log.push_str(&format!(
+                    "\nEarly stop: candidate description already evaluated at iteration {iteration}\n"
+                ));
+            }
+            reason = format!("converged_duplicate_description (iteration {iteration})");
+            break;
+        }
+        current = next;
     }
     let result = output(
         &skill.description,
@@ -497,4 +609,86 @@ pub fn loop_execute(v: &Value) -> Result<Value> {
         response["_cli"]["code"] = json!(130);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate1_prefilter_blocks_secrets_empty_and_overlength_and_loop_rejects_early() {
+        assert!(
+            gate1_candidate_issue("demo", "Clean routing description for PHP skills.").is_none()
+        );
+        let secret_issue =
+            gate1_candidate_issue("demo", "Use sk-ant-api03-secretvalue1234567890abcdef");
+        assert!(secret_issue.is_some());
+        assert!(gate1_candidate_issue("demo", &"a".repeat(1025)).is_some());
+        assert!(gate1_candidate_issue("demo", "   ").is_some());
+
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Valid clean description\n---\n# Demo\n",
+        )
+        .unwrap();
+        let eval_path = temp.path().join("eval.json");
+        std::fs::write(
+            &eval_path,
+            serde_json::to_string(&json!([
+                {"query": "normal query", "should_trigger": true},
+                {"query": "bad ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", "should_trigger": false}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let out_results = temp.path().join("results");
+        let err = loop_execute(&json!({
+            "skill_path": skill_dir,
+            "eval_set": eval_path,
+            "model": "claude-test",
+            "report": "none",
+            "results_dir": out_results,
+            "project_root": temp.path(),
+            "holdout": 0.0
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive") || err.to_string().contains("secret"),
+            "{err}"
+        );
+        assert!(
+            !out_results.exists(),
+            "Gate-1 must reject before creating probe artifacts"
+        );
+    }
+
+    #[test]
+    fn marginal_roi_tracker_and_duplicate_candidate_trigger_early_stop() {
+        let mut tracker = OptimizationRoiTracker::new(0.05, 2);
+        // Iter 1 baseline: 5/10 = 0.50
+        assert!(tracker.observe_round(1, 5, 10).is_none());
+        // Iter 2 significant gain: 7/10 = 0.70 (+0.20 > 0.05)
+        assert!(tracker.observe_round(2, 7, 10).is_none());
+        // Iter 3 plateau: 7/10 = 0.70 (+0.00 <= 0.05) -> stall 1
+        assert!(tracker.observe_round(3, 7, 10).is_none());
+        // Iter 4 marginal gain: 74/100 = 0.74 (+0.04 <= 0.05) -> stall 2 -> early stop
+        let reason = tracker.observe_round(4, 74, 100).expect("must early stop");
+        assert!(reason.starts_with("marginal_roi_early_stop"), "{reason}");
+
+        let history = vec![
+            json!({"description": "First clean description"}),
+            json!({"description": "Second clean description"}),
+        ];
+        assert!(candidate_already_evaluated(
+            &history,
+            "  First clean description "
+        ));
+        assert!(!candidate_already_evaluated(
+            &history,
+            "Third novel description"
+        ));
+    }
 }

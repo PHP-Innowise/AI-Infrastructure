@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     ops::Range,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -46,11 +46,16 @@ pub struct SourceBinding {
     pub path: String,
     pub source_sha256: String,
 }
+fn document_id_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$").expect("valid document id regex")
+    })
+}
+
 impl SourceBinding {
     pub fn validate(&self) -> Result<()> {
-        if !Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")?.is_match(&self.document_id)
-            || !strict::digest(&self.source_sha256)
-        {
+        if !document_id_re().is_match(&self.document_id) || !strict::digest(&self.source_sha256) {
             bail!("binding");
         }
         strict::path(&self.path, 512)
@@ -655,5 +660,31 @@ impl<T: RecallTransport, P: QueryPolicy> SourceHintProvider<T, P> {
             &self.policy,
             active,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_binding_validate_uses_cached_once_lock_regex() {
+        let scope = Scope {
+            team_id: Uuid::nil(),
+            project_id: Uuid::nil(),
+        };
+        let valid = SourceBinding::from_bytes(scope.clone(), "docs/a.md", b"hello").unwrap();
+        assert!(valid.validate().is_ok());
+
+        let mut bad_doc_id = valid.clone();
+        bad_doc_id.document_id = "-invalid".into();
+        assert!(bad_doc_id.validate().is_err());
+
+        let mut bad_path = valid.clone();
+        bad_path.path = "../escape".into();
+        assert!(bad_path.validate().is_err());
+
+        let re_ptr = document_id_re() as *const Regex;
+        assert_eq!(re_ptr, document_id_re() as *const Regex);
     }
 }
