@@ -1181,25 +1181,6 @@ pub(crate) fn skills_catalog_needs_preload(catalog: &V) -> bool {
     !catalog["sources"].is_array()
 }
 
-pub(crate) fn palette_discovery_source_id(
-    catalog: &V,
-    discovery: &V,
-    attempted_sources: &V,
-) -> Option<String> {
-    if discovery["skills"].is_array() || discovery["items"].is_array() {
-        return None;
-    }
-    let sources = m::array(&catalog["sources"]);
-    let source_id = sources
-        .iter()
-        .map(|s| m::text(s, "id"))
-        .find(|id| !id.is_empty())?;
-    let already_attempted = attempted_sources
-        .as_object()
-        .is_some_and(|obj| obj.get(&source_id).and_then(V::as_bool).unwrap_or(false));
-    (!already_attempted).then_some(source_id)
-}
-
 async fn preload_capsules_for_palette(project: &str) -> bool {
     let needs = capsules_need_preload(
         project,
@@ -1223,7 +1204,7 @@ async fn preload_capsules_for_palette(project: &str) -> bool {
     }
 }
 
-async fn preload_catalog_and_discovery_for_palette() {
+async fn preload_skills_catalog_for_palette() {
     if skills_catalog_needs_preload(&m::data("skills-catalog")) {
         if let Ok(catalog) = api::get("/api/skills").await {
             if catalog["sources"].is_array() {
@@ -1231,32 +1212,6 @@ async fn preload_catalog_and_discovery_for_palette() {
                 if palette_open() {
                     render_palette();
                 }
-            }
-        }
-    }
-    let Some(source_id) = palette_discovery_source_id(
-        &m::data("skills-catalog"),
-        &m::data("skills-discovery"),
-        &m::data("palette-skill-discovery-attempted"),
-    ) else {
-        return;
-    };
-    let mut attempted = m::data("palette-skill-discovery-attempted");
-    if !attempted.is_object() {
-        attempted = json!({});
-    }
-    attempted[&source_id] = json!(true);
-    m::set("palette-skill-discovery-attempted", attempted);
-    if let Ok(discovered) = api::post(
-        "/api/skills/discover",
-        json!({"source_id": source_id, "refresh": false}),
-    )
-    .await
-    {
-        if discovered["skills"].is_array() || discovered["items"].is_array() {
-            m::set("skills-discovery", discovered);
-            if palette_open() {
-                render_palette();
             }
         }
     }
@@ -1290,7 +1245,7 @@ pub fn open_palette() {
             });
         }
         spawn_local(async {
-            preload_catalog_and_discovery_for_palette().await;
+            preload_skills_catalog_for_palette().await;
         });
     }
 }
@@ -1962,7 +1917,7 @@ mod tests {
             &json!({"skills": []}),
         ));
 
-        // Capsules & skills discovery preload guards
+        // Capsules & skills catalog preload guards
         assert!(capsules_need_preload("proj-a", &V::Null, &V::Null));
         assert!(capsules_need_preload(
             "proj-b",
@@ -1979,26 +1934,5 @@ mod tests {
         assert!(!skills_catalog_needs_preload(
             &json!({"sources": [{"id": "s1"}]})
         ));
-        assert_eq!(
-            palette_discovery_source_id(&json!({"sources": [{"id": "kit3"}]}), &V::Null, &V::Null)
-                .as_deref(),
-            Some("kit3")
-        );
-        assert_eq!(
-            palette_discovery_source_id(
-                &json!({"sources": [{"id": "kit3"}]}),
-                &V::Null,
-                &json!({"kit3": true})
-            ),
-            None
-        );
-        assert_eq!(
-            palette_discovery_source_id(
-                &json!({"sources": [{"id": "kit3"}]}),
-                &json!({"skills": []}),
-                &V::Null
-            ),
-            None
-        );
     }
 }
