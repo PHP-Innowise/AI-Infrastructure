@@ -17,16 +17,21 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
+    time::{SystemTime, UNIX_EPOCH},
 };
 const EDITIONS: [&str; 4] = ["Laravel", "Symfony", "PHP Core", "Cms/wordpress"];
+const ACCEL_RACY_NS: i128 = 2_000_000_000;
+const MAX_SOURCE_STAMP_ENTRIES: usize = 8192;
+
 pub struct Accelerators {
     pub store: SessionStore,
     pub source: PathBuf,
     pub providers: Arc<ProviderDomain>,
     sessions: Weak<Sessions>,
     serial: Mutex<()>,
-    version: Mutex<Option<(Instant, String)>>,
+    version: Mutex<Option<(String, String)>>,
+    #[cfg(test)]
+    source_version_recomputes: std::sync::atomic::AtomicUsize,
 }
 impl Accelerators {
     pub fn new(
@@ -43,6 +48,8 @@ impl Accelerators {
             sessions,
             serial: Mutex::new(()),
             version: Mutex::new(None),
+            #[cfg(test)]
+            source_version_recomputes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     fn edition(&self, project: &str) -> Result<Option<String>> {
@@ -287,16 +294,205 @@ impl Accelerators {
             .transpose()
             .map(Option::flatten)
     }
-    pub fn source_version(&self) -> Result<String> {
-        let mut cached = self
-            .version
-            .lock()
-            .map_err(|_| HarnessError::unavailable("Accelerator version cache unavailable."))?;
-        if let Some((at, value)) = &*cached
-            && at.elapsed() < Duration::from_secs(30)
-        {
-            return Ok(value.clone());
+}
+
+fn accel_time_ns(time: SystemTime) -> Option<i128> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+
+fn accel_is_racy(mtime_ns: i128, now_ns: i128) -> bool {
+    mtime_ns <= 0 || now_ns <= ACCEL_RACY_NS || (now_ns - mtime_ns).abs() < ACCEL_RACY_NS
+}
+
+fn accel_racy_file_stamp(path: &Path, max_hash_bytes: u64, now_ns: i128) -> Option<String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some("missing".into()),
+        Err(_) => return None,
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mtime_ns = meta.modified().ok().and_then(accel_time_ns)?;
+    if accel_is_racy(mtime_ns, now_ns) {
+        if meta.len() > max_hash_bytes {
+            return None;
         }
+        let bytes = std::fs::read(path).ok()?;
+        Some(format!(
+            "racy:{}:{mtime_ns}:{}",
+            meta.len(),
+            store::sha(&bytes)
+        ))
+    } else {
+        Some(format!("settled:{}:{mtime_ns}", meta.len()))
+    }
+}
+
+fn resolve_accel_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dot_git = root.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    let git_dir = if meta.is_dir() {
+        dot_git
+    } else if meta.is_file() {
+        let content = std::fs::read_to_string(&dot_git).ok()?;
+        let rel = content.trim().strip_prefix("gitdir:")?.trim();
+        let cand = Path::new(rel);
+        if cand.is_absolute() {
+            cand.to_path_buf()
+        } else {
+            root.join(cand)
+        }
+    } else {
+        return None;
+    };
+    let commondir_file = git_dir.join("commondir");
+    let common_dir = if let Ok(raw) = std::fs::read_to_string(&commondir_file) {
+        let rel = raw.trim();
+        let p = Path::new(rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            git_dir.join(p)
+        }
+    } else {
+        git_dir.clone()
+    };
+    Some((git_dir, common_dir))
+}
+
+fn stamp_accel_subdir(root: &Path, now_ns: i128, out: &mut Vec<String>) -> bool {
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            out.push(format!("missing:{}", root.to_string_lossy()));
+            return true;
+        }
+        Err(_) => return false,
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return false;
+    }
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let d_mtime = std::fs::symlink_metadata(&dir)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(accel_time_ns)
+            .unwrap_or(0);
+        out.push(format!("d:{}:{d_mtime}", dir.to_string_lossy()));
+        if out.len() > MAX_SOURCE_STAMP_ENTRIES {
+            return false;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return false;
+        };
+        let mut children: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            let p = child.path();
+            let Ok(c_meta) = std::fs::symlink_metadata(&p) else {
+                return false;
+            };
+            if c_meta.file_type().is_symlink() {
+                return false;
+            }
+            if c_meta.is_dir() {
+                queue.push_back(p);
+            } else if c_meta.is_file() {
+                let Some(mtime_ns) = c_meta.modified().ok().and_then(accel_time_ns) else {
+                    return false;
+                };
+                let mut rec = format!("f:{}:{}:{mtime_ns}", p.to_string_lossy(), c_meta.len());
+                if accel_is_racy(mtime_ns, now_ns) {
+                    if c_meta.len() > 256 * 1024 {
+                        return false;
+                    }
+                    let Ok(bytes) = std::fs::read(&p) else {
+                        return false;
+                    };
+                    rec.push(':');
+                    rec.push_str(&store::sha(&bytes));
+                }
+                out.push(rec);
+                if out.len() > MAX_SOURCE_STAMP_ENTRIES {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn source_version_stamp_at(source: &Path, now_ns: i128) -> Option<String> {
+    let Some((git_dir, common_dir)) = resolve_accel_git_dirs(source) else {
+        let root_mtime = std::fs::symlink_metadata(source)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(accel_time_ns)
+            .unwrap_or(0);
+        return (!accel_is_racy(root_mtime, now_ns)).then(|| format!("no-git:{root_mtime}"));
+    };
+    let head_path = git_dir.join("HEAD");
+    let head_stamp = accel_racy_file_stamp(&head_path, 64 * 1024, now_ns)?;
+    let mut parts = vec![
+        format!("HEAD={head_stamp}"),
+        format!(
+            "index={}",
+            accel_racy_file_stamp(&git_dir.join("index"), 16 * 1024 * 1024, now_ns)?
+        ),
+        format!(
+            "packed-refs={}",
+            accel_racy_file_stamp(&common_dir.join("packed-refs"), 8 * 1024 * 1024, now_ns)?
+        ),
+    ];
+    if let Ok(head_text) = std::fs::read_to_string(&head_path)
+        && let Some(ref_rel) = head_text.trim().strip_prefix("ref: ").map(str::trim)
+        && !ref_rel.is_empty()
+        && !ref_rel.contains("..")
+    {
+        let ref_path = common_dir.join(ref_rel);
+        parts.push(format!(
+            "ref={}",
+            accel_racy_file_stamp(&ref_path, 4096, now_ns)?
+        ));
+    }
+    if !stamp_accel_subdir(&source.join("install/inventories"), now_ns, &mut parts) {
+        return None;
+    }
+    for edition in EDITIONS {
+        if !stamp_accel_subdir(&source.join(edition), now_ns, &mut parts) {
+            return None;
+        }
+    }
+    Some(store::sha(parts.join("\n").as_bytes()))
+}
+
+impl Accelerators {
+    pub fn source_version(&self) -> Result<String> {
+        let now_ns = accel_time_ns(SystemTime::now()).unwrap_or(0);
+        self.source_version_at(now_ns)
+    }
+
+    fn source_version_at(&self, now_ns: i128) -> Result<String> {
+        let stamp = source_version_stamp_at(&self.source, now_ns);
+        {
+            let cached = self
+                .version
+                .lock()
+                .map_err(|_| HarnessError::unavailable("Accelerator version cache unavailable."))?;
+            if let Some(ref current_stamp) = stamp
+                && let Some((cached_stamp, value)) = &*cached
+                && cached_stamp == current_stamp
+            {
+                return Ok(value.clone());
+            }
+        }
+        #[cfg(test)]
+        self.source_version_recomputes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let head = crate::projects::git(&self.source, &["rev-parse".into(), "HEAD".into()], 20)?;
         let mut version = if head.code == 0 {
             infra_core::domain::rstrip(&String::from_utf8_lossy(&head.stdout)).to_owned()
@@ -316,7 +512,13 @@ impl Accelerators {
             version.push('+');
             version.push_str(&store::sha(&dirty.stdout)[..12]);
         }
-        *cached = Some((Instant::now(), version.clone()));
+        let after_ns = accel_time_ns(SystemTime::now()).unwrap_or(now_ns);
+        if let Some(after_stamp) = source_version_stamp_at(&self.source, after_ns.max(now_ns))
+            && Some(&after_stamp) == stamp.as_ref()
+            && let Ok(mut cached) = self.version.lock()
+        {
+            *cached = Some((after_stamp, version.clone()));
+        }
         Ok(version)
     }
     pub fn keep_current(&self, project: &str) -> Result<Option<Value>> {
@@ -1277,5 +1479,98 @@ mod system_launch_tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0]["kind"], "template");
         assert_eq!(active[0]["status"], "active");
+    }
+
+    #[test]
+    fn source_version_uses_git_head_index_racy_ns_stamps_without_30s_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let source = dir.path().join("accel-src");
+        std::fs::create_dir_all(source.join("Laravel")).unwrap();
+        std::fs::create_dir_all(source.join("install/inventories")).unwrap();
+        std::fs::write(source.join("Laravel/README.md"), "# Laravel v1\n").unwrap();
+        std::fs::write(source.join("install/inventories/Laravel.json"), "{}").unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "v1"]);
+
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let accel = Accelerators::new(store, source.clone(), providers, Weak::new()).unwrap();
+
+        let settled = accel_time_ns(SystemTime::now()).unwrap_or(0) + ACCEL_RACY_NS + 1_000_000;
+        let v1 = accel.source_version_at(settled).unwrap();
+        assert!(!v1.contains('+'));
+        assert_eq!(
+            accel
+                .source_version_recomputes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // Repeat well past any 30s wall-clock horizon: still cached with 0 git subprocesses.
+        let v1_repeat = accel
+            .source_version_at(settled + 600_i128 * 1_000_000_000)
+            .unwrap();
+        assert_eq!(v1_repeat, v1);
+        assert_eq!(
+            accel
+                .source_version_recomputes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // Unstaged edit in Laravel/ invalidates immediately.
+        std::fs::write(source.join("Laravel/README.md"), "# Laravel dirty\n").unwrap();
+        let now_ns = accel_time_ns(SystemTime::now()).unwrap_or(0);
+        let v_dirty = accel.source_version_at(now_ns).unwrap();
+        assert!(v_dirty.starts_with(&v1));
+        assert!(v_dirty.contains('+'));
+        assert_eq!(
+            accel
+                .source_version_recomputes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        // Staging and committing updates HEAD/index stamps -> invalidates and settles again.
+        git(&["add", "."]);
+        git(&["commit", "-m", "v2"]);
+        let settled2 = accel_time_ns(SystemTime::now()).unwrap_or(0) + ACCEL_RACY_NS + 1_000_000;
+        let v2 = accel.source_version_at(settled2).unwrap();
+        assert_ne!(v2, v1);
+        assert!(!v2.contains('+'));
+        assert_eq!(
+            accel
+                .source_version_recomputes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+        let v2_repeat = accel.source_version_at(settled2 + 1_000).unwrap();
+        assert_eq!(v2_repeat, v2);
+        assert_eq!(
+            accel
+                .source_version_recomputes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
     }
 }

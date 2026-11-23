@@ -1,5 +1,186 @@
 use super::*;
 use crate::graph_map::layer_rules::Rules;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const RULES_RACY_NS: i128 = 2_000_000_000;
+const MAX_RULES_CACHE_ENTRIES: usize = 64;
+const MAX_RULES_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RulesDiskStamp {
+    Missing { root_mtime_ns: i128 },
+    Present { len: u64, mtime_ns: i128 },
+}
+
+struct CachedRulesEntry {
+    stamp: RulesDiskStamp,
+    content_sha: Option<String>,
+    rules: Arc<std::result::Result<Option<Rules>, String>>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RulesCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedRulesEntry>,
+}
+
+fn rules_cache() -> &'static Mutex<RulesCache> {
+    static CACHE: OnceLock<Mutex<RulesCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RulesCache::default()))
+}
+
+#[cfg(test)]
+static RULES_PARSE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn rules_time_ns(time: SystemTime) -> Option<i128> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+
+fn current_rules_unix_ns() -> i128 {
+    rules_time_ns(SystemTime::now()).unwrap_or(0)
+}
+
+fn cached_rules_read(root: &Path) -> Arc<std::result::Result<Option<Rules>, String>> {
+    cached_rules_read_at(root, current_rules_unix_ns())
+}
+
+fn cached_rules_read_at(
+    root: &Path,
+    now_ns: i128,
+) -> Arc<std::result::Result<Option<Rules>, String>> {
+    let canon_root = infra_core::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let arch_path = canon_root.join(crate::graph_map::layer_rules::FILE);
+    let meta = match std::fs::symlink_metadata(&arch_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let root_mtime_ns = std::fs::symlink_metadata(&canon_root)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(rules_time_ns)
+                .unwrap_or(0);
+            let settled = root_mtime_ns > 0
+                && now_ns > RULES_RACY_NS
+                && root_mtime_ns <= now_ns - RULES_RACY_NS;
+            let stamp = RulesDiskStamp::Missing { root_mtime_ns };
+            if settled && let Ok(mut guard) = rules_cache().lock() {
+                guard.seq = guard.seq.saturating_add(1);
+                let seq = guard.seq;
+                if let Some(entry) = guard.entries.get_mut(&canon_root)
+                    && entry.stamp == stamp
+                {
+                    entry.last_used = seq;
+                    return Arc::clone(&entry.rules);
+                }
+            }
+            #[cfg(test)]
+            RULES_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+            let result = Arc::new(Ok(None));
+            if settled && let Ok(mut guard) = rules_cache().lock() {
+                insert_rules_cache_entry(
+                    &mut guard,
+                    canon_root,
+                    CachedRulesEntry {
+                        stamp,
+                        content_sha: None,
+                        rules: Arc::clone(&result),
+                        last_used: 0,
+                    },
+                );
+            }
+            return result;
+        }
+        Ok(m)
+            if !m.file_type().is_symlink() && m.is_file() && m.len() <= MAX_RULES_BYTES as u64 =>
+        {
+            m
+        }
+        _ => {
+            #[cfg(test)]
+            RULES_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Arc::new(Rules::read(&canon_root));
+        }
+    };
+
+    let mtime_ns = meta.modified().ok().and_then(rules_time_ns).unwrap_or(0);
+    let stamp = RulesDiskStamp::Present {
+        len: meta.len(),
+        mtime_ns,
+    };
+    let racy =
+        mtime_ns == 0 || now_ns <= RULES_RACY_NS || (now_ns - mtime_ns).abs() < RULES_RACY_NS;
+
+    if !racy && let Ok(mut guard) = rules_cache().lock() {
+        guard.seq = guard.seq.saturating_add(1);
+        let seq = guard.seq;
+        if let Some(entry) = guard.entries.get_mut(&canon_root)
+            && entry.stamp == stamp
+        {
+            entry.last_used = seq;
+            return Arc::clone(&entry.rules);
+        }
+    }
+
+    let Ok(bytes) = std::fs::read(&arch_path) else {
+        #[cfg(test)]
+        RULES_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        return Arc::new(Rules::read(&canon_root));
+    };
+    if bytes.len() > MAX_RULES_BYTES {
+        #[cfg(test)]
+        RULES_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        return Arc::new(Rules::read(&canon_root));
+    }
+    let content_sha = crate::store::sha(&bytes);
+
+    if racy && let Ok(mut guard) = rules_cache().lock() {
+        guard.seq = guard.seq.saturating_add(1);
+        let seq = guard.seq;
+        if let Some(entry) = guard.entries.get_mut(&canon_root)
+            && entry.stamp == stamp
+            && entry.content_sha.as_deref() == Some(content_sha.as_str())
+        {
+            entry.last_used = seq;
+            return Arc::clone(&entry.rules);
+        }
+    }
+
+    #[cfg(test)]
+    RULES_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let parsed = Arc::new(Rules::parse(&bytes).map(Some));
+    if let Ok(mut guard) = rules_cache().lock() {
+        insert_rules_cache_entry(
+            &mut guard,
+            canon_root,
+            CachedRulesEntry {
+                stamp,
+                content_sha: Some(content_sha),
+                rules: Arc::clone(&parsed),
+                last_used: 0,
+            },
+        );
+    }
+    parsed
+}
+
+fn insert_rules_cache_entry(guard: &mut RulesCache, key: PathBuf, mut entry: CachedRulesEntry) {
+    guard.seq = guard.seq.saturating_add(1);
+    let seq = guard.seq;
+    entry.last_used = seq;
+    if guard.entries.len() >= MAX_RULES_CACHE_ENTRIES
+        && !guard.entries.contains_key(&key)
+        && let Some(evict_key) = guard
+            .entries
+            .iter()
+            .min_by_key(|(_, e)| e.last_used)
+            .map(|(k, _)| k.clone())
+    {
+        guard.entries.remove(&evict_key);
+    }
+    guard.entries.insert(key, entry);
+}
 
 impl Graphs {
     /// One folder of the published graph's dependency map, or, with a
@@ -268,9 +449,9 @@ impl Graphs {
             let (raw_index, cache_hit) = self.live_index_with_hit(project, &root)?;
             let index = asked(raw_index);
             let rules = if reads_rules {
-                Rules::read(&root)
+                cached_rules_read(&root)
             } else {
-                Ok(None)
+                Arc::new(Ok(None))
             };
             let lod_opts = crate::graph_map::LodFilter {
                 scope,
@@ -448,11 +629,15 @@ impl Graphs {
         }
         let rules = if reads_rules {
             match &resolved.revision {
-                Some(revision) => graph_changes::architecture_at(&root, revision, &resolved.prefix),
-                None => Rules::read(&root),
+                Some(revision) => Arc::new(graph_changes::architecture_at(
+                    &root,
+                    revision,
+                    &resolved.prefix,
+                )),
+                None => cached_rules_read(&root),
             }
         } else {
-            Ok(None)
+            Arc::new(Ok(None))
         };
         let found = self.graph_of(project, &root, &resolved)?;
         let pull_cycle =
@@ -509,8 +694,7 @@ impl Graphs {
                     // the graph of a commit: a graph without them cannot
                     // be compared without its tests.
                     if view["pattern"]["sort"] == "layers"
-                        && (view["pattern"]["declared"] != true
-                            || rules.as_ref().is_ok_and(Option::is_some))
+                        && (view["pattern"]["declared"] != true || matches!(&*rules, Ok(Some(_))))
                     {
                         let untold = if stale {
                             Some("stale")
@@ -529,7 +713,7 @@ impl Graphs {
                                 "base": resolved.json()["base"],
                             });
                         } else {
-                            let rules_ref = rules.as_ref().ok().and_then(|r| r.as_ref());
+                            let rules_ref = (*rules).as_ref().ok().and_then(Option::as_ref);
                             self.compare_layers(
                                 project, &root, &resolved, &index, &mut view, shown, rules_ref,
                             );
@@ -633,8 +817,7 @@ impl Graphs {
                 apply_lod(&index, &mut view);
                 view["preliminary"] = json!(true);
                 if view["pattern"]["sort"] == "layers"
-                    && (view["pattern"]["declared"] != true
-                        || rules.as_ref().is_ok_and(Option::is_some))
+                    && (view["pattern"]["declared"] != true || matches!(&*rules, Ok(Some(_))))
                 {
                     view["pattern"]["change"] = if found.state == "failed" {
                         json!({"state": "unavailable", "reason": "head"})
@@ -745,7 +928,10 @@ impl Graphs {
                 })
                 .and_then(|(k, g, t)| self.maps.index(&k, &g, &t).ok())
                 .map(|b| if notests { b.without_tests() } else { b });
-            let overlay_rules = rules.as_ref().ok().and_then(|r| r.as_ref());
+            let overlay_rules = match rules.as_ref() {
+                Ok(opt) => opt.as_ref(),
+                Err(_) => None,
+            };
             let changed_paths: Vec<String> = resolved
                 .files
                 .iter()
@@ -1483,5 +1669,75 @@ mod tests {
         );
 
         graphs.close();
+    }
+
+    #[test]
+    fn cached_rules_read_uses_racy_ns_stamps_and_invalidates_same_second_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let arch = root.join(crate::graph_map::layer_rules::FILE);
+
+        let rules_v1 = json!({
+            "version": 1,
+            "layers": [
+                {"id": "api", "name": "API", "paths": ["src/api/**"], "forbids": ["db"]},
+                {"id": "db", "name": "DB", "paths": ["src/db/**"]}
+            ]
+        });
+        std::fs::write(&arch, rules_v1.to_string()).unwrap();
+        let mtime1 = rules_time_ns(
+            std::fs::symlink_metadata(&arch)
+                .unwrap()
+                .modified()
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Inside RULES_RACY_NS window: first call parses and stores SHA-256; identical bytes hit cache without re-parse.
+        let r1 = cached_rules_read_at(&root, mtime1 + RULES_RACY_NS - 10);
+        let r2 = cached_rules_read_at(&root, mtime1 + RULES_RACY_NS - 5);
+        assert!(
+            Arc::ptr_eq(&r1, &r2),
+            "unchanged racy bytes must hit Arc cache"
+        );
+        assert!(matches!(&*r1, Ok(Some(_))));
+
+        // Settled past RULES_RACY_NS: hits purely on (len, mtime_ns) stat without reading/parsing.
+        let r3 = cached_rules_read_at(&root, mtime1 + RULES_RACY_NS + 100);
+        assert!(
+            Arc::ptr_eq(&r1, &r3),
+            "settled file must reuse cached Rules Arc"
+        );
+
+        // Same-length rewrite inside RACY_NS invalidates via content SHA-256.
+        let rules_v2 = json!({
+            "version": 1,
+            "layers": [
+                {"id": "web", "name": "WEB", "paths": ["src/web/**"], "forbids": ["db"]},
+                {"id": "db", "name": "DB", "paths": ["src/db/**"]}
+            ]
+        });
+        assert_eq!(rules_v1.to_string().len(), rules_v2.to_string().len());
+        std::fs::write(&arch, rules_v2.to_string()).unwrap();
+        let mtime2 = rules_time_ns(
+            std::fs::symlink_metadata(&arch)
+                .unwrap()
+                .modified()
+                .unwrap(),
+        )
+        .unwrap();
+        let r4 = cached_rules_read_at(&root, mtime2 + 1);
+        assert!(
+            !Arc::ptr_eq(&r1, &r4),
+            "modified content within RACY_NS must re-parse"
+        );
+        let sha1 = r1.as_ref().as_ref().unwrap().as_ref().unwrap().sha256();
+        let sha4 = r4.as_ref().as_ref().unwrap().as_ref().unwrap().sha256();
+        assert_ne!(sha1, sha4);
+
+        // Removing the file returns Ok(None).
+        std::fs::remove_file(&arch).unwrap();
+        let r5 = cached_rules_read_at(&root, mtime2 + RULES_RACY_NS + 100);
+        assert!(matches!(&*r5, Ok(None)));
     }
 }

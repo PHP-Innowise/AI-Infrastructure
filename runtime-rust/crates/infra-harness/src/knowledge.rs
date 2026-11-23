@@ -3485,10 +3485,13 @@ pub fn prepared_sources(
     let manifest = manifest
         .as_str()
         .ok_or_else(|| HarnessError::invalid("The task capsule has no valid source manifest."))?;
-    let pattern = regex::Regex::new(
-        r"^(?:project-brain/control|memory-bank/local)/retrieval-manifests/[0-9a-f-]{36}\.json$",
-    )
-    .map_err(|_| HarnessError::invalid("Invalid internal manifest expression."))?;
+    static MANIFEST_PATH_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = MANIFEST_PATH_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:project-brain/control|memory-bank/local)/retrieval-manifests/[0-9a-f-]{36}\.json$",
+        )
+        .expect("valid retrieval manifest regex")
+    });
     if !pattern.is_match(manifest) {
         return Err(HarnessError::invalid(
             "The task capsule has no valid source manifest.",
@@ -3639,6 +3642,13 @@ fn usage_listing(
         truncated,
     )))
 }
+fn mem_chunk_id_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))")
+            .expect("valid memory chunk identity regex")
+    })
+}
 fn usage_chunks(context: &RuntimeContext, files: &mut PublicationFiles) -> Result<V> {
     let Some((mut names, truncated)) =
         usage_listing(context, "memory-bank/chunks", ".md", 500, files)?
@@ -3646,8 +3656,7 @@ fn usage_chunks(context: &RuntimeContext, files: &mut PublicationFiles) -> Resul
         return Ok(V::Null);
     };
     names.sort();
-    let id_pattern = regex::Regex::new(r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))")
-        .map_err(|_| HarnessError::invalid("Invalid internal memory identity expression."))?;
+    let id_pattern = mem_chunk_id_regex();
     let mut chunks = vec![];
     let mut total = 0u64;
     let mut sources = PublicationFiles::new(&context.roots.project)?;
@@ -3889,8 +3898,7 @@ fn usage_chunk_id(path: &V, chunk_paths: &BTreeMap<String, String>) -> Option<St
         return None;
     }
     chunk_paths.get(path).cloned().or_else(|| {
-        regex::Regex::new(r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))")
-            .ok()?
+        mem_chunk_id_regex()
             .captures(path.trim_start_matches("chunks/"))
             .map(|c| c[1].to_owned())
     })
@@ -5867,5 +5875,24 @@ mod tests {
             ])
         );
         assert_eq!(saved["saved"]["records"][0]["state"], "created");
+    }
+
+    #[test]
+    fn knowledge_hoisted_regexes_match_expected_chunk_and_manifest_paths() {
+        let map = BTreeMap::new();
+        assert_eq!(
+            usage_chunk_id(
+                &json!("memory-bank/chunks/MEM-20261123-deadbeef-cache.md"),
+                &map
+            )
+            .as_deref(),
+            Some("MEM-20261123-deadbeef")
+        );
+        assert_eq!(
+            usage_chunk_id(&json!("memory-bank/chunks/MEM-0042-legacy.md"), &map).as_deref(),
+            Some("MEM-0042")
+        );
+        assert!(usage_chunk_id(&json!("memory-bank/chunks/invalid.md"), &map).is_none());
+        assert!(std::ptr::eq(mem_chunk_id_regex(), mem_chunk_id_regex()));
     }
 }
