@@ -4759,7 +4759,8 @@ async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
     const kv = document.getElementById('kit3-view');
     const frame = document.getElementById('kit3-frame');
     const openKit = document.getElementById('open-kit3');
-    return Boolean(kv && !kv.hidden && openKit && !openKit.hidden && frame && (frame.getAttribute('src') || '').includes('/kit3') && frame.contentDocument?.readyState === 'complete');
+    const docUrl = frame?.contentDocument?.URL || frame?.contentWindow?.location?.href || '';
+    return Boolean(kv && !kv.hidden && openKit && !openKit.hidden && frame && (frame.getAttribute('src') || '').includes('/kit3') && docUrl.includes('/kit3') && frame.contentDocument?.readyState === 'complete');
   }, '#kit3-view loads /kit3/ iframe cleanly', 10_000);
   await driver.callFn(() => {
     document.getElementById('kit3-frame').contentWindow.__e2eKit3Alive = true;
