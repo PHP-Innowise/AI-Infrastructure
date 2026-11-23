@@ -20,7 +20,14 @@ use infra_host::{
     sandbox::Spec,
 };
 use infra_skillcache::{
-    Form, Step, capsule::Network, env_filter, package, prompt, state, trace as sc_trace,
+    Form, Step,
+    capsule::{CapsuleKind, Network},
+    compile_rules::{
+        BINDING_WORKSPACE_SCAN_LIMIT, extract_deterministic_bindings, normalize_safe_relative_path,
+    },
+    env_filter,
+    executor::is_ignored_workspace_name_with,
+    package, prompt, state, trace as sc_trace,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -77,6 +84,8 @@ pub struct Warm {
     /// True when the active verified capsule is pure deterministic read-only (`Step::Program` only)
     /// and eligible for direct in-process execution without paying the ~25k prefix LLM turn.
     pub direct_dispatch: bool,
+    /// Deterministically extracted bindings for parameterized direct dispatch.
+    pub direct_bindings: Option<serde_json::Map<String, Value>>,
     /// The last journal line already turned into a session event.
     seen: AtomicU64,
     /// The last sidecar `run-log.changes.jsonl` line already forwarded to focus tracking.
@@ -101,6 +110,7 @@ impl Warm {
             engine: self.engine.clone().or(engine),
             codex: self.codex.clone(),
             direct_dispatch: self.direct_dispatch,
+            direct_bindings: self.direct_bindings.clone(),
             seen: AtomicU64::new(self.seen.load(Ordering::Relaxed)),
             seen_changes: AtomicU64::new(self.seen_changes.load(Ordering::Relaxed)),
         })
@@ -121,6 +131,7 @@ impl Warm {
             engine: None,
             codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }
@@ -610,6 +621,7 @@ fn decide_raw_trace(
         engine: None,
         codex: None,
         direct_dispatch: false,
+        direct_bindings: None,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
     }))
@@ -832,7 +844,231 @@ fn decide_toolchain_candidate(
     Ok((chosen, String::new()))
 }
 
+fn resolve_native_slash_skill(workspace: &Path, message: &str) -> Option<(String, String)> {
+    let trimmed = message.trim();
+    let rest = trimmed.strip_prefix('/')?;
+    let raw_cmd = rest
+        .split(char::is_whitespace)
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    if raw_cmd.contains("..") || raw_cmd.contains('\\') || raw_cmd.starts_with('.') {
+        return None;
+    }
+    let skill_name = raw_cmd.rsplit(':').next().unwrap_or(raw_cmd);
+    if !skill_name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    let home = crate::run_activity::user_home().map(PathBuf::from);
+    for root in [Some(workspace), home.as_deref()].into_iter().flatten() {
+        for folder in [".claude/skills", ".agents/skills", ".cursor/skills"] {
+            let candidate = root.join(folder).join(skill_name).join("SKILL.md");
+            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.is_file())
+                && let Some(spelled) = trace::spelled_skill(workspace, &candidate)
+            {
+                return Some((skill_name.to_owned(), spelled));
+            }
+        }
+    }
+    None
+}
+
+fn extract_route_args(
+    route: &ResolvedCommand,
+    message: &str,
+    skill_name: Option<&str>,
+) -> Option<String> {
+    if let Some(args) = route
+        .requests
+        .first()
+        .and_then(|req| req.get("args"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(args.to_owned());
+    }
+    let msg = message.trim();
+    let name = route
+        .requests
+        .first()
+        .and_then(|req| req["name"].as_str())
+        .filter(|n| !n.is_empty())
+        .or_else(|| skill_name.filter(|n| !n.is_empty()));
+    if let Some(name) = name {
+        for prefix in ["/", "$"] {
+            let trigger = format!("{prefix}{name}");
+            if let Some(rest) = msg.strip_prefix(&trigger)
+                && rest.starts_with(char::is_whitespace)
+            {
+                let trimmed = rest.trim();
+                return (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Resolves deterministic capsule bindings against `message`, `route`, and
+/// bounded workspace inspection, failing closed (`None`) on any ambiguity.
+fn resolve_host_deterministic_bindings(
+    capsule: &infra_skillcache::SkillCapsule,
+    route: &ResolvedCommand,
+    message: &str,
+    workspace: &Path,
+) -> Option<serde_json::Map<String, Value>> {
+    let fallback_name = capsule.skills.first().map(|s| s.name.as_str());
+    let route_args = extract_route_args(route, message, fallback_name);
+    let allowlist = &capsule.capabilities.allow_ignored;
+    extract_deterministic_bindings(capsule, message, route_args.as_deref(), |re_opt, tokens| {
+        let ws_canon = infra_core::fs::canonicalize(workspace).map_err(|_| ())?;
+        let check_rel = |candidate: &str| -> Option<String> {
+            let norm = normalize_safe_relative_path(candidate)?;
+            let first = norm.split('/').next()?;
+            if is_ignored_workspace_name_with(first, allowlist)
+                || first == ".harness-tmp"
+                || first == "target"
+            {
+                return None;
+            }
+            let full = ws_canon.join(&norm);
+            let meta = std::fs::symlink_metadata(&full).ok()?;
+            if infra_core::fs::linked(&meta) {
+                return None;
+            }
+            let canon = infra_core::fs::canonicalize(&full).ok()?;
+            if !canon.starts_with(&ws_canon) || canon == ws_canon {
+                return None;
+            }
+            if re_opt.is_some_and(|re| !re.is_match(&norm)) {
+                return None;
+            }
+            Some(norm)
+        };
+        let mut matched = Vec::new();
+        let mut seen = BTreeSet::new();
+        for token in tokens {
+            if let Some(norm) = check_rel(token)
+                && seen.insert(norm.clone())
+            {
+                matched.push(norm);
+            }
+        }
+        if !matched.is_empty() {
+            return Ok(matched);
+        }
+        let Some(re) = re_opt else {
+            return Ok(Vec::new());
+        };
+        let mut visited = 0usize;
+        let mut stack = vec![ws_canon.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut entries = std::fs::read_dir(&dir)
+                .map_err(|_| ())?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| ())?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                visited += 1;
+                if visited > BINDING_WORKSPACE_SCAN_LIMIT {
+                    return Err(());
+                }
+                let path = entry.path();
+                let name = entry.file_name();
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                if is_ignored_workspace_name_with(name_str, allowlist)
+                    || name_str == ".harness-tmp"
+                    || (dir == ws_canon && name_str == "target")
+                {
+                    continue;
+                }
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if infra_core::fs::linked(&meta) {
+                    continue;
+                }
+                let Ok(canon) = infra_core::fs::canonicalize(&path) else {
+                    continue;
+                };
+                if !canon.starts_with(&ws_canon) {
+                    continue;
+                }
+                let Ok(rel_path) = path.strip_prefix(&ws_canon) else {
+                    continue;
+                };
+                let rel_raw = rel_path.to_string_lossy();
+                let rel_slash = if cfg!(windows) {
+                    rel_raw.replace('\\', "/")
+                } else {
+                    rel_raw.into_owned()
+                };
+                if let Some(norm) = normalize_safe_relative_path(&rel_slash) {
+                    if re.is_match(&norm) && seen.insert(norm.clone()) {
+                        matched.push(norm);
+                    }
+                    if meta.is_dir() {
+                        stack.push(path);
+                    }
+                }
+            }
+        }
+        Ok(matched)
+    })
+}
+
+fn max_log_seq(path: &Path) -> u64 {
+    state::read_log_at(path, 0)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|ev| ev["seq"].as_u64())
+        .max()
+        .unwrap_or(0)
+}
+
+fn run_state_is_paused(state_dir: &Path, package_dir: &Path) -> bool {
+    let state_file = state_dir.join("plan-state.json");
+    let Ok(Some(run_state)) = state::RunState::load(&state_file) else {
+        return false;
+    };
+    let Ok(stored) = package::load(package_dir) else {
+        return false;
+    };
+    run_state.capsule_sha256 == stored.capsule_sha256
+        && run_state.position < stored.capsule.plan_len()
+}
+
 fn decide_for(
+    runtime: &Runtime,
+    session: &Value,
+    route: &ResolvedCommand,
+    message: &str,
+    workspace: &Path,
+    generation: Option<&str>,
+) -> Decision {
+    let session_state_root = session["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|sid| runtime.store.state.join("skillcache/sessions").join(sid));
+    let decision = decide_for_inner(runtime, session, route, message, workspace, generation);
+    if generation.is_some()
+        && let Decision::Miss { reason, .. } = &decision
+        && *reason != "unavailable"
+        && let Some(root) = &session_state_root
+        && root.exists()
+    {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    decision
+}
+
+fn decide_for_inner(
     runtime: &Runtime,
     session: &Value,
     route: &ResolvedCommand,
@@ -852,12 +1088,21 @@ fn decide_for(
         crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual);
     let bypass =
         crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Bypass);
-    if route.mode == "native" {
-        return miss(
-            "native_route",
-            "a native command goes to the CLI as typed, without Harness instructions",
-        );
-    }
+    let pin = settings::capsule_pin(session);
+    let native_slash_skill = if route.mode == "native" && route.requests.is_empty() && pin.is_none()
+    {
+        match resolve_native_slash_skill(workspace, message) {
+            Some(found) => Some(found),
+            None => {
+                return miss(
+                    "native_route",
+                    "a native command without a matching skill goes to the CLI as typed",
+                );
+            }
+        }
+    } else {
+        None
+    };
     let plan_only = session["mode"] != "edit";
     if !["claude", "codex", "cursor"].contains(&provider) {
         return miss(
@@ -871,17 +1116,12 @@ fn decide_for(
             "hybrid executor capsules run on Claude and Codex only",
         );
     }
-    if provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure")) {
-        return miss(
-            "codex_manual",
-            "Codex in Manual mode would ask before every step of the executor",
-        );
-    }
+    let codex_manual =
+        provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure"));
     if arm == Some("raw_trace") {
         return decide_raw_trace(runtime, session, route, workspace);
     }
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let pin = settings::capsule_pin(session);
     let (chosen, skill_path) = if let Some(pinned_id) = pin {
         if route.requests.len() > 1 {
             return miss("no_single_skill", "the message names more than one skill");
@@ -954,7 +1194,10 @@ fn decide_for(
         }
         let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
         (row, skill_path)
-    } else if route.requests.is_empty() && settings::tool_chain_enabled(&runtime.store, session) {
+    } else if route.requests.is_empty()
+        && native_slash_skill.is_none()
+        && settings::tool_chain_enabled(&runtime.store, session)
+    {
         match decide_toolchain_candidate(
             runtime, session, provider, arm, plan_only, workspace, message,
         ) {
@@ -962,27 +1205,42 @@ fn decide_for(
             Err(missed) => return missed,
         }
     } else {
-        if route.requests.len() != 1 {
-            return miss(
-                "no_single_skill",
-                if route.requests.is_empty() {
-                    "the message names no skill"
-                } else {
-                    "the message names more than one skill"
-                },
-            );
-        }
-        let request = &route.requests[0];
-        let Some(skill_path) = request["path"]
-            .as_str()
-            .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
-        else {
-            return miss(
-                "no_capsule",
-                "the routed skill is not a skill folder of this project or of your home",
-            );
-        };
-        let skill_name = request["name"].as_str().unwrap_or("");
+        let (skill_name_owned, skill_path): (String, String) =
+            if let Some((name, path)) = native_slash_skill.clone() {
+                (name, path)
+            } else {
+                if route.requests.len() != 1 {
+                    return miss(
+                        "no_single_skill",
+                        if route.requests.is_empty() {
+                            "the message names no skill"
+                        } else {
+                            "the message names more than one skill"
+                        },
+                    );
+                }
+                let request = &route.requests[0];
+                let Some(skill_path) = request["path"]
+                    .as_str()
+                    .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
+                else {
+                    if codex_manual {
+                        return miss(
+                            "codex_manual",
+                            "Codex in Manual mode would ask before every step of the executor",
+                        );
+                    }
+                    return miss(
+                        "no_capsule",
+                        "the routed skill is not a skill folder of this project or of your home",
+                    );
+                };
+                (
+                    request["name"].as_str().unwrap_or("").to_owned(),
+                    skill_path,
+                )
+            };
+        let skill_name = skill_name_owned.as_str();
         let skill_tree_sha = trace::skill_file(workspace, &skill_path)
             .and_then(|file| file.parent().map(Path::to_path_buf))
             .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
@@ -1076,6 +1334,12 @@ fn decide_for(
                     "Cursor runs textual capsules only; no active textual capsule exists for this skill",
                 );
             }
+            if codex_manual && (!route.requests.is_empty() || native_slash_skill.is_some()) {
+                return miss(
+                    "codex_manual",
+                    "Codex in Manual mode would ask before every step of the executor",
+                );
+            }
             return miss("no_capsule", "no qualified capsule exists for this skill");
         }
         let had_provider_eligible = !eligible.is_empty();
@@ -1156,7 +1420,7 @@ fn decide_for(
         skill_path.as_str()
     };
     let agent_only = arm == Some("skillcache_agent");
-    let text = if agent_only {
+    let mut text = if agent_only {
         prompt::render_agent_driven(&stored, skill_label)
     } else {
         block(&stored, skill_label)
@@ -1165,6 +1429,12 @@ fn decide_for(
     let codex = runtime.codex_executable();
     let eval_arm = arm.map(String::from);
     let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
+        if codex_manual {
+            return miss(
+                "codex_manual",
+                "Codex in Manual mode would ask before every step of the executor",
+            );
+        }
         // A written procedure is read, and a preview stages nothing.
         return Decision::Hit(Arc::new(Warm {
             capsule_id,
@@ -1179,31 +1449,110 @@ fn decide_for(
             engine,
             codex,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }));
     };
-    let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_read_only =
+        !stored.capsule.programs.is_empty() && stored.capsule.programs.iter().all(|p| p.read_only);
     let all_program_steps = stored
         .capsule
         .plan()
         .all(|step| matches!(step, Step::Program { .. }));
     let explicit_direct = session["skillcache"]["direct_dispatch"].as_bool() == Some(true);
-    let direct_dispatch = arm.is_none()
+    let mode_allows_direct =
+        plan_only || stored.capsule.kind != CapsuleKind::ToolChain || explicit_direct;
+    let sid_opt = session["id"].as_str().filter(|s| !s.is_empty());
+    let sid_key = sid_opt.unwrap_or("session");
+    let state_subdir = if sid_opt.is_some() && !capsule_id.is_empty() {
+        capsule_id.as_str()
+    } else {
+        generation
+    };
+    let session_root = runtime
+        .store
+        .state
+        .join("skillcache/sessions")
+        .join(sid_key);
+    let state_dir = session_root.join(state_subdir);
+
+    // Inspect whether a prior multi-turn paused RunState applies to this capsule.
+    let mut resolved_deterministic: Option<serde_json::Map<String, Value>> = None;
+    let mut resume_note: Option<String> = None;
+    let mut initial_seen = 0u64;
+    let mut initial_seen_changes = 0u64;
+    if sid_opt.is_some() {
+        if session_root.exists()
+            && let Ok(entries) = std::fs::read_dir(&session_root)
+        {
+            for entry in entries.flatten() {
+                if entry.file_name().to_str() != Some(state_subdir) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let state_file = state_dir.join("plan-state.json");
+        if let Ok(Some(existing)) = state::RunState::load(&state_file) {
+            let valid_pos = existing.capsule_sha256 == stored.capsule_sha256
+                && existing.position < stored.capsule.plan_len();
+            let candidate_bindings = if !stored.capsule.bindings.is_empty() {
+                resolved_deterministic =
+                    resolve_host_deterministic_bindings(&stored.capsule, route, message, workspace);
+                resolved_deterministic.as_ref()
+            } else {
+                None
+            };
+            let bindings_conflict = candidate_bindings.is_some_and(|new_map| {
+                new_map
+                    .iter()
+                    .any(|(k, v)| existing.bindings.get(k).is_some_and(|old| old != v))
+            });
+            if valid_pos && !bindings_conflict {
+                initial_seen = max_log_seq(&state_dir.join(state::LOG_FILE));
+                initial_seen_changes = max_log_seq(&state_dir.join(state::CHANGES_FILE));
+                resume_note = Some(format!(
+                    "\n\nPaused SkillCache run on disk: position {}/{} (awaiting {:?}). Call `skillcache-run status` or `skillcache-run continue` to resume it instead of restarting with `skillcache-run run`, or run `skillcache-run reset` before starting an unrelated request.",
+                    existing.position + 1,
+                    stored.capsule.plan_len(),
+                    existing.awaiting,
+                ));
+            } else {
+                let _ = std::fs::remove_dir_all(&state_dir);
+            }
+        }
+    }
+    let resuming = resume_note.is_some();
+    if let Some(note) = &resume_note {
+        text.push_str(note);
+    }
+
+    let can_try_direct = arm.is_none()
         && !agent_only
         && all_read_only
         && all_program_steps
-        && !stored.capsule.programs.is_empty()
-        && stored.capsule.bindings.is_empty()
-        && (plan_only || explicit_direct);
+        && !resuming
+        && mode_allows_direct;
+    let direct_bindings = if can_try_direct {
+        if stored.capsule.bindings.is_empty() {
+            Some(serde_json::Map::new())
+        } else {
+            resolved_deterministic.or_else(|| {
+                resolve_host_deterministic_bindings(&stored.capsule, route, message, workspace)
+            })
+        }
+    } else {
+        None
+    };
+    let direct_dispatch = direct_bindings.is_some();
+    if codex_manual && !direct_dispatch && !all_read_only {
+        return miss(
+            "codex_manual",
+            "Codex in Manual mode would ask before every step of the executor",
+        );
+    }
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
-        let state_dir = runtime
-            .store
-            .state
-            .join("skillcache/sessions")
-            .join(session["id"].as_str().unwrap_or("session"))
-            .join(generation);
         infra_core::fs::ensure_directory(&state_dir, true)?;
         Ok((bin, state_dir))
     })();
@@ -1241,8 +1590,9 @@ fn decide_for(
         engine,
         codex,
         direct_dispatch,
-        seen: AtomicU64::new(0),
-        seen_changes: AtomicU64::new(0),
+        direct_bindings,
+        seen: AtomicU64::new(initial_seen),
+        seen_changes: AtomicU64::new(initial_seen_changes),
     }))
 }
 
@@ -1617,17 +1967,44 @@ impl Warm {
                 "text": format!("SkillCache: {reason} The capsule is not used until it is requalified or compiled again."),
             }));
         }
-        if let Some(state_dir) = &self.state_dir {
+        let keep_paused = self
+            .state_dir
+            .as_deref()
+            .zip(self.package.as_deref())
+            .is_some_and(|(sd, pkg)| run_state_is_paused(sd, pkg));
+        if !keep_paused && let Some(state_dir) = &self.state_dir {
             let _ = std::fs::remove_dir_all(state_dir);
         }
     }
 
-    /// Removes temporary state when a warm turn failed or was cancelled before finishing.
+    /// Removes temporary state when a warm turn failed or was cancelled before finishing,
+    /// unless a mid-plan run state (`position < plan_len` after step 0) is paused cleanly.
     pub(crate) fn cleanup_abandoned(&self) {
-        if let Some(state_dir) = &self.state_dir {
+        let keep_paused = self
+            .state_dir
+            .as_deref()
+            .zip(self.package.as_deref())
+            .is_some_and(|(sd, pkg)| {
+                run_state_is_paused(sd, pkg)
+                    && state::RunState::load(&sd.join("plan-state.json"))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|rs| rs.position > 0)
+            });
+        if !keep_paused && let Some(state_dir) = &self.state_dir {
             let _ = std::fs::remove_dir_all(state_dir);
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PartialDirectFailure {
+    pub step_index: usize,
+    pub program: String,
+    pub instruction: String,
+    pub diagnostics: Value,
+    pub required_outputs: Vec<String>,
+    pub prefix_results: Value,
 }
 
 pub(crate) enum DirectDispatchOutcome {
@@ -1638,6 +2015,7 @@ pub(crate) enum DirectDispatchOutcome {
     Fallback {
         reason: String,
         program_failed: bool,
+        partial: Option<PartialDirectFailure>,
     },
 }
 
@@ -1763,6 +2141,54 @@ pub(crate) fn try_direct_execute(
     try_direct_execute_with(warm, workspace, generation, supplied_bindings, &[], None)
 }
 
+fn direct_fallback(reason: impl Into<String>, program_failed: bool) -> DirectDispatchOutcome {
+    DirectDispatchOutcome::Fallback {
+        reason: reason.into(),
+        program_failed,
+        partial: None,
+    }
+}
+
+fn partial_direct_failure(state_dir: &Path, answer: &Value) -> Option<PartialDirectFailure> {
+    let step_index = answer["step_index"]
+        .as_u64()
+        .and_then(|v| usize::try_from(v).ok())?;
+    if step_index == 0 {
+        return None;
+    }
+    let state_file = state_dir.join("plan-state.json");
+    let run_state = state::RunState::load(&state_file).ok().flatten()?;
+    if !matches!(
+        run_state.awaiting,
+        state::Awaiting::Outputs { step_index: s, .. } if s == step_index
+    ) {
+        return None;
+    }
+    let required_outputs = answer["required_outputs"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let prefix_results = if answer["results"].is_object() {
+        answer["results"].clone()
+    } else {
+        Value::Object(run_state.results)
+    };
+    Some(PartialDirectFailure {
+        step_index,
+        program: answer["program"].as_str().unwrap_or("").to_owned(),
+        instruction: answer["instruction"].as_str().unwrap_or("").to_owned(),
+        diagnostics: answer["diagnostics"].clone(),
+        required_outputs,
+        prefix_results,
+    })
+}
+
 /// Executes an eligible deterministic read-only capsule inside `infra_host::sandbox::gate`,
 /// passing optional protected boundary paths and cancellation signal.
 pub(crate) fn try_direct_execute_with(
@@ -1774,25 +2200,14 @@ pub(crate) fn try_direct_execute_with(
     cancel: Option<&Arc<AtomicBool>>,
 ) -> DirectDispatchOutcome {
     if !warm.direct_dispatch {
-        return DirectDispatchOutcome::Fallback {
-            reason: "not_eligible".into(),
-            program_failed: false,
-        };
+        return direct_fallback("not_eligible", false);
     }
     let (Some(package_dir), Some(state_dir)) = (&warm.package, &warm.state_dir) else {
-        return DirectDispatchOutcome::Fallback {
-            reason: "missing_stage".into(),
-            program_failed: false,
-        };
+        return direct_fallback("missing_stage", false);
     };
     let stored = match package::load(package_dir) {
         Ok(pkg) => pkg,
-        Err(err) => {
-            return DirectDispatchOutcome::Fallback {
-                reason: err.to_string(),
-                program_failed: false,
-            };
-        }
+        Err(err) => return direct_fallback(err.to_string(), false),
     };
     let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
     let all_program_steps = stored
@@ -1800,24 +2215,21 @@ pub(crate) fn try_direct_execute_with(
         .plan()
         .all(|step| matches!(step, Step::Program { .. }));
     if !all_read_only || !all_program_steps {
-        return DirectDispatchOutcome::Fallback {
-            reason: "requires_agent".into(),
-            program_failed: false,
-        };
+        return direct_fallback("requires_agent", false);
     }
-    if !stored.capsule.bindings.is_empty() && supplied_bindings.is_none() {
-        return DirectDispatchOutcome::Fallback {
-            reason: "needs_bindings".into(),
-            program_failed: false,
-        };
+    let effective_bindings = supplied_bindings.cloned().or_else(|| {
+        warm.direct_bindings
+            .as_ref()
+            .filter(|m| !m.is_empty())
+            .map(|m| Value::Object(m.clone()))
+    });
+    if !stored.capsule.bindings.is_empty() && effective_bindings.is_none() {
+        return direct_fallback("needs_bindings", false);
     }
     let default_cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.unwrap_or(&default_cancel);
     if cancel_flag.load(Ordering::Acquire) {
-        return DirectDispatchOutcome::Fallback {
-            reason: "cancelled".into(),
-            program_failed: false,
-        };
+        return direct_fallback("cancelled", false);
     }
     let sandbox_base = state_dir.parent().unwrap_or(state_dir);
     let sandbox_root = sandbox_base.join(format!("direct-sandbox-{}", crate::store::hexid()));
@@ -1827,10 +2239,7 @@ pub(crate) fn try_direct_execute_with(
     if let Err(err) = infra_core::fs::ensure_directory(&scratch, true)
         .and_then(|_| infra_core::fs::ensure_directory(state_dir, true))
     {
-        return DirectDispatchOutcome::Fallback {
-            reason: format!("sandbox_unavailable: {err}"),
-            program_failed: false,
-        };
+        return direct_fallback(format!("sandbox_unavailable: {err}"), false);
     }
     let engine = super::gates::Engine {
         path: warm.engine.clone(),
@@ -1848,21 +2257,11 @@ pub(crate) fn try_direct_execute_with(
             all_read_only,
         }) {
             Ok(parts) => parts,
-            Err(err) => {
-                return DirectDispatchOutcome::Fallback {
-                    reason: format!("sandbox_unavailable: {err}"),
-                    program_failed: false,
-                };
-            }
+            Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
         };
     let canon_scratch = match infra_core::fs::canonicalize(&scratch) {
         Ok(path) => path,
-        Err(err) => {
-            return DirectDispatchOutcome::Fallback {
-                reason: format!("sandbox_unavailable: {err}"),
-                program_failed: false,
-            };
-        }
+        Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
     };
     let state_file = canon_state.join("plan-state.json");
     let environment = super::gates::sandbox_environment(
@@ -1873,18 +2272,13 @@ pub(crate) fn try_direct_execute_with(
         Some(&state_file),
         generation,
     );
-    let (argv, stdin_bytes) = if let Some(bindings) = supplied_bindings {
+    let (argv, stdin_bytes) = if let Some(bindings) = &effective_bindings {
         match serde_json::to_vec(bindings) {
             Ok(bytes) => (
                 vec![executable, "skillcache".into(), "run".into(), "-".into()],
                 bytes,
             ),
-            Err(err) => {
-                return DirectDispatchOutcome::Fallback {
-                    reason: format!("invalid_bindings: {err}"),
-                    program_failed: false,
-                };
-            }
+            Err(err) => return direct_fallback(format!("invalid_bindings: {err}"), false),
         }
     } else {
         (
@@ -1908,18 +2302,10 @@ pub(crate) fn try_direct_execute_with(
         cancel_flag,
     ) {
         Ok(ran) => ran,
-        Err(err) => {
-            return DirectDispatchOutcome::Fallback {
-                reason: format!("sandbox_unavailable: {err}"),
-                program_failed: false,
-            };
-        }
+        Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
     };
     if let Some(stopped) = ran.stopped {
-        return DirectDispatchOutcome::Fallback {
-            reason: stopped.to_owned(),
-            program_failed: true,
-        };
+        return direct_fallback(stopped, true);
     }
     let parsed = infra_core::strict_json::parse(
         String::from_utf8_lossy(&ran.stdout).trim().as_bytes(),
@@ -1937,9 +2323,15 @@ pub(crate) fn try_direct_execute_with(
                 .map(str::to_owned)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| super::gates::detail(&ran.stderr));
+            let partial = if program_failed {
+                partial_direct_failure(&canon_state, &answer)
+            } else {
+                None
+            };
             return DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                partial,
             };
         }
         let code_desc = ran
@@ -1951,10 +2343,7 @@ pub(crate) fn try_direct_execute_with(
         } else {
             format!("sandbox_{code_desc}: {stderr_detail}")
         };
-        return DirectDispatchOutcome::Fallback {
-            reason,
-            program_failed: false,
-        };
+        return direct_fallback(reason, false);
     }
     match parsed {
         Ok(answer) => {
@@ -1973,21 +2362,27 @@ pub(crate) fn try_direct_execute_with(
             } else {
                 status.to_owned()
             };
+            let partial = if program_failed {
+                partial_direct_failure(&canon_state, &answer)
+            } else {
+                None
+            };
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                partial,
             }
         }
         Err(_) => {
             let stderr_detail = super::gates::detail(&ran.stderr);
-            DirectDispatchOutcome::Fallback {
-                reason: if stderr_detail.is_empty() {
-                    "invalid_sandbox_output".into()
+            direct_fallback(
+                if stderr_detail.is_empty() {
+                    "invalid_sandbox_output".to_owned()
                 } else {
                     format!("invalid_sandbox_output: {stderr_detail}")
                 },
-                program_failed: false,
-            }
+                false,
+            )
         }
     }
 }
@@ -2275,6 +2670,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         });
@@ -2408,6 +2804,7 @@ mod tests {
                 engine: None,
                 codex: None,
                 direct_dispatch: false,
+                direct_bindings: None,
                 seen: AtomicU64::new(0),
                 seen_changes: AtomicU64::new(0),
             }),
@@ -2450,6 +2847,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -2707,6 +3105,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3435,6 +3834,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3469,6 +3869,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3476,6 +3877,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "not_eligible");
                 assert!(!program_failed);
@@ -3526,6 +3928,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3533,6 +3936,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "requires_agent");
                 assert!(!program_failed);
@@ -3576,6 +3980,7 @@ mod tests {
             engine: Some(dir.path().join("nonexistent-engine")),
             codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3583,6 +3988,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert!(
                     reason.contains("sandbox_unavailable") || reason.contains("sandbox_"),
@@ -3616,6 +4022,7 @@ mod tests {
                 DirectDispatchOutcome::Fallback {
                     reason,
                     program_failed,
+                    ..
                 } => {
                     if program_failed {
                         // Mock engine ran under guardian + sandbox and surfaced program failure.
@@ -3683,6 +4090,7 @@ mod tests {
             engine: None,
             codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3690,6 +4098,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "needs_bindings");
                 assert!(!program_failed);
@@ -4192,5 +4601,267 @@ mod tests {
         assert!(unicode_tokens.contains("prüfen"), "{unicode_tokens:?}");
         assert!(unicode_tokens.contains("überprüfen"), "{unicode_tokens:?}");
         let _ = package::remove(&pkg_dir);
+    }
+
+    #[test]
+    fn p1_parameterized_edit_direct_codex_manual_native_route_and_multiturn_continuity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude/skills/audit")).unwrap();
+        std::fs::create_dir_all(ws.join("invoices")).unwrap();
+        std::fs::write(ws.join(".claude/skills/audit/SKILL.md"), "# Audit\n").unwrap();
+        std::fs::write(ws.join("invoices/q1.pdf"), "pdf").unwrap();
+        let skill_tree =
+            infra_skillcache::fingerprint::tree_sha256(&ws.join(".claude/skills/audit")).unwrap();
+
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store: store.clone(),
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let skill_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "skill",
+            "mu": {"name": "audit-ro", "description": "Audit one PDF deterministically"},
+            "source": {"skills": [{"name": "audit", "path": ".claude/skills/audit/SKILL.md", "tree_sha256": skill_tree.sha256}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [
+                {"name": "target_file", "type": "path", "origin": "workspace_path", "pattern": r"^invoices/.*\.pdf$"},
+                {"name": "year", "type": "number", "origin": "prompt_regex", "pattern": r"\b(20\d{2})\b", "default": 2026}
+            ],
+            "programs": [{
+                "id": "audit_pdf",
+                "entry": ["python3", "programs/audit/main.py"],
+                "inputs": ["target_file", "year"],
+                "outputs": [],
+                "check": ["python3", "programs/audit/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "audit_pdf"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/audit/main.py", b"print('{}')\n".to_vec());
+        let art_dir = root.join("caps/cap-audit");
+        let warm_dir = art_dir.join("warm");
+        let pkg_sha = package::write_warm(&warm_dir, &skill_cap, None, &files).unwrap();
+        let cap_sha = package::load(&warm_dir).unwrap().capsule_sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&["python3".into()]),
+        );
+
+        {
+            let db = store.connection().unwrap();
+            let skill_ref = json!({
+                "name": "audit",
+                "path": ".claude/skills/audit/SKILL.md",
+                "tree_sha256": skill_tree.sha256,
+                "taken_ns": skill_tree.taken_ns.to_string(),
+                "files": skill_tree.files.iter().map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                    "mtime_ns": f.mtime_ns.to_string(),
+                })).collect::<Vec<_>>(),
+            });
+            db::begin_capsule(
+                &db,
+                "cap-audit",
+                "cmp-audit",
+                &project_id,
+                "s0",
+                "g0",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-audit",
+                    mu_name: "audit-ro",
+                    mu_description: "Audit one PDF deterministically",
+                    form: "hybrid",
+                    capsule_sha256: &cap_sha,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({"skills": [skill_ref]}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "",
+                    artifact_dir: art_dir.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+        }
+
+        // 1. Parameterized all_read_only Skill capsule in `mode == "edit"` enables direct_dispatch!
+        let edit_session = json!({
+            "id": "sess-p1",
+            "project_id": project_id,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto"}
+        });
+        let native_route = ResolvedCommand {
+            mode: "native".into(),
+            text: "/audit invoices/q1.pdf".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let native_unknown = ResolvedCommand {
+            mode: "native".into(),
+            text: "/compact".into(),
+            requests: vec![],
+            notice: None,
+        };
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &edit_session,
+                &native_unknown,
+                "/compact",
+                &ws,
+                Some("g0")
+            )),
+            "native_route"
+        );
+        let hit_native = match decide_for(
+            &rt,
+            &edit_session,
+            &native_route,
+            "/audit invoices/q1.pdf",
+            &ws,
+            Some("g1"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected native /skill hit, got {}", reason(&other)),
+        };
+        assert!(hit_native.direct_dispatch);
+        assert_eq!(
+            hit_native
+                .direct_bindings
+                .as_ref()
+                .unwrap()
+                .get("target_file"),
+            Some(&json!("invoices/q1.pdf"))
+        );
+        assert_eq!(
+            hit_native.direct_bindings.as_ref().unwrap().get("year"),
+            Some(&json!(2026))
+        );
+
+        // 2. Ambiguous workspace_path fails closed (`direct_dispatch == false`, keeps warm hit).
+        std::fs::write(ws.join("invoices/q2.pdf"), "pdf2").unwrap();
+        let hit_ambig = match decide_for(
+            &rt,
+            &edit_session,
+            &native_route,
+            "/audit all invoices",
+            &ws,
+            Some("g2"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!(
+                "expected warm fallback hit on ambiguity, got {}",
+                reason(&other)
+            ),
+        };
+        assert!(!hit_ambig.direct_dispatch);
+        assert!(hit_ambig.direct_bindings.is_none());
+
+        // 3. Codex + Manual mode allows read-only / direct_dispatch warm hit!
+        let codex_manual = json!({
+            "id": "sess-codex-man",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "permissions": "manual",
+            "skillcache": {"mode": "auto"}
+        });
+        let text_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "$audit invoices/q1.pdf".into(),
+            requests: vec![json!({"name": "audit", "path": ".claude/skills/audit/SKILL.md"})],
+            notice: None,
+        };
+        let codex_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit invoices/q1.pdf 2025",
+            &ws,
+            Some("g3"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!(
+                "expected codex manual read-only hit, got {}",
+                reason(&other)
+            ),
+        };
+        assert!(codex_hit.direct_dispatch);
+
+        // 4. Multi-turn paused RunState preserved across Warm::finish, resumed in Turn 2, reset on conflict/unrelated turn.
+        let cont_dir = codex_hit.state_dir.clone().unwrap();
+        let mut paused = state::RunState::new(&cap_sha, "g3");
+        paused.position = 0; // < plan_len (1)
+        paused.awaiting = state::Awaiting::Outputs {
+            step_index: 0,
+            names: vec![],
+        };
+        paused
+            .bindings
+            .insert("target_file".into(), json!("invoices/q1.pdf"));
+        paused.save(&cont_dir.join("plan-state.json")).unwrap();
+        codex_hit.finish(&store, &codex_manual, "g3", &|_| Ok(()));
+        assert!(
+            cont_dir.join("plan-state.json").exists(),
+            "paused RunState position < plan_len must not be removed on finish"
+        );
+
+        let resumed_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit continue",
+            &ws,
+            Some("g4"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected resume hit, got {}", reason(&other)),
+        };
+        assert!(!resumed_hit.direct_dispatch);
+        assert!(resumed_hit.block.contains("Paused SkillCache run on disk"));
+
+        // Conflicting new target resets paused state cleanly!
+        let reset_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit invoices/q2.pdf",
+            &ws,
+            Some("g5"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected reset fresh hit, got {}", reason(&other)),
+        };
+        assert!(reset_hit.direct_dispatch);
+        assert!(!reset_hit.block.contains("Paused SkillCache run on disk"));
+
+        let _ = package::remove(&warm_dir);
     }
 }

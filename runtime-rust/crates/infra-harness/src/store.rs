@@ -319,6 +319,7 @@ impl SessionStore {
             ("omnigraph", "TEXT"),
             ("permissions", "TEXT"),
             ("skillcache", "TEXT"),
+            ("skillcache_thin_formatter", "INTEGER"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
@@ -881,11 +882,20 @@ impl SessionStore {
             "system_explain",
             "omnigraph",
             "skillcache",
+            "skillcache_thin_formatter",
         ] {
             if !options[key].is_null() {
+                let param = match &options[key] {
+                    Value::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
+                    Value::Number(n) if n.as_i64().is_some() => {
+                        rusqlite::types::Value::Integer(n.as_i64().unwrap_or_default())
+                    }
+                    Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+                    other => rusqlite::types::Value::Text(other.to_string()),
+                };
                 tx.execute(
                     &format!("UPDATE sessions SET {key}=?1 WHERE id=?2"),
-                    params![options[key].to_string(), sid],
+                    params![param, sid],
                 )?;
             }
         }
@@ -1155,6 +1165,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1232,6 +1243,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if map.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1290,6 +1302,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if fields.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err(HarnessError::invalid("Unknown follow-up option."));
@@ -1554,6 +1567,12 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
     for key in ["project_context", "agents_enabled"] {
         let value = result.get(key).and_then(Value::as_i64).unwrap_or(0) != 0;
         result.insert(key.into(), value.into());
+    }
+    if let Some(n) = result
+        .get("skillcache_thin_formatter")
+        .and_then(Value::as_i64)
+    {
+        result.insert("skillcache_thin_formatter".into(), Value::Bool(n != 0));
     }
     for key in [
         "fleet",

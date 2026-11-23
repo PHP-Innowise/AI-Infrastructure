@@ -28,9 +28,13 @@ files in this folder and return one structured answer.
 2. **Binding lifting.** Replace every value that belongs to this instance of
    the request — a path, a name, a number, a date — by a named binding. A value
    the request states before any tool runs is a `bindings` entry with
-   `"origin": "request"`. A value an instruction step works out is listed in
-   that step's `produces`. The content of a file is never a binding: bind its
-   path and let a program read it.
+   `"origin": "request"`, or for deterministic warm extraction without an LLM
+   use `"workspace_path"` (workspace-relative path matched from the request or
+   optional regex `pattern`), `"route_arg"` (command argument with optional
+   `pattern`), or `"prompt_regex"` (bounded capture regex `pattern`), plus an
+   optional typed `"default"`. A value an instruction step works out is listed
+   in that step's `produces`. The content of a file is never a binding: bind
+   its path and let a program read it.
 3. **Region fusion.** Merge each run of consecutive deterministic calls into
    one program. A program ends where judgment is needed — that part stays a
    written `instruction` step — or where the plan ends. Prefer few programs

@@ -687,6 +687,9 @@ pub fn build_with_skillcache(
         let input_digest =
             infra_core::query::sha256(serde_json::to_string(&native_input)?.as_bytes());
         add(&mut text, &mut ledger, "message", message);
+        if let Some(block) = skillcache {
+            add(&mut text, &mut ledger, "skillcache", block);
+        }
         let cached = prefix_memo()
             .lock()
             .ok()
@@ -752,6 +755,10 @@ pub fn build_with_skillcache(
             }
             (digest, same_bytes)
         };
+        if skillcache.is_some() && provider == "claude" && text.starts_with('/') {
+            text = format!("The user wrote:\n{text}");
+            ledger.push("instructions", "The user wrote:\n");
+        }
         let mut ledger_value = ledger.value();
         ledger_value["prefix_digest"] = prefix_digest.into();
         ledger_value["prefix_cache_hit"] = prefix_cache_hit.into();
@@ -1080,6 +1087,22 @@ mod tests {
         assert_eq!(n1.ledger["prefix_cache_hit"], false);
         assert_eq!(n2.ledger["prefix_cache_hit"], true);
         assert_eq!(n1.ledger["prefix_digest"], n2.ledger["prefix_digest"]);
+        assert!(!n1.text.starts_with("The user wrote:\n"));
+
+        // When a native /skill route gets a warm SkillCache hit, inject the
+        // skillcache block and guard leading `/` on Claude so the CLI runs the capsule.
+        let n_warm = build_with_skillcache(
+            &store,
+            &native_sess,
+            "/pdf invoices/",
+            &route_native,
+            "",
+            Some("\n\n[SkillCache capsule pdf]\n"),
+        )
+        .unwrap();
+        assert!(n_warm.text.starts_with("The user wrote:\n/pdf invoices/"));
+        assert!(n_warm.text.contains("[SkillCache capsule pdf]"));
+        assert!(n_warm.ledger["skillcache"].as_u64().unwrap_or(0) > 0);
 
         // Uncacheable context stamps (e.g. non-regular AGENTS.md) never collide or serve stale hits.
         std::fs::remove_file(&agents_path).unwrap();

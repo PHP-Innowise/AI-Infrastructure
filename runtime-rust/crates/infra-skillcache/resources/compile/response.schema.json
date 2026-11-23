@@ -58,8 +58,13 @@
             "properties": {
               "name": {"type": "string"},
               "type": {"type": "string", "enum": ["string", "path", "number", "boolean", "list"]},
-              "origin": {"type": "string", "enum": ["request"]},
-              "description": {"type": "string"}
+              "origin": {
+                "type": "string",
+                "enum": ["request", "workspace_path", "route_arg", "prompt_regex"]
+              },
+              "description": {"type": "string"},
+              "pattern": {"type": "string", "minLength": 1, "maxLength": 256},
+              "default": {}
             }
           }
         },

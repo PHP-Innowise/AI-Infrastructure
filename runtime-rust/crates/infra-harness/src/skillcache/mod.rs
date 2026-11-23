@@ -34,9 +34,12 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-/// Compilations and requalifications waiting or active across projects.
+/// Interactive compilations waiting or active across projects.
 /// Different projects run concurrently under separate project locks.
 const WAITING: usize = 8;
+/// Background IR requalifications run under their own semaphore so heavy
+/// background invalidations never starve interactive compilations.
+const REQUALIFY_WAITING: usize = 8;
 
 enum Work {
     Compile(Job),
@@ -49,7 +52,8 @@ enum Work {
 
 struct WorkQueue {
     self_ref: std::sync::Weak<WorkQueue>,
-    slots: Arc<Semaphore>,
+    compile_slots: Arc<Semaphore>,
+    requalify_slots: Arc<Semaphore>,
     project_locks: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     requalifying: Arc<Mutex<BTreeSet<String>>>,
 }
@@ -58,7 +62,8 @@ impl WorkQueue {
     fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             self_ref: weak.clone(),
-            slots: Arc::new(Semaphore::new(WAITING)),
+            compile_slots: Arc::new(Semaphore::new(WAITING)),
+            requalify_slots: Arc::new(Semaphore::new(REQUALIFY_WAITING)),
             project_locks: Mutex::new(BTreeMap::new()),
             requalifying: Arc::new(Mutex::new(BTreeSet::new())),
         })
@@ -78,11 +83,22 @@ impl WorkQueue {
         if runtime.cancel.load(Ordering::Acquire) {
             return Err(HarnessError::unavailable("SkillCache is stopping."));
         }
-        let permit = self.slots.clone().try_acquire_owned().map_err(|_| {
-            HarnessError::conflict(
-                "The SkillCache queue is full; try again when a compilation has finished.",
-            )
-        })?;
+        let permit = match &work {
+            Work::Compile(_) => self.compile_slots.clone().try_acquire_owned().map_err(|_| {
+                HarnessError::conflict(
+                    "The SkillCache compilation queue is full; try again when a compilation has finished.",
+                )
+            })?,
+            Work::Requalify { .. } => self
+                .requalify_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    HarnessError::conflict(
+                        "The SkillCache requalification queue is full; try again when a requalification has finished.",
+                    )
+                })?,
+        };
         let project_id = match &work {
             Work::Compile(job) => job.project_id.clone(),
             Work::Requalify { project_id, .. } => project_id.clone(),
@@ -675,10 +691,7 @@ fn drain_pending_requalifies(runtime: &Arc<Runtime>, wq: &Arc<WorkQueue>) {
     let Ok(db) = runtime.store.connection() else {
         return;
     };
-    let Ok(rows) = db::list_pending_requalify(&db, WAITING as i64) else {
-        return;
-    };
-    let Ok(pending_compiles) = db::pending_compiles(&db) else {
+    let Ok(rows) = db::list_pending_requalify(&db, REQUALIFY_WAITING as i64) else {
         return;
     };
     for row in rows {
@@ -698,7 +711,7 @@ fn drain_pending_requalifies(runtime: &Arc<Runtime>, wq: &Arc<WorkQueue>) {
             if pending.contains(&row.capsule_id) {
                 continue;
             }
-            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+            if pending.len() >= REQUALIFY_WAITING {
                 break;
             }
             pending.insert(row.capsule_id.clone());
@@ -900,15 +913,105 @@ impl SkillCacheDomain {
             })
             .into();
         detail["gates"] = db::gates(&db, capsule_id)?.into();
-        // What the Harness knows of the capsule's cost: what compiling it cost
-        // and how its warm turns went. What a reuse saves is not known here;
-        // a sealed evaluation measures it, and until then it is not a zero.
+        let compile_usd = compilation
+            .as_ref()
+            .and_then(|compile| compile["usage"]["cost_usd"].as_f64());
+        let source_gen = capsule["source_generation"].as_str().unwrap_or("");
+        let cold_usd: Option<f64> = if !source_gen.is_empty() {
+            let trace_cost =
+                db::trace(&db, source_gen)?.and_then(|t| t["usage"]["cost_usd"].as_f64());
+            if trace_cost.is_some() {
+                trace_cost
+            } else {
+                match db.query_row(
+                    "SELECT CAST(json_extract(usage, '$.cost_usd') AS REAL) FROM launches WHERE id=?1",
+                    [source_gen],
+                    |row| row.get::<_, Option<f64>>(0),
+                ) {
+                    Ok(cost) => cost,
+                    Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                        if msg.contains("no such table") =>
+                    {
+                        None
+                    }
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        } else {
+            None
+        };
+        let mut direct_dispatch_hits = 0i64;
+        let mut warm_costs = Vec::new();
+        let joined_sql = "SELECT r.outcome,
+                    CAST(json_extract(l.usage, '$.cost_usd') AS REAL),
+                    json_extract(l.settings, '$.skillcache.direct_dispatch')
+             FROM skillcache_runs r
+             LEFT JOIN launches l ON l.id = r.generation
+             WHERE r.capsule_id=?1
+               AND r.rowid>COALESCE((SELECT runs_reset_rowid FROM skillcache_capsules WHERE capsule_id=?1),0)";
+        match db.prepare(joined_sql) {
+            Ok(mut run_stmt) => {
+                let joined_runs = run_stmt.query_map([capsule_id], |row| {
+                    let outcome: String = row.get(0)?;
+                    let cost: Option<f64> = row.get(1)?;
+                    let is_direct_raw: Option<rusqlite::types::Value> = row.get(2)?;
+                    let is_direct = matches!(
+                        is_direct_raw,
+                        Some(rusqlite::types::Value::Integer(n)) if n != 0
+                    );
+                    Ok((outcome, cost, is_direct))
+                })?;
+                for item in joined_runs {
+                    let (outcome, cost, is_direct) = item?;
+                    if is_direct && outcome == "complete" {
+                        direct_dispatch_hits += 1;
+                    }
+                    if outcome == "complete"
+                        && let Some(c) = cost.or_else(|| is_direct.then_some(0.0))
+                    {
+                        warm_costs.push(c);
+                    }
+                }
+            }
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {}
+            Err(err) => return Err(err.into()),
+        }
+        let warm_avg_usd = if warm_costs.is_empty() {
+            None
+        } else {
+            let avg = warm_costs.iter().sum::<f64>() / warm_costs.len() as f64;
+            Some((avg * 1_000_000.0).round() / 1_000_000.0)
+        };
+        let saving_per_reuse_usd = match (cold_usd, warm_avg_usd) {
+            (Some(cold), Some(warm_avg)) => {
+                Some(((cold - warm_avg) * 1_000_000.0).round() / 1_000_000.0)
+            }
+            _ => None,
+        };
+        let breakeven_reuses = match (compile_usd, saving_per_reuse_usd) {
+            (Some(compile_cost), Some(_)) if compile_cost <= 0.0 => Some(0u64),
+            (Some(compile_cost), Some(saving)) if saving > 0.0 => {
+                let ratio = compile_cost / saving;
+                let adjusted = if (ratio - ratio.floor()).abs() < 1e-9 {
+                    ratio.floor()
+                } else {
+                    (ratio - 1e-9).ceil()
+                };
+                Some(adjusted.max(1.0) as u64)
+            }
+            _ => None,
+        };
         detail["amortization"] = json!({
-            "compile_usd": compilation.as_ref().and_then(|compile| compile["usage"]["cost_usd"].as_f64()),
+            "compile_usd": compile_usd,
+            "cold_usd": cold_usd,
+            "warm_avg_usd": warm_avg_usd,
             "warm_turns": runs,
             "warm_turns_total": total_runs,
-            "saving_per_reuse_usd": null,
-            "breakeven_reuses": null,
+            "direct_dispatch_hits": direct_dispatch_hits,
+            "deopt_count": deopts,
+            "saving_per_reuse_usd": saving_per_reuse_usd,
+            "breakeven_reuses": breakeven_reuses,
         });
         detail["compile"] = compilation.unwrap_or(Value::Null);
         detail["runs"] = json!({
@@ -996,8 +1099,6 @@ impl SkillCacheDomain {
         }
         let prior_status = capsule["status"].as_str().unwrap_or("active").to_owned();
         {
-            let db = self.runtime.store.connection()?;
-            let pending_compiles = db::pending_compiles(&db)?;
             let mut pending = self.requalifying.lock().map_err(|_| {
                 HarnessError::unavailable("SkillCache requalify state lock failed.")
             })?;
@@ -1006,9 +1107,9 @@ impl SkillCacheDomain {
                     "This capsule is already being requalified.",
                 ));
             }
-            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+            if pending.len() >= REQUALIFY_WAITING {
                 return Err(HarnessError::conflict(
-                    "The SkillCache queue is full; try again when a compilation has finished.",
+                    "The SkillCache requalification queue is full; try again when a requalification has finished.",
                 ));
             }
             pending.insert(capsule_id.into());
@@ -1159,6 +1260,55 @@ impl SkillCacheDomain {
             "retention": {"days": db::TRACE_DAYS, "per_session": db::TRACES_PER_SESSION},
         }))
     }
+    fn recompile(&self, project_id: &str, capsule_id: &str, body: &Value) -> Result<Value> {
+        if !body.is_null() && !crate::store::exact(body, &[], &["compiler"]) {
+            return Err(HarnessError::invalid(
+                "Recompile accepts an optional {\"compiler\": {\"provider\": \"claude\"|\"codex\", \"model\": ...}} body.",
+            ));
+        }
+        let compiler_override = (!body["compiler"].is_null())
+            .then(|| settings::validate_compiler(Some(&body["compiler"])))
+            .transpose()?;
+        let capsule = self.owned(project_id, capsule_id)?;
+        match enqueue_recompile_for_capsule_with(
+            &self.runtime,
+            &capsule,
+            compiler_override.as_ref(),
+        ) {
+            Ok(queued) => Ok(queued),
+            Err(error)
+                if error.status == 409
+                    && error.code == "conflict"
+                    && capsule_needs_fresh_trace(&capsule) =>
+            {
+                let reason = if capsule["needs_trace"] == true {
+                    "needs_trace"
+                } else {
+                    "template_needs_trace"
+                };
+                let skill_label = capsule["skill_name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("this skill");
+                Ok(json!({
+                    "status": 409,
+                    "code": "needs_trace",
+                    "needs_trace": true,
+                    "capsule_id": capsule_id,
+                    "project_id": project_id,
+                    "skill_name": capsule["skill_name"],
+                    "skill_path": capsule["skill_path"],
+                    "kind": capsule["kind"],
+                    "reason": reason,
+                    "error": error.message,
+                    "guidance": format!(
+                        "Run a cold observed turn using `{skill_label}` in this project to capture a fresh trace, then recompile."
+                    ),
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn project_path(store: &SessionStore, capsule: &Value) -> Result<PathBuf> {
@@ -1219,10 +1369,11 @@ impl Domain for SkillCacheDomain {
                 "skillcache.requalify" => {
                     self.requalify(parameter("project_id")?, parameter("capsule_id")?)?
                 }
-                "skillcache.recompile" => {
-                    let capsule = self.owned(parameter("project_id")?, parameter("capsule_id")?)?;
-                    enqueue_recompile_for_capsule(&self.runtime, &capsule)?
-                }
+                "skillcache.recompile" => self.recompile(
+                    parameter("project_id")?,
+                    parameter("capsule_id")?,
+                    &request["body"],
+                )?,
                 "skillcache.invalidate" => {
                     self.invalidate(parameter("project_id")?, parameter("capsule_id")?)?
                 }
@@ -1486,11 +1637,30 @@ pub(crate) fn maybe_enqueue_after_observe(
     }
 }
 
-/// Triggers recompilation from a fresh observed trace (when `needs_trace` is set)
+fn capsule_needs_fresh_trace(capsule: &Value) -> bool {
+    capsule["needs_trace"] == true
+        || capsule["source_session_id"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || capsule["source_generation"]
+            .as_str()
+            .is_none_or(str::is_empty)
+}
+
+/// Triggers recompilation from a fresh observed trace (when `needs_trace` is set
+/// or the capsule was admitted from a template without a project trace)
 /// or from the capsule's stored source trace otherwise.
 pub(crate) fn enqueue_recompile_for_capsule(
     runtime: &Arc<Runtime>,
     capsule: &Value,
+) -> Result<Value> {
+    enqueue_recompile_for_capsule_with(runtime, capsule, None)
+}
+
+pub(crate) fn enqueue_recompile_for_capsule_with(
+    runtime: &Arc<Runtime>,
+    capsule: &Value,
+    compiler_override: Option<&Value>,
 ) -> Result<Value> {
     let enqueuer = runtime
         .enqueuer
@@ -1499,12 +1669,20 @@ pub(crate) fn enqueue_recompile_for_capsule(
     let capsule_id = capsule["capsule_id"].as_str().unwrap_or("");
     let project_id = capsule["project_id"].as_str().unwrap_or("");
     let needs_trace = capsule["needs_trace"] == true;
-    let (session_id, generation) = if needs_trace {
+    let missing_source_trace = capsule["source_session_id"]
+        .as_str()
+        .is_none_or(str::is_empty)
+        || capsule["source_generation"]
+            .as_str()
+            .is_none_or(str::is_empty);
+    let (session_id, generation) = if needs_trace || missing_source_trace {
         let db = runtime.store.connection()?;
         let fresh = db::find_fresh_trace_after(&db, project_id, capsule)?.ok_or_else(|| {
-            HarnessError::conflict(
-                "This capsule deopted during a warm turn and needs a fresh observed trace before recompiling.",
-            )
+            HarnessError::conflict(if needs_trace {
+                "This capsule deopted during a warm turn and needs a fresh observed trace before recompiling."
+            } else {
+                "This template-admitted capsule has no project trace yet and needs a fresh observed trace before recompiling."
+            })
         })?;
         let sid = fresh["session_id"]
             .as_str()
@@ -1544,10 +1722,14 @@ pub(crate) fn enqueue_recompile_for_capsule(
     } else {
         None
     };
-    let queued =
-        enqueue_compile_for_trace(runtime, &session, &generation, None, eval_arm, &|job| {
-            enqueuer(runtime, job)
-        })?;
+    let queued = enqueue_compile_for_trace(
+        runtime,
+        &session,
+        &generation,
+        compiler_override,
+        eval_arm,
+        &|job| enqueuer(runtime, job),
+    )?;
     if needs_trace
         && !capsule_id.is_empty()
         && let Ok(db) = runtime.store.connection()
@@ -1645,16 +1827,15 @@ fn enqueue_compile_for_trace(
                 "This turn is already being compiled.",
             ));
         }
-        let pending_requalifies = runtime
-            .requalifying
-            .as_ref()
-            .and_then(|set| set.lock().ok())
-            .map_or(0i64, |set| set.len() as i64);
-        if db::pending_compiles(&db)? + pending_requalifies >= WAITING as i64 {
+        if db::pending_compiles(&db)? >= WAITING as i64 {
             return Err(HarnessError::conflict(
-                "The SkillCache queue is full; try again when a compilation has finished.",
+                "The SkillCache compilation queue is full; try again when a compilation has finished.",
             ));
         }
+        let compiler_provider = chosen["compiler"]["provider"]
+            .as_str()
+            .unwrap_or("claude")
+            .to_owned();
         db::begin_capsule(
             &db,
             &capsule_id,
@@ -1675,7 +1856,7 @@ fn enqueue_compile_for_trace(
             &project_id,
             session_id,
             generation,
-            "claude",
+            &compiler_provider,
             chosen["compiler"]["model"].as_str(),
             eval_arm.as_deref(),
         )?;
@@ -1687,6 +1868,10 @@ fn enqueue_compile_for_trace(
         generation: generation.into(),
         project_id: project_id.clone(),
         workspace,
+        provider: chosen["compiler"]["provider"]
+            .as_str()
+            .unwrap_or("claude")
+            .to_owned(),
         model: chosen["compiler"]["model"].as_str().map(String::from),
         eval_arm: eval_arm.clone(),
     };
@@ -2287,11 +2472,11 @@ mod tests {
             }
         }
 
-        // Saturate all WAITING = 8 queue slots so background requalify cannot grab a slot now.
+        // Saturate all background REQUALIFY_WAITING queue slots so background requalify cannot grab a slot now.
         let held = wq
-            .slots
+            .requalify_slots
             .clone()
-            .try_acquire_many_owned(WAITING as u32)
+            .try_acquire_many_owned(REQUALIFY_WAITING as u32)
             .unwrap();
         {
             let db = store.connection().unwrap();
@@ -2554,5 +2739,251 @@ mod tests {
         assert!(staleness_in_state(Some(&state), &capsule_row, &workspace).is_some());
 
         let _ = package::remove(&warm_dir);
+    }
+
+    #[tokio::test]
+    async fn work_queue_isolates_compile_and_requalify_semaphores_live_amortization_and_recompile()
+    {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("proj");
+        std::fs::create_dir_all(workspace.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(workspace.join(".claude/skills/pdf/SKILL.md"), "# PDF\n").unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude", "mode": "edit", "workflow": "native", "permissions": "auto"}),
+                "check pdf",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let domain =
+            SkillCacheDomain::new(store.clone(), providers, Arc::new(AtomicBool::new(false)));
+
+        // 1. Saturating requalify_slots MUST NOT block interactive compile_slots.
+        let held_req = domain
+            .work
+            .requalify_slots
+            .clone()
+            .try_acquire_many_owned(REQUALIFY_WAITING as u32)
+            .unwrap();
+        assert_eq!(domain.work.compile_slots.available_permits(), WAITING);
+        drop(held_req);
+
+        // 2. Template-admitted capsule without project trace returns structured 409 `needs_trace`.
+        {
+            let db = store.connection().unwrap();
+            let skill = json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)});
+            db::begin_capsule(&db, "cap-tpl", "", &project_id, "", "", &skill, None).unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-tpl",
+                    mu_name: "pdf-tpl",
+                    mu_description: "Template PDF",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no-tpl",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-tpl", "template", "").unwrap();
+        }
+        let tpl_res = domain
+            .execute(
+                "skillcache.recompile",
+                json!({"params": {"project_id": project_id, "capsule_id": "cap-tpl"}, "body": {}}),
+            )
+            .await
+            .unwrap();
+        let crate::services::Payload::Json(tpl_json) = tpl_res else {
+            panic!("expected JSON payload");
+        };
+        assert_eq!(tpl_json["status"], 409);
+        assert_eq!(tpl_json["code"], "needs_trace");
+        assert_eq!(tpl_json["needs_trace"], true);
+        assert_eq!(tpl_json["skill_name"], "pdf");
+
+        // 3. Adding a fresh observed trace lets template recompile succeed with Codex compiler override!
+        let g_fresh = "gen-fresh-codex";
+        {
+            let db = store.connection().unwrap();
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: g_fresh,
+                    session_id: &sid,
+                    provider: "claude",
+                    model: None,
+                    request: "check pdf",
+                    skill_refs: &json!([{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)}]),
+                    steps: &json!([{"kind": "tool", "name": "Read"}]),
+                    usage: &json!({"cost_usd": 0.12}),
+                    redaction: &json!({"admissible": true}),
+                },
+            )
+            .unwrap();
+        }
+        let queued_res = domain
+            .execute(
+                "skillcache.recompile",
+                json!({
+                    "params": {"project_id": project_id, "capsule_id": "cap-tpl"},
+                    "body": {"compiler": {"provider": "codex", "model": "gpt-5.3-codex"}}
+                }),
+            )
+            .await
+            .unwrap();
+        let crate::services::Payload::Json(queued_json) = queued_res else {
+            panic!("expected JSON payload");
+        };
+        assert_eq!(queued_json["status"], "queued");
+        let new_compile_id = queued_json["compile_id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            let comp = db::compile(&db, &new_compile_id).unwrap().unwrap();
+            assert_eq!(comp["provider"], "codex");
+            assert_eq!(comp["model"], "gpt-5.3-codex");
+        }
+
+        // 4. Live amortization joins skillcache_runs + launches + trace + compile costs.
+        {
+            let db = store.connection().unwrap();
+            let skill = json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)});
+            db::begin_capsule(
+                &db,
+                "cap-econ",
+                "cmp-econ",
+                &project_id,
+                &sid,
+                g_fresh,
+                &skill,
+                None,
+            )
+            .unwrap();
+            db::begin_compile(
+                &db,
+                "cmp-econ",
+                "cap-econ",
+                &project_id,
+                &sid,
+                g_fresh,
+                "claude",
+                None,
+                None,
+            )
+            .unwrap();
+            db::finish_compile(
+                &db,
+                "cmp-econ",
+                "completed",
+                1,
+                "ok",
+                &json!({"cost_usd": 0.20}),
+                &json!({}),
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-econ",
+                    mu_name: "pdf-econ",
+                    mu_description: "Econ PDF",
+                    form: "hybrid",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no-econ",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS launches(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    settings TEXT,
+                    context TEXT,
+                    receipt TEXT,
+                    usage TEXT
+                );",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO launches(id,session_id,kind,status,started_at,settings,usage) VALUES(?1,?2,'native','completed','2026-01-01T00:00:00Z',?3,?4)",
+                rusqlite::params![
+                    "g-direct-1",
+                    sid,
+                    json!({"skillcache": {"decision": "hit", "direct_dispatch": true}}).to_string(),
+                    json!({"cost_usd": 0.0}).to_string()
+                ],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO launches(id,session_id,kind,status,started_at,settings,usage) VALUES(?1,?2,'native','completed','2026-01-01T00:01:00Z',?3,?4)",
+                rusqlite::params![
+                    "g-warm-2",
+                    sid,
+                    json!({"skillcache": {"decision": "hit"}}).to_string(),
+                    json!({"cost_usd": 0.04}).to_string()
+                ],
+            )
+            .unwrap();
+            db::record_run(
+                &db,
+                &db::Run {
+                    generation: "g-direct-1",
+                    session_id: &sid,
+                    capsule_id: "cap-econ",
+                    provider: "claude",
+                    model: None,
+                    outcome: "complete",
+                    steps: &json!([]),
+                    deopts: 0,
+                },
+            )
+            .unwrap();
+            db::record_run(
+                &db,
+                &db::Run {
+                    generation: "g-warm-2",
+                    session_id: &sid,
+                    capsule_id: "cap-econ",
+                    provider: "claude",
+                    model: None,
+                    outcome: "complete",
+                    steps: &json!([]),
+                    deopts: 1,
+                },
+            )
+            .unwrap();
+        }
+        let got = domain.get(&project_id, "cap-econ").unwrap();
+        let amort = &got["amortization"];
+        assert_eq!(amort["compile_usd"], 0.20);
+        assert_eq!(amort["cold_usd"], 0.12);
+        assert_eq!(amort["warm_avg_usd"], 0.02);
+        assert_eq!(amort["direct_dispatch_hits"], 1);
+        assert_eq!(amort["deopt_count"], 1);
+        assert!((amort["saving_per_reuse_usd"].as_f64().unwrap() - 0.10).abs() < 1e-9);
+        assert_eq!(amort["breakeven_reuses"], 2);
     }
 }

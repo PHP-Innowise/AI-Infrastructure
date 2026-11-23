@@ -122,6 +122,7 @@ pub struct Job {
     pub generation: String,
     pub project_id: String,
     pub workspace: PathBuf,
+    pub provider: String,
     pub model: Option<String>,
     pub eval_arm: Option<String>,
 }
@@ -296,7 +297,22 @@ pub(crate) fn sample_paths(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
 /// Turns a read-only launch into a compiler's: a compiler runs nothing, so
 /// the shell, every editing tool, the network tools and the skill loader are
 /// off, whatever the permission mode would allow.
-fn compiler_arguments(argv: &mut Vec<String>, model: Option<&str>, resume_session: Option<&str>) {
+fn compiler_arguments(
+    argv: &mut Vec<String>,
+    provider: &str,
+    model: Option<&str>,
+    resume_session: Option<&str>,
+) {
+    if provider == "codex" {
+        if let Some(model) = model {
+            let insert_at = argv
+                .iter()
+                .position(|arg| arg == "exec")
+                .unwrap_or_else(|| argv.len().saturating_sub(1));
+            argv.splice(insert_at..insert_at, ["--model".into(), model.into()]);
+        }
+        return;
+    }
     match argv
         .iter()
         .position(|argument| argument == "--disallowedTools")
@@ -655,21 +671,31 @@ async fn ask_compiler(
     form: Form,
     resume_session: Option<&str>,
 ) -> Result<Answer> {
+    let provider = match job.provider.as_str() {
+        "" | "claude" => "claude",
+        "codex" => "codex",
+        other => {
+            return Err(HarnessError::invalid(format!(
+                "Unsupported SkillCache compiler provider: {other}."
+            )));
+        }
+    };
     let workspace = agentbox.join("agent");
-    let executable = runtime.providers.get("claude")?.executable.ok_or_else(|| {
-        HarnessError::unavailable(
-            "The Claude Code CLI is unavailable; it is the SkillCache compiler.",
-        )
+    let executable = runtime.providers.get(provider)?.executable.ok_or_else(|| {
+        HarnessError::unavailable(format!(
+            "The {provider} CLI is unavailable; it was selected as the SkillCache compiler."
+        ))
     })?;
     let schema = compile_rules::response_schema();
     let schema_path = agentbox.join("schema.json");
     save_json(&schema_path, &schema)?;
+    let use_resume = (provider == "claude").then_some(resume_session).flatten();
     let prompt = compiler_prompt(
         &workspace,
         round,
         form,
         job.eval_arm.as_deref(),
-        resume_session.is_some(),
+        use_resume.is_some(),
     );
     let adapter = EvidenceLaunchAdapter {
         workspace: workspace.clone(),
@@ -678,11 +704,11 @@ async fn ask_compiler(
         mut argv,
         environment,
         input,
-        readable,
+        mut readable,
         remove,
         ..
     } = infra_system::native::prepare_launch(
-        "claude",
+        provider,
         &executable,
         &workspace,
         &prompt,
@@ -693,7 +719,13 @@ async fn ask_compiler(
         &[],
         Some(&adapter),
     )?;
-    compiler_arguments(&mut argv, job.model.as_deref(), resume_session);
+    if provider == "codex" {
+        let canon_schema = infra_core::fs::canonicalize(&schema_path)?;
+        if !readable.contains(&canon_schema) {
+            readable.push(canon_schema);
+        }
+    }
+    compiler_arguments(&mut argv, provider, job.model.as_deref(), use_resume);
     let mut protected = vec![infra_core::fs::canonicalize(&job.workspace)?];
     if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(&job.workspace)
         && let Ok(common) = frame.common_dir()
@@ -742,17 +774,25 @@ async fn ask_compiler(
     if output.code != 0 {
         return Err(HarnessError::unavailable(format!(
             "The compiler did not finish: {}",
-            infra_system::native::worker_failure(&output.bytes, "claude")
+            infra_system::native::worker_failure(&output.bytes, provider)
                 .unwrap_or_else(|| format!("exit code {}", output.code))
         )));
     }
-    let mut components = crate::cost_observation::UsageComponents::new("claude");
+    let mut components = crate::cost_observation::UsageComponents::new(provider);
     let mut result_event: Option<Value> = None;
+    let mut codex_thread_id: Option<String> = None;
     for line in output.bytes.split(|byte| *byte == b'\n') {
         if let Ok(event) = serde_json::from_slice::<Value>(line) {
             components.observe("main", &event);
-            if event["type"] == "result" {
-                result_event = Some(event);
+            match event["type"].as_str() {
+                Some("result" | "turn.completed") => result_event = Some(event),
+                Some("thread.started") => {
+                    if let Some(tid) = event["thread_id"].as_str().filter(|s| !s.trim().is_empty())
+                    {
+                        codex_thread_id = Some(tid.to_owned());
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -761,14 +801,20 @@ async fn ask_compiler(
         .as_ref()
         .and_then(|event| event["session_id"].as_str())
         .filter(|sid| !sid.trim().is_empty())
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or(codex_thread_id);
     let usage = match result_event {
         Some(event) => json!({
             "input_tokens": event["usage"]["input_tokens"].as_u64().or(totals.input_tokens),
             "output_tokens": event["usage"]["output_tokens"].as_u64().or(totals.output_tokens),
-            "cache_read_input_tokens": event["usage"]["cache_read_input_tokens"].as_u64().or(totals.cache_read_input_tokens),
+            "cache_read_input_tokens": event["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .or_else(|| event["usage"]["cached_input_tokens"].as_u64())
+                .or(totals.cache_read_input_tokens),
             "cache_creation_input_tokens": event["usage"]["cache_creation_input_tokens"],
-            "cost_usd": event["total_cost_usd"],
+            "cost_usd": event["total_cost_usd"]
+                .as_f64()
+                .or_else(|| event["cost_usd"].as_f64()),
             "model_calls": event["num_turns"].as_u64().or(totals.model_calls),
             "seconds": output.seconds,
             "components": components.snapshot(),
@@ -786,14 +832,14 @@ async fn ask_compiler(
         None => Value::Null,
     };
     Ok(Answer {
-        value: infra_system::native::worker_result(&output.bytes, "claude")?,
+        value: infra_system::native::worker_result(&output.bytes, provider)?,
         usage,
         session_id,
     })
 }
 
 /// The sum of the rounds' reported usage; a field no round reported stays null.
-fn total_usage(rounds: &[Value]) -> Value {
+fn total_usage(rounds: &[Value], provider: &str) -> Value {
     let mut total = json!({});
     for field in [
         "input_tokens",
@@ -841,7 +887,8 @@ fn total_usage(rounds: &[Value]) -> Value {
                 });
             }
         }
-        total["components"] = combined.to_json(Some("claude"));
+        let provider_hint = (!provider.is_empty()).then_some(provider);
+        total["components"] = combined.to_json(provider_hint);
     }
     total["rounds_reported"] = rounds
         .iter()
@@ -1803,7 +1850,7 @@ pub async fn run(runtime: &Arc<Runtime>, job: &Job) {
             status,
             rounds,
             &text,
-            &total_usage(&usage),
+            &total_usage(&usage, &job.provider),
             &json!({"rounds": usage}),
         );
         if status != "completed" {
@@ -1938,6 +1985,7 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
             generation: generation.clone(),
             project_id: project_id.clone(),
             workspace: workspace.to_path_buf(),
+            provider: "claude".into(),
             model: None,
             eval_arm: capsule["eval_arm"].as_str().map(String::from),
         };
@@ -2267,6 +2315,7 @@ pub(crate) fn admit_textual_templates_sync(
             generation: String::new(),
             project_id: project_id.to_owned(),
             workspace: workspace.to_path_buf(),
+            provider: "claude".into(),
             model: None,
             eval_arm: None,
         };
@@ -2335,6 +2384,7 @@ pub async fn admit_template_for_project(
         generation: generation.to_string(),
         project_id,
         workspace,
+        provider: "claude".into(),
         model: None,
         eval_arm: None,
     };
@@ -2520,7 +2570,12 @@ mod tests {
         )
         .unwrap();
         let mut argv = prepared.argv;
-        compiler_arguments(&mut argv, Some("claude-fixture-model"), Some("sess-42"));
+        compiler_arguments(
+            &mut argv,
+            "claude",
+            Some("claude-fixture-model"),
+            Some("sess-42"),
+        );
         let resume_idx = argv.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(argv[resume_idx + 1], "sess-42");
         let after = |flag: &str| {
@@ -2555,11 +2610,14 @@ mod tests {
 
     #[test]
     fn usage_sums_what_was_reported_and_keeps_unknown_null() {
-        let total = total_usage(&[
-            json!({"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.5, "seconds": 3.0}),
-            Value::Null,
-            json!({"input_tokens": 50, "output_tokens": null, "cost_usd": 0.25, "seconds": 1.0}),
-        ]);
+        let total = total_usage(
+            &[
+                json!({"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.5, "seconds": 3.0}),
+                Value::Null,
+                json!({"input_tokens": 50, "output_tokens": null, "cost_usd": 0.25, "seconds": 1.0}),
+            ],
+            "claude",
+        );
         assert_eq!(total["input_tokens"], 150);
         assert_eq!(total["output_tokens"], 20);
         assert_eq!(total["cost_usd"], 0.75);
@@ -2924,5 +2982,44 @@ mod tests {
                 .path_hashes
                 .contains_key("data/invoices/batch1.json")
         );
+    }
+
+    #[test]
+    fn codex_compiler_prepares_read_only_output_schema_without_claude_only_flags() {
+        let root = crate::skillcache::test_support::scratch();
+        let schema = compile_rules::response_schema();
+        let schema_path = root.path().join("schema.json");
+        let prepared = infra_system::native::prepare_launch(
+            "codex",
+            Path::new("/usr/bin/codex"),
+            root.path(),
+            "compile",
+            &schema,
+            &schema_path,
+            "read-only",
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let mut argv = prepared.argv;
+        compiler_arguments(
+            &mut argv,
+            "codex",
+            Some("gpt-5.3-codex"),
+            Some("ignored-sess"),
+        );
+        assert!(!argv.iter().any(|a| a == "--disallowedTools"));
+        assert!(!argv.iter().any(|a| a == "--resume"));
+        assert!(argv.iter().any(|a| a == "--output-schema"));
+        let model_idx = argv.iter().position(|a| a == "--model").unwrap();
+        let exec_idx = argv.iter().position(|a| a == "exec").unwrap();
+        assert_eq!(argv[model_idx + 1], "gpt-5.3-codex");
+        assert!(model_idx < exec_idx);
+        let codex_total = total_usage(
+            &[json!({"components": {"input_tokens": 12, "output_tokens": 4, "model_calls": 1}})],
+            "codex",
+        );
+        assert!(codex_total["components"].is_object());
     }
 }

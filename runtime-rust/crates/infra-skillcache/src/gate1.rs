@@ -5,9 +5,10 @@
 //! see in one pass, each with a stable code, so one repair round can answer
 //! all of them. Gate 1T is the lighter check of the textual form.
 use crate::capsule::{
-    BINDING_BYTES, CapsuleKind, Examples, Form, SkillCapsule, Step, Violation, is_admitted_value,
-    is_relative_path,
+    BINDING_BYTES, BindingOrigin, BindingType, CapsuleKind, Examples, Form, SkillCapsule, Step,
+    Violation, is_admitted_value, is_relative_path,
 };
+use crate::compile_rules::{compile_bounded_binding_regex, value_within_binding_limit};
 use crate::package::Files;
 use serde::Serialize;
 use serde_json::Value;
@@ -1011,6 +1012,81 @@ fn check_secrets(label: &str, text: &str, violations: &mut Vec<Violation>) {
     }
 }
 
+fn check_bindings(capsule: &SkillCapsule, violations: &mut Vec<Violation>) {
+    for (index, binding) in capsule.bindings.iter().enumerate() {
+        let at = format!("bindings[{index}]");
+        match binding.origin {
+            BindingOrigin::Request => {
+                if binding.pattern.is_some() {
+                    violations.push(Violation::new(
+                        "binding_pattern_forbidden",
+                        format!("{at}.pattern"),
+                        "`pattern` is only valid for `workspace_path`, `route_arg`, or `prompt_regex` bindings.",
+                    ));
+                }
+            }
+            BindingOrigin::PromptRegex => match &binding.pattern {
+                Some(pattern) => {
+                    if let Err(err) = compile_bounded_binding_regex(pattern) {
+                        violations.push(Violation::new(
+                            "binding_pattern_invalid",
+                            format!("{at}.pattern"),
+                            err,
+                        ));
+                    }
+                }
+                None => violations.push(Violation::new(
+                    "binding_pattern_missing",
+                    format!("{at}.pattern"),
+                    "A `prompt_regex` binding requires a non-empty bounded `pattern`.",
+                )),
+            },
+            BindingOrigin::RouteArg => {
+                if let Some(pattern) = &binding.pattern
+                    && let Err(err) = compile_bounded_binding_regex(pattern)
+                {
+                    violations.push(Violation::new(
+                        "binding_pattern_invalid",
+                        format!("{at}.pattern"),
+                        err,
+                    ));
+                }
+            }
+            BindingOrigin::WorkspacePath => {
+                if !matches!(binding.kind, BindingType::Path | BindingType::String) {
+                    violations.push(Violation::new(
+                        "binding_type_mismatch",
+                        format!("{at}.type"),
+                        "A `workspace_path` binding must have type `path` or `string`.",
+                    ));
+                }
+                if let Some(pattern) = &binding.pattern
+                    && let Err(err) = compile_bounded_binding_regex(pattern)
+                {
+                    violations.push(Violation::new(
+                        "binding_pattern_invalid",
+                        format!("{at}.pattern"),
+                        err,
+                    ));
+                }
+            }
+        }
+        if let Some(default) = &binding.default {
+            if !value_within_binding_limit(binding.kind, default) {
+                violations.push(Violation::new(
+                    "binding_default_invalid",
+                    format!("{at}.default"),
+                    format!(
+                        "`default` must satisfy binding type `{}` within {BINDING_BYTES} bytes.",
+                        binding.kind.as_str()
+                    ),
+                ));
+            }
+            check_secrets(&format!("{at}.default"), &default.to_string(), violations);
+        }
+    }
+}
+
 /// The rules of a hybrid capsule that need only the capsule and its package:
 /// the plan's dataflow, the steps' sources and the programs' commands. An
 /// executor applies them again before it runs anything of a stored package.
@@ -1048,6 +1124,7 @@ pub fn structure(capsule: &SkillCapsule, files: &Files) -> Vec<Violation> {
             "A capsule has at least one step.",
         ));
     }
+    check_bindings(capsule, &mut violations);
     check_dataflow(capsule, &mut violations);
     check_sources(capsule, &mut violations);
     for (index, program) in capsule.programs.iter().enumerate() {
@@ -1395,5 +1472,110 @@ mod tests {
         ]));
         let good = check_portable_template(&bytes, &good_files, None);
         assert!(good.passed, "{:?}", good.violations);
+    }
+
+    #[test]
+    fn binding_origins_patterns_and_defaults_validate() {
+        let base = |bindings: Value| -> Value {
+            json!({
+                "schema_version": 1,
+                "form": "hybrid",
+                "mu": {"name": "param-ro", "description": "Parameterized read-only"},
+                "source": {"skills": [{"name": "s", "path": ".claude/skills/s/SKILL.md", "tree_sha256": "d".repeat(64)}]},
+                "capabilities": {"network": "none", "runtimes": ["python3"]},
+                "bindings": bindings,
+                "programs": [{
+                    "id": "scan",
+                    "entry": ["python3", "programs/scan/main.py"],
+                    "inputs": ["target"],
+                    "outputs": [],
+                    "check": ["python3", "programs/scan/main.py", "--check"],
+                    "timeout_seconds": 30,
+                    "read_only": true
+                }],
+                "steps": [{"kind": "program", "program": "scan"}],
+                "verification": []
+            })
+        };
+        let files = Files::from_response(&json!([
+            {"path": "programs/scan/main.py", "content": "print('ok')\n"}
+        ]));
+
+        // Good prompt_regex + default passes.
+        let ok = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "string",
+            "origin": "prompt_regex",
+            "pattern": r"\b(inv-\d+)\b",
+            "default": "inv-0"
+        }])))
+        .unwrap();
+        assert!(structure(&ok, &files).is_empty());
+
+        // Missing pattern on prompt_regex fails.
+        let missing = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "string",
+            "origin": "prompt_regex"
+        }])))
+        .unwrap();
+        assert!(
+            structure(&missing, &files)
+                .iter()
+                .any(|v| v.code == "binding_pattern_missing")
+        );
+
+        // Request origin with pattern forbidden.
+        let req_pat = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "string",
+            "origin": "request",
+            "pattern": "abc"
+        }])))
+        .unwrap();
+        assert!(
+            structure(&req_pat, &files)
+                .iter()
+                .any(|v| v.code == "binding_pattern_forbidden")
+        );
+
+        // Empty-matching pattern rejected.
+        let empty_re = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "string",
+            "origin": "prompt_regex",
+            "pattern": ".*"
+        }])))
+        .unwrap();
+        assert!(
+            structure(&empty_re, &files)
+                .iter()
+                .any(|v| v.code == "binding_pattern_invalid")
+        );
+
+        // workspace_path requires path/string type, and path default rejects traversal.
+        let bad_ws_type = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "number",
+            "origin": "workspace_path"
+        }])))
+        .unwrap();
+        assert!(
+            structure(&bad_ws_type, &files)
+                .iter()
+                .any(|v| v.code == "binding_type_mismatch")
+        );
+        let bad_def = SkillCapsule::from_value(&base(json!([{
+            "name": "target",
+            "type": "path",
+            "origin": "workspace_path",
+            "default": "../etc/passwd"
+        }])))
+        .unwrap();
+        assert!(
+            structure(&bad_def, &files)
+                .iter()
+                .any(|v| v.code == "binding_default_invalid")
+        );
     }
 }

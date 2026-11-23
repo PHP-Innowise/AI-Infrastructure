@@ -76,6 +76,48 @@ fn optional_skill(value: Option<&Value>) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
+/// Validates an optional `compiler` configuration object (`provider` `claude`|`codex`, optional `model`).
+pub fn validate_compiler(value: Option<&Value>) -> Result<Value> {
+    let invalid = || {
+        HarnessError::invalid(
+            "SkillCache compiler is {\"provider\": \"claude\"|\"codex\", \"model\": ...}.",
+        )
+    };
+    let Some(compiler) = value.filter(|v| !v.is_null()) else {
+        return Ok(json!({"provider": "claude", "model": null}));
+    };
+    let fields = compiler.as_object().ok_or_else(invalid)?;
+    if fields
+        .keys()
+        .any(|key| !["provider", "model"].contains(&key.as_str()))
+    {
+        return Err(invalid());
+    }
+    let provider = match fields.get("provider").filter(|v| !v.is_null()) {
+        None => "claude",
+        Some(v) => match v.as_str() {
+            Some("claude") => "claude",
+            Some("codex") => "codex",
+            _ => {
+                return Err(HarnessError::invalid(
+                    "The SkillCache compiler provider must be \"claude\" or \"codex\".",
+                ));
+            }
+        },
+    };
+    let model = match fields.get("model") {
+        None | Some(Value::Null) => Value::Null,
+        Some(model) => {
+            let model = crate::store::text(model, "compiler model", 120)?;
+            if model.starts_with('-') || model.chars().any(char::is_control) {
+                return Err(HarnessError::invalid("Invalid compiler model."));
+            }
+            model.into()
+        }
+    };
+    Ok(json!({"provider": provider, "model": model}))
+}
+
 /// The stored form of the option, or null for `off`.
 pub fn validate(value: &Value) -> Result<Value> {
     if value.is_null() {
@@ -83,7 +125,7 @@ pub fn validate(value: &Value) -> Result<Value> {
     }
     let invalid = || {
         HarnessError::invalid(
-            "SkillCache settings are {\"mode\": \"off\"|\"observe\"|\"auto\"|\"warm_only\", \"compiler\": {\"provider\": \"claude\", \"model\": ...}, \"compile_after_observe\": false}.",
+            "SkillCache settings are {\"mode\": \"off\"|\"observe\"|\"auto\"|\"warm_only\", \"compiler\": {\"provider\": \"claude\"|\"codex\", \"model\": ...}, \"compile_after_observe\": false}.",
         )
     };
     let settings = value.as_object().ok_or_else(invalid)?;
@@ -98,6 +140,7 @@ pub fn validate(value: &Value) -> Result<Value> {
             "capsule_id",
             "tool_chain",
             "direct_dispatch",
+            "thin_formatter",
             "edition",
         ]
         .contains(&key.as_str())
@@ -114,39 +157,7 @@ pub fn validate(value: &Value) -> Result<Value> {
         Some(Value::Bool(automatic)) => *automatic,
         Some(_) => return Err(invalid()),
     };
-    let compiler = match settings.get("compiler") {
-        None | Some(Value::Null) => json!({"provider": "claude", "model": null}),
-        Some(compiler) => {
-            let fields = compiler.as_object().ok_or_else(invalid)?;
-            if fields
-                .keys()
-                .any(|key| !["provider", "model"].contains(&key.as_str()))
-            {
-                return Err(invalid());
-            }
-            // Only Claude can be started with no shell at all, which is what
-            // "a compiler runs nothing" rests on.
-            if fields
-                .get("provider")
-                .is_some_and(|provider| provider != "claude")
-            {
-                return Err(HarnessError::invalid(
-                    "The SkillCache compiler is Claude: it is the only provider that can be started without a shell.",
-                ));
-            }
-            let model = match fields.get("model") {
-                None | Some(Value::Null) => Value::Null,
-                Some(model) => {
-                    let model = crate::store::text(model, "compiler model", 120)?;
-                    if model.starts_with('-') || model.chars().any(char::is_control) {
-                        return Err(HarnessError::invalid("Invalid compiler model."));
-                    }
-                    model.into()
-                }
-            };
-            json!({"provider": "claude", "model": model})
-        }
-    };
+    let compiler = validate_compiler(settings.get("compiler"))?;
     let skill = optional_skill(settings.get("skill"))?;
     let eval_arm = match settings.get("eval_arm") {
         None | Some(Value::Null) => None,
@@ -168,6 +179,15 @@ pub fn validate(value: &Value) -> Result<Value> {
         None | Some(Value::Null) => false,
         Some(Value::Bool(enabled)) => *enabled,
         Some(_) => return Err(invalid()),
+    };
+    let thin_formatter = match settings.get("thin_formatter") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(enabled)) => Some(*enabled),
+        Some(_) => {
+            return Err(HarnessError::invalid(
+                "`skillcache.thin_formatter` must be true, false, or null.",
+            ));
+        }
     };
     let edition = match settings.get("edition") {
         None | Some(Value::Null) => None,
@@ -201,6 +221,9 @@ pub fn validate(value: &Value) -> Result<Value> {
     }
     if direct_dispatch {
         stored["direct_dispatch"] = true.into();
+    }
+    if let Some(enabled) = thin_formatter {
+        stored["thin_formatter"] = enabled.into();
     }
     if let Some(edition) = edition {
         stored["edition"] = edition.into();
@@ -242,6 +265,14 @@ pub fn capsule_pin(session: &Value) -> Option<&str> {
     session["skillcache"]["capsule_id"]
         .as_str()
         .filter(|id| !id.is_empty())
+}
+/// Explicit `thin_formatter` preference (`Some(true)` forces formatter,
+/// `Some(false)` skips it, `None` auto-selects on non-trivial direct responses).
+pub fn thin_formatter(session: &Value) -> Option<bool> {
+    session
+        .get("skillcache_thin_formatter")
+        .and_then(Value::as_bool)
+        .or_else(|| session["skillcache"]["thin_formatter"].as_bool())
 }
 pub fn eval_enabled(store: &crate::store::SessionStore) -> bool {
     store
@@ -331,12 +362,26 @@ mod tests {
             json!({"mode": "always"}),
             json!({"mode": "auto", "extra": 1}),
             json!({"mode": "auto", "compile_after_observe": "yes"}),
-            json!({"mode": "auto", "compiler": {"provider": "codex"}}),
+            json!({"mode": "auto", "thin_formatter": "yes"}),
+            json!({"mode": "auto", "compiler": {"provider": "cursor"}}),
             json!({"mode": "auto", "compiler": {"provider": "claude", "effort": "high"}}),
             json!({"mode": "auto", "compiler": {"model": "--dangerous"}}),
         ] {
             assert!(validate(&value).is_err(), "{value}");
         }
+        assert_eq!(
+            validate(&json!({"mode": "auto", "compiler": {"provider": "codex", "model": "gpt-5.3-codex"}})).unwrap()["compiler"],
+            json!({"provider": "codex", "model": "gpt-5.3-codex"})
+        );
+        let with_tf = validate(&json!({"mode": "auto", "thin_formatter": false})).unwrap();
+        assert_eq!(with_tf["thin_formatter"], false);
+        assert_eq!(thin_formatter(&json!({"skillcache": with_tf})), Some(false));
+        assert_eq!(
+            thin_formatter(
+                &json!({"skillcache_thin_formatter": true, "skillcache": {"thin_formatter": false}})
+            ),
+            Some(true)
+        );
     }
 
     #[test]
