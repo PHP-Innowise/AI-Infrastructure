@@ -563,7 +563,9 @@ pub(super) fn extract_arch_overlay(graph: &Value) -> ArchOverlayIndex {
             let from = str_field(v, &["from"]);
             let to = str_field(v, &["to"]);
             let msg = str_field(v, &["message"]);
-            if !from.is_empty() {
+            let from_is_file = !from.is_empty()
+                && (kind != "cycle_budget" || from.contains('/') || from.contains('.'));
+            if from_is_file {
                 *overlay.violations_by_file.entry(from.clone()).or_default() += 1;
                 if !msg.is_empty() {
                     overlay
@@ -572,11 +574,9 @@ pub(super) fn extract_arch_overlay(graph: &Value) -> ArchOverlayIndex {
                         .or_default()
                         .push(msg.clone());
                 }
-                if kind == "cycle" {
-                    overlay.cycle_files.insert(from.clone());
-                }
             }
-            if !to.is_empty() && to != from {
+            let is_edge_file_viol = matches!(kind.as_str(), "layer" | "package");
+            if is_edge_file_viol && !to.is_empty() && to != from {
                 *overlay.violations_by_file.entry(to.clone()).or_default() += 1;
                 if !msg.is_empty() {
                     overlay
@@ -585,11 +585,8 @@ pub(super) fn extract_arch_overlay(graph: &Value) -> ArchOverlayIndex {
                         .or_default()
                         .push(msg);
                 }
-                if kind == "cycle" {
-                    overlay.cycle_files.insert(to.clone());
-                }
             }
-            if !from.is_empty() && !to.is_empty() {
+            if is_edge_file_viol && !from.is_empty() && !to.is_empty() {
                 overlay.violated_pairs.insert((from, to));
             }
         }

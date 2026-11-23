@@ -1129,10 +1129,11 @@ pub(super) fn build_arch_inspector_html(graph: &V, selected_id: &str) -> String 
     }
     let mut viol_list = Vec::new();
     for v in m::array(&graph["architecture_violations"]) {
+        let kind = first_omni_field(&v, &["kind"]);
         let from = first_omni_field(&v, &["from"]);
         let to = first_omni_field(&v, &["to"]);
-        if target_files.contains(&from) || target_files.contains(&to) {
-            let kind = first_omni_field(&v, &["kind"]);
+        let to_is_file = matches!(kind.as_str(), "layer" | "package");
+        if target_files.contains(&from) || (to_is_file && target_files.contains(&to)) {
             let msg = first_omni_field(&v, &["message"]);
             viol_list.push(format!(
                 "<li data-violation-kind=\"{}\"><strong>{}:</strong> {} ({} → {})</li>",
@@ -1350,6 +1351,11 @@ pub(super) fn build_omni_dense_scene_meta(
     let resolve_alias =
         |raw: &str| -> String { aliases.get(raw).cloned().unwrap_or_else(|| raw.to_owned()) };
 
+    let known_file_set: HashSet<String> = node_info
+        .values()
+        .filter(|info| !info.file_path.is_empty())
+        .map(|info| info.file_path.clone())
+        .collect();
     let mut viol_counts: HashMap<String, usize> = HashMap::new();
     let mut cycle_files: HashSet<String> = HashSet::new();
     let mut violated_pairs: HashSet<(String, String)> = HashSet::new();
@@ -1357,19 +1363,16 @@ pub(super) fn build_omni_dense_scene_meta(
         let kind = first_omni_field(&v, &["kind"]);
         let from = first_omni_field(&v, &["from"]);
         let to = first_omni_field(&v, &["to"]);
-        if !from.is_empty() {
+        let from_is_file =
+            !from.is_empty() && (kind != "cycle_budget" || known_file_set.contains(&from));
+        if from_is_file {
             *viol_counts.entry(from.clone()).or_default() += 1;
-            if kind == "cycle" {
-                cycle_files.insert(from.clone());
-            }
         }
-        if !to.is_empty() && to != from {
+        let is_edge_file_viol = matches!(kind.as_str(), "layer" | "package");
+        if is_edge_file_viol && !to.is_empty() && to != from {
             *viol_counts.entry(to.clone()).or_default() += 1;
-            if kind == "cycle" {
-                cycle_files.insert(to.clone());
-            }
         }
-        if !from.is_empty() && !to.is_empty() {
+        if is_edge_file_viol && !from.is_empty() && !to.is_empty() {
             violated_pairs.insert((from, to));
         }
     }

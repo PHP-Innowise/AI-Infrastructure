@@ -1652,6 +1652,21 @@ fn constellation_surfaces_ir_edges_semantics_violations_and_blast_markers() {
                 "from": "src/controller/OrderController.php",
                 "to": "src/db/OrderRepo.php",
                 "message": "Layer Controller forbids DB"
+            },
+            {
+                "kind": "semantic",
+                "rule_id": "controller",
+                "from": "src/controller/OrderController.php",
+                "to": "table:orders",
+                "relation": "writes_table",
+                "message": "Controller forbids writes_table"
+            },
+            {
+                "kind": "cycle_budget",
+                "rule_id": "db",
+                "from": "db",
+                "to": "src/db/CycleHelper.php <-> src/db/OrderRepo.php",
+                "message": "Layer DB participates in 1 dependency cycle (max_cycles budget: 0)."
             }
         ],
         "blast_markers": [
@@ -1743,11 +1758,11 @@ fn constellation_surfaces_ir_edges_semantics_violations_and_blast_markers() {
         &node_index_by_id,
     );
     let ctrl_idx = node_index_by_id["src/controller/OrderController.php"];
-    assert_eq!(meta.nodes[&ctrl_idx].blast_tag, "1 viol");
-    assert_eq!(meta.nodes[&ctrl_idx].badge_text, "!1 · 4f");
+    assert_eq!(meta.nodes[&ctrl_idx].blast_tag, "2 viol");
+    assert_eq!(meta.nodes[&ctrl_idx].badge_text, "!2 · 4f");
     assert_eq!(
         meta.nodes[&ctrl_idx].explain_payload["violation_count"],
-        json!(1)
+        json!(2)
     );
     assert_eq!(
         meta.nodes[&ctrl_idx].explain_payload["blast_files"],
@@ -1765,6 +1780,11 @@ fn constellation_surfaces_ir_edges_semantics_violations_and_blast_markers() {
     let insp =
         constellation_view::build_arch_inspector_html(&graph, "src/controller/OrderController.php");
     assert!(insp.contains("Layer Controller forbids DB"), "{insp}");
+    assert!(insp.contains("Controller forbids writes_table"), "{insp}");
     assert!(insp.contains("writes_table"), "{insp}");
     assert!(insp.contains("4 files, 2 tests"), "{insp}");
+    assert!(
+        constellation_view::build_arch_inspector_html(&graph, "table:orders").is_empty(),
+        "non-file semantic target must not falsely match v.to file violation inspector"
+    );
 }

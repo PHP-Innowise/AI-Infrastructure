@@ -222,23 +222,27 @@ fn collect_code_graph_overlay(
     };
 
     let mut viol_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut cycle_files: BTreeSet<String> = BTreeSet::new();
+    let idx_file_set: BTreeSet<&str> = idx.files().iter().map(String::as_str).collect();
+    let cycle_files: BTreeSet<String> = idx
+        .scc_groups(true)
+        .into_iter()
+        .flatten()
+        .filter(|p| idx_file_set.contains(p.as_str()))
+        .collect();
     let mut violation_files: BTreeSet<String> = BTreeSet::new();
     if let Ok(Some(rules)) = crate::graph_map::layer_rules::Rules::read(root) {
         for v in idx.architecture_violations("", true, &rules) {
-            if !v.from.is_empty() {
+            if !v.from.is_empty() && idx_file_set.contains(v.from.as_str()) {
                 *viol_counts.entry(v.from.clone()).or_insert(0) += 1;
                 violation_files.insert(v.from.clone());
-                if v.kind == "cycle" {
-                    cycle_files.insert(v.from.clone());
-                }
             }
-            if !v.to.is_empty() && v.to != v.from {
+            if matches!(v.kind.as_str(), "layer" | "package")
+                && !v.to.is_empty()
+                && v.to != v.from
+                && idx_file_set.contains(v.to.as_str())
+            {
                 *viol_counts.entry(v.to.clone()).or_insert(0) += 1;
                 violation_files.insert(v.to.clone());
-                if v.kind == "cycle" {
-                    cycle_files.insert(v.to.clone());
-                }
             }
             let rule_id_str = v.rule_id.as_deref().unwrap_or("");
             if matches_optional_query(
@@ -254,7 +258,11 @@ fn collect_code_graph_overlay(
 
     let mut blast_targets: Vec<String> = Vec::new();
     let mut seen_targets: BTreeSet<String> = BTreeSet::new();
-    for p in kept_files.iter().chain(violation_files.iter()) {
+    for p in kept_files
+        .iter()
+        .chain(violation_files.iter())
+        .chain(cycle_files.iter())
+    {
         if matches_optional_query(q_filter, &[p]) && seen_targets.insert(p.clone()) {
             blast_targets.push(p.clone());
         }

@@ -7632,8 +7632,16 @@ async fn graph_view_overlays_ir_edges_semantics_violations_and_blast_markers() {
         proj_root.join(".harness-architecture.json"),
         serde_json::to_string_pretty(&json!({
             "version": 1,
+            "max_cycles": 0,
             "layers": [
-                { "id": "controller", "name": "Controller", "paths": ["src/controller"], "allows": [], "forbids": ["db"] },
+                {
+                    "id": "controller",
+                    "name": "Controller",
+                    "paths": ["src/controller"],
+                    "allows": [],
+                    "forbids": ["db"],
+                    "forbids_semantic": ["writes_table"]
+                },
                 { "id": "db", "name": "Database", "paths": ["src/db"], "allows": [] }
             ]
         }))
@@ -7641,8 +7649,13 @@ async fn graph_view_overlays_ir_edges_semantics_violations_and_blast_markers() {
     )
     .unwrap();
     std::fs::write(
+        proj_root.join("src/db/CycleHelper.php"),
+        "<?php\nnamespace App\\Db;\nclass CycleHelper {\n    public static function ping(): void {\n        OrderRepo::save();\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
         proj_root.join("src/db/OrderRepo.php"),
-        "<?php\nnamespace App\\Db;\nclass OrderRepo {\n    public static function save(): void {}\n}\n",
+        "<?php\nnamespace App\\Db;\nclass OrderRepo {\n    public static function save(): void {\n        CycleHelper::ping();\n    }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -7712,14 +7725,45 @@ async fn graph_view_overlays_ir_edges_semantics_violations_and_blast_markers() {
         }),
         "expected layer architecture violation: {violations:?}"
     );
+    assert!(
+        violations.iter().any(|v| {
+            v["kind"] == "semantic"
+                && v["from"] == "src/controller/OrderController.php"
+                && v["to"] == "table:orders"
+        }),
+        "expected semantic architecture violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v["kind"] == "cycle_budget"),
+        "expected cycle_budget architecture violation: {violations:?}"
+    );
     let blast_markers = view["blast_markers"].as_array().unwrap();
     assert!(
         blast_markers.iter().any(|m| {
             m["path"] == "src/controller/OrderController.php"
-                && m["violation_count"].as_u64().unwrap_or(0) >= 1
+                && m["violation_count"].as_u64().unwrap_or(0) >= 2
                 && m["risk"] == "high"
         }),
         "expected high-risk blast marker on violating file: {blast_markers:?}"
+    );
+    assert!(
+        blast_markers
+            .iter()
+            .any(|m| m["path"] == "src/db/OrderRepo.php" && m["in_cycle"] == json!(true)),
+        "expected in_cycle=true from idx.scc_groups on OrderRepo.php: {blast_markers:?}"
+    );
+    assert!(
+        blast_markers
+            .iter()
+            .any(|m| m["path"] == "src/db/CycleHelper.php" && m["in_cycle"] == json!(true)),
+        "expected in_cycle=true from idx.scc_groups on CycleHelper.php: {blast_markers:?}"
+    );
+    assert!(
+        !blast_markers.iter().any(|m| {
+            let p = m["path"].as_str().unwrap_or("");
+            p == "table:orders" || p.contains("<->")
+        }),
+        "semantic targets and cycle summary strings must not enter blast_markers: {blast_markers:?}"
     );
     assert_eq!(view["telemetry"]["ir_edge_count"], ir_edges.len());
     assert_eq!(view["telemetry"]["ir_semantic_edge_count"], sem_edges.len());

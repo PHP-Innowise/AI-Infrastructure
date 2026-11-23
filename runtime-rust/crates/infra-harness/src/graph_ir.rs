@@ -293,7 +293,7 @@ impl GraphIrStore {
     }
 
     fn open_verified(db_path: &Path) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(db_path)?;
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -406,17 +406,48 @@ impl GraphIrStore {
             "INTEGER NOT NULL DEFAULT 30000",
         )?;
         conn.execute(
-            "INSERT OR REPLACE INTO ir_meta(key, value) VALUES (?1, ?2)",
-            params!["schema_version", SCHEMA_VERSION],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO ir_meta(key, value) VALUES (?1, ?2)",
-            params!["backend", NATIVE_IR_TOOL],
-        )?;
-        conn.execute(
             "INSERT OR IGNORE INTO ir_meta(key, value) VALUES ('write_epoch', '0')",
             [],
         )?;
+        {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let prev_schema_num: u32 = tx
+                .query_row(
+                    "SELECT value FROM ir_meta WHERE key = 'schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            if prev_schema_num < 3 {
+                // Force full backfill when upgrading from pre-v3 schema so `ir_file_extractions`
+                // and `ir_symbol_refs` are never trusted in a partially indexed state.
+                let has_legacy_files: bool = tx
+                    .query_row("SELECT EXISTS(SELECT 1 FROM ir_files LIMIT 1)", [], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+                    .unwrap_or(false);
+                if has_legacy_files {
+                    tx.execute_batch(
+                        "DELETE FROM ir_files;
+                         DELETE FROM ir_symbols;
+                         DELETE FROM ir_edges;
+                         DELETE FROM ir_semantic_edges;
+                         DELETE FROM ir_reexports;
+                         DELETE FROM ir_unresolved_imports;
+                         DELETE FROM ir_file_extractions;
+                         DELETE FROM ir_symbol_refs;
+                         DELETE FROM ir_summary;",
+                    )?;
+                    let _ = bump_meta_write_epoch(&tx)?;
+                }
+            }
+            upsert_meta(&tx, "schema_version", SCHEMA_VERSION)?;
+            upsert_meta(&tx, "backend", NATIVE_IR_TOOL)?;
+            tx.commit()?;
+        }
         let epoch = read_meta_write_epoch(&conn);
         Ok(Self {
             db_path: db_path.to_path_buf(),
@@ -575,14 +606,10 @@ impl GraphIrStore {
         res
     }
 
-    /// Returns the monotonic persisted SQLite write epoch (queried live on read-only stores).
+    /// Returns the monotonic persisted SQLite write epoch (queried live against `ir_meta`).
     pub(crate) fn current_write_epoch(&self) -> u64 {
-        if self.read_only {
-            return self
-                .with_read_conn(|conn| Ok(read_meta_write_epoch(conn)))
-                .unwrap_or_else(|_| self.write_epoch.load(Ordering::Acquire));
-        }
-        self.write_epoch.load(Ordering::Acquire)
+        self.with_read_conn(|conn| Ok(read_meta_write_epoch(conn)))
+            .unwrap_or_else(|_| self.write_epoch.load(Ordering::Acquire))
     }
 
     /// Returns whether `<state>/graphs/<project>/graph_ir.sqlite3` already exists on disk.
@@ -659,7 +686,8 @@ impl GraphIrStore {
                     |r| r.get(0),
                 )
                 .optional()?;
-            let epoch = self.write_epoch.load(Ordering::Acquire);
+            let epoch = read_meta_write_epoch(&conn);
+            self.write_epoch.store(epoch, Ordering::Release);
             (map, prev_stamp, prev_head, epoch)
         };
 
@@ -734,7 +762,8 @@ impl GraphIrStore {
         let (mut pending_re_resolve, mut pre_tx_incoming) =
             if is_incremental_update && (!affected_targets.is_empty() || manifest_changed) {
                 let conn = lock_conn(&self.conn)?;
-                epoch_before = self.write_epoch.load(Ordering::Acquire);
+                epoch_before = read_meta_write_epoch(&conn);
+                self.write_epoch.store(epoch_before, Ordering::Release);
                 let callers = query_incoming_callers_from_conn(&conn, &affected_targets)?;
                 let re_resolve = collect_affected_dependents(
                     &conn,
@@ -775,8 +804,11 @@ impl GraphIrStore {
             }
 
             let mut conn = lock_conn(&self.conn)?;
-            if self.write_epoch.load(Ordering::Acquire) != epoch_before {
-                epoch_before = self.write_epoch.load(Ordering::Acquire);
+            let db_epoch = read_meta_write_epoch(&conn);
+            if db_epoch != epoch_before || self.write_epoch.load(Ordering::Acquire) != epoch_before
+            {
+                epoch_before = db_epoch;
+                self.write_epoch.store(db_epoch, Ordering::Release);
                 let has_rows: bool =
                     conn.query_row("SELECT EXISTS(SELECT 1 FROM ir_files)", [], |r| r.get(0))?;
                 if has_rows && (!affected_targets.is_empty() || manifest_changed) {
@@ -832,7 +864,7 @@ impl GraphIrStore {
                 upsert_parsed_file(&tx, unit, &now)?;
             }
 
-            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx, epoch_before)?;
+            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx)?;
             update_reexport_index_for_units(&mut reexports, &removed, &parsed_units);
 
             for unit in &parsed_units {
@@ -1121,7 +1153,8 @@ impl GraphIrStore {
                     } else {
                         (Vec::new(), BTreeSet::new())
                     };
-                let epoch = self.write_epoch.load(Ordering::Acquire);
+                let epoch = read_meta_write_epoch(&conn);
+                self.write_epoch.store(epoch, Ordering::Release);
                 (
                     existing_files,
                     removed_files,
@@ -1195,7 +1228,10 @@ impl GraphIrStore {
             }
 
             let mut conn = lock_conn(&self.conn)?;
-            if self.write_epoch.load(Ordering::Acquire) != epoch_before {
+            let db_epoch = read_meta_write_epoch(&conn);
+            if db_epoch != epoch_before || self.write_epoch.load(Ordering::Acquire) != epoch_before
+            {
+                self.write_epoch.store(db_epoch, Ordering::Release);
                 continue;
             }
 
@@ -1223,7 +1259,7 @@ impl GraphIrStore {
             }
 
             let _ = (&affected_targets, &skip_re_resolve);
-            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx, epoch_before)?;
+            let mut reexports = obtain_tx_reexport_index(&self.reexport_cache, &tx)?;
             if !parsed_units.is_empty() || !removed_files.is_empty() || !re_resolve_paths.is_empty()
             {
                 update_reexport_index_for_units(&mut reexports, &removed_vec_pre, &parsed_units);
@@ -2670,9 +2706,32 @@ impl GraphIrStore {
         })
     }
 
-    /// Returns `true` when the indexed `ir_symbol_refs` table has at least one row.
+    /// Returns `true` when the indexed v3 `ir_symbol_refs` table exists and has at least one row.
     pub(crate) fn has_symbol_refs_index(&self) -> Result<bool> {
         self.with_read_conn(|conn| {
+            let schema_num: u32 = conn
+                .query_row(
+                    "SELECT value FROM ir_meta WHERE key = 'schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            if schema_num < 3 {
+                return Ok(false);
+            }
+            let table_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ir_symbol_refs')",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !table_exists {
+                return Ok(false);
+            }
             let exists: bool = conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM ir_symbol_refs LIMIT 1)",
@@ -4226,8 +4285,8 @@ fn emit_semantic_nodes_and_links(
 fn obtain_tx_reexport_index(
     cache: &Mutex<Option<(u64, ReexportIndex)>>,
     conn: &Connection,
-    epoch: u64,
 ) -> Result<ReexportIndex> {
+    let epoch = read_meta_write_epoch(conn);
     if let Ok(guard) = cache.lock()
         && let Some((cached_epoch, ref idx)) = *guard
         && cached_epoch == epoch
@@ -7038,5 +7097,155 @@ function helper(v: number): number { return v + 1; }
             crate::graph_map::Index::from_ir_parts(&root, None, None, full_nodes, full_links)
                 .unwrap();
         assert_eq!(live_index.node_link_counts(), full_idx.node_link_counts());
+    }
+
+    #[test]
+    fn upgrades_v2_db_without_partial_symbol_refs_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/target.rs"),
+            "pub fn target_op() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/caller.rs"),
+            "pub fn call_site() -> i32 { crate::target::target_op() }\n",
+        )
+        .unwrap();
+
+        let store_v2 = GraphIrStore::open(&state, "p-v2").unwrap();
+        store_v2.sync_workspace(&root).unwrap();
+        let db_path = store_v2.db_path().to_path_buf();
+        drop(store_v2);
+
+        // Simulate a v2 DB that has populated `ir_files` / `ir_symbols` / `ir_edges`
+        // while lacking `ir_file_extractions` and `ir_symbol_refs`.
+        {
+            let raw = Connection::open(&db_path).unwrap();
+            raw.execute_batch(
+                "DELETE FROM ir_file_extractions;
+                 DELETE FROM ir_symbol_refs;
+                 INSERT OR REPLACE INTO ir_meta(key, value) VALUES ('schema_version', '2');",
+            )
+            .unwrap();
+        }
+
+        // Re-opening upgrades schema to v3 and invalidates stale v2 `ir_files` so partial
+        // `update_paths_with_delta` never trusts `ir_symbol_refs` as covering un-backfilled files.
+        let upgraded = GraphIrStore::open(&state, "p-v2").unwrap();
+        assert!(upgraded.known_files().unwrap().is_empty());
+        assert!(!upgraded.has_symbol_refs_index().unwrap());
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/target.rs"),
+            "pub fn target_op() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        upgraded
+            .update_paths_with_delta(&root, &["src/target.rs".to_owned()])
+            .unwrap();
+        assert_eq!(
+            upgraded.known_files().unwrap(),
+            BTreeSet::from(["src/target.rs".to_owned()])
+        );
+        // After editing 1 file before full sync, `graph_impact` still discovers `src/caller.rs` via
+        // unindexed fallback because `src/caller.rs` is not falsely claimed as indexed.
+        let impact = crate::graph_impact::file_impact_with_ir(
+            &root,
+            None,
+            Some(&upgraded),
+            None,
+            None,
+            "src/target.rs",
+            false,
+        )
+        .unwrap();
+        let used_by = impact["used_by"].as_array().unwrap();
+        assert!(
+            used_by
+                .iter()
+                .any(|u| u["path"] == "src/caller.rs" || u == "src/caller.rs"),
+            "expected caller discovery via unindexed fallback on upgraded partial DB: {impact}"
+        );
+
+        // Full `sync_workspace_with_delta` backfills all remaining v2 files completely.
+        upgraded.sync_workspace_with_delta(&root).unwrap();
+        let callers = upgraded.lookup_symbol_ref_callers(&["target_op"]).unwrap();
+        assert!(
+            callers.contains(&"src/caller.rs".to_owned()),
+            "expected backfilled caller in ir_symbol_refs: {callers:?}"
+        );
+        assert!(
+            upgraded
+                .load_file_extraction_if_fresh(&root, "src/caller.rs")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn external_handle_invalidates_reexport_cache_via_meta_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/impl_a.ts"),
+            "export function foo() { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/impl_b.ts"),
+            "export function foo() { return 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/barrel.ts"),
+            "export { foo } from './impl_a';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { foo } from './barrel';\nexport function run() { return foo(); }\n",
+        )
+        .unwrap();
+
+        let handle_a = GraphIrStore::open(&state, "p-reexp-ext").unwrap();
+        handle_a.sync_workspace_with_delta(&root).unwrap();
+        assert!(handle_a.reexport_index().is_ok());
+
+        // Separate writer handle modifies `barrel.ts` in SQLite, advancing `ir_meta.write_epoch`
+        // while `handle_a`'s in-memory `AtomicU64` still holds the earlier epoch.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/barrel.ts"),
+            "export { foo } from './impl_b';\n",
+        )
+        .unwrap();
+        let handle_b = GraphIrStore::open(&state, "p-reexp-ext").unwrap();
+        handle_b
+            .update_paths_with_delta(&root, &["src/barrel.ts".to_owned()])
+            .unwrap();
+
+        // Editing `consumer.ts` on `handle_a` must see `handle_b`'s bumped DB epoch and resolve to `impl_b.ts`.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { foo } from './barrel';\nexport function run() { return foo() + 1; }\n",
+        )
+        .unwrap();
+        handle_a
+            .update_paths_with_delta(&root, &["src/consumer.ts".to_owned()])
+            .unwrap();
+
+        let edges = handle_a.all_resolved_file_edges().unwrap();
+        assert!(
+            edges.contains(&("src/consumer.ts".to_owned(), "src/impl_b.ts".to_owned())),
+            "handle_a must invalidate reexport_cache against external DB write_epoch: {edges:?}"
+        );
     }
 }
