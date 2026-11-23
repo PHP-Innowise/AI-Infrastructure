@@ -258,8 +258,37 @@ pub trait Domain: Send + Sync {
 }
 const MAX_CONCURRENT_FILE_CONTEXT: usize = 8;
 const MAX_PREFLIGHT_MEMO: usize = 128;
+const MAX_SDD_ARTIFACTS_MEMO: usize = 64;
 const MAX_KNOWLEDGE_SYNC_STAMPS: usize = 128;
 const KNOWLEDGE_RACY_NS: i128 = 2_000_000_000;
+
+fn ir_bus_epochs() -> &'static Mutex<HashMap<(PathBuf, String), u64>> {
+    static EPOCHS: std::sync::OnceLock<Mutex<HashMap<(PathBuf, String), u64>>> =
+        std::sync::OnceLock::new();
+    EPOCHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Bumps the Graph-IR invalidation bus epoch for `project_id` so cached preflight
+/// metadata invalidates even if `live/graph.json` or request epochs stayed unchanged.
+pub(crate) fn on_ir_paths_updated(
+    store: &SessionStore,
+    project_id: &str,
+    _root: &Path,
+    _delta: &crate::graph_ir::IrUpdateDelta,
+) -> u64 {
+    let trimmed = project_id.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let Ok(mut guard) = ir_bus_epochs().lock() else {
+        return 0;
+    };
+    let entry = guard
+        .entry((store.state.clone(), trimmed.to_owned()))
+        .or_insert(0);
+    *entry = entry.saturating_add(1);
+    *entry
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PreflightBaseKey {
@@ -269,6 +298,7 @@ struct PreflightBaseKey {
     omnigraph_epoch: u64,
     knowledge_epoch: u64,
     graph_epoch: u64,
+    ir_bus_epoch: u64,
     edition: String,
     knowledge_stamp: String,
     live_graph_stamp: String,
@@ -286,6 +316,14 @@ struct PreflightSessionKey {
 struct PreflightMemoKey {
     base: PreflightBaseKey,
     session: Option<PreflightSessionKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SddArtifactsMemoKey {
+    session_id: String,
+    project_path: String,
+    sdd_canonical: String,
+    candidates_stamp: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -310,6 +348,9 @@ struct ServicesRuntimeCache {
     graph_epochs: HashMap<String, u64>,
     session_epochs: HashMap<String, u64>,
     preflight_memo: HashMap<PreflightMemoKey, (Value, u64)>,
+    sdd_artifacts_memo: HashMap<SddArtifactsMemoKey, (Value, u64)>,
+    #[cfg(test)]
+    sdd_artifacts_hits: usize,
     knowledge_sync_stamps: HashMap<KnowledgeSyncStampKey, ((String, u64), u64)>,
 }
 
@@ -382,6 +423,68 @@ impl ServicesRuntimeCache {
         }
         self.preflight_memo.insert(key, (value, use_seq));
     }
+
+    fn get_sdd_artifacts(&mut self, key: &SddArtifactsMemoKey) -> Option<Value> {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        let entry = self.sdd_artifacts_memo.get_mut(key)?;
+        entry.1 = use_seq;
+        #[cfg(test)]
+        {
+            self.sdd_artifacts_hits = self.sdd_artifacts_hits.saturating_add(1);
+        }
+        Some(entry.0.clone())
+    }
+
+    fn insert_sdd_artifacts(&mut self, key: SddArtifactsMemoKey, value: Value) {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        if self.sdd_artifacts_memo.len() >= MAX_SDD_ARTIFACTS_MEMO
+            && !self.sdd_artifacts_memo.contains_key(&key)
+            && let Some(evict) = self
+                .sdd_artifacts_memo
+                .iter()
+                .min_by_key(|(_, (_, s))| *s)
+                .map(|(k, _)| k.clone())
+        {
+            self.sdd_artifacts_memo.remove(&evict);
+        }
+        self.sdd_artifacts_memo.insert(key, (value, use_seq));
+    }
+}
+
+fn build_sdd_artifacts_memo_key(
+    sid: &str,
+    project_path: &str,
+    sdd: &Value,
+) -> Option<SddArtifactsMemoKey> {
+    let root = Path::new(project_path);
+    if project_path.trim().is_empty() || !root.is_dir() {
+        return None;
+    }
+    let root_canon = infra_core::fs::canonicalize(root).ok()?;
+    let feature = sdd["feature"].as_str().unwrap_or("");
+    let mut candidates = vec![
+        "specs/memory/constitution.md".to_owned(),
+        "specs/memory/sdd-constitution.md".to_owned(),
+    ];
+    for name in ["spec.md", "plan.md", "tasks.md", "progress.md"] {
+        candidates.push(format!("specs/{feature}/{name}"));
+        candidates.push(format!("specs/{feature}/sdd-{name}"));
+    }
+    let mut parts = Vec::with_capacity(candidates.len());
+    for rel in candidates {
+        let stamp = stamp_file_with_racy_hash(&root_canon.join(&rel), 512 * 1024)?;
+        parts.push(format!("{rel}={stamp}"));
+    }
+    let sdd_canonical = infra_core::domain::json::canonical(sdd).ok()?;
+    let candidates_stamp = crate::store::sha(parts.join("\n").as_bytes());
+    Some(SddArtifactsMemoKey {
+        session_id: sid.to_owned(),
+        project_path: root_canon.to_string_lossy().into_owned(),
+        sdd_canonical,
+        candidates_stamp,
+    })
 }
 
 fn time_ns(t: SystemTime) -> Option<i128> {
@@ -1728,6 +1831,15 @@ impl NativeServices {
                 .flatten()
                 .map(|ir| ir.current_write_epoch())
                 .unwrap_or(0);
+        let ir_bus_epoch = ir_bus_epochs()
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .get(&(self.store.state.clone(), project_id.to_owned()))
+                    .copied()
+            })
+            .unwrap_or(0);
         Some(PreflightMemoKey {
             base: PreflightBaseKey {
                 project_id: project_id.to_owned(),
@@ -1736,6 +1848,7 @@ impl NativeServices {
                 omnigraph_epoch,
                 knowledge_epoch,
                 graph_epoch,
+                ir_bus_epoch,
                 edition: edition.unwrap_or_default(),
                 knowledge_stamp,
                 live_graph_stamp,
@@ -1976,9 +2089,30 @@ impl Services for NativeServices {
                         if session["sdd"].is_null() {
                             return Err(HarnessError::invalid("This session does not use SDD."));
                         }
-                        Payload::Json(
-                            json!({"session_id":sid,"sdd":session["sdd"],"files":crate::sdd::artifacts(std::path::Path::new(session["project_path"].as_str().unwrap_or("")),&session["sdd"])?}),
-                        )
+                        let project_path = session["project_path"].as_str().unwrap_or("");
+                        let memo_key =
+                            build_sdd_artifacts_memo_key(sid, project_path, &session["sdd"]);
+                        if let Some(ref key) = memo_key
+                            && let Ok(mut guard) = self.runtime_cache.lock()
+                            && let Some(cached) = guard.get_sdd_artifacts(key)
+                        {
+                            Payload::Json(cached)
+                        } else {
+                            let val = json!({
+                                "session_id": sid,
+                                "sdd": session["sdd"],
+                                "files": crate::sdd::artifacts(
+                                    std::path::Path::new(project_path),
+                                    &session["sdd"],
+                                )?,
+                            });
+                            if let Some(key) = memo_key
+                                && let Ok(mut guard) = self.runtime_cache.lock()
+                            {
+                                guard.insert_sdd_artifacts(key, val.clone());
+                            }
+                            Payload::Json(val)
+                        }
                     }
                     "omnigraph.branch_act" => {
                         let domain = self.domains.get("omnigraph").ok_or_else(|| {
@@ -2133,6 +2267,15 @@ impl Services for NativeServices {
                             "deleted_atom_ids": synced["deleted_atom_ids"].as_array().cloned().unwrap_or_default(),
                             "symbols": synced["symbols"].as_u64().unwrap_or(0),
                         });
+                        if let Some(mutated) = synced["mutated_atoms"].as_u64() {
+                            out["mutated_atoms"] = json!(mutated);
+                        }
+                        if let Some(skipped_atoms) = synced["skipped_atoms"].as_u64() {
+                            out["skipped_atoms"] = json!(skipped_atoms);
+                        }
+                        if let Some(skipped_files) = synced["skipped_files"].as_u64() {
+                            out["skipped_files"] = json!(skipped_files);
+                        }
                         if let Some(error) = synced["prune_error"].as_str() {
                             out["prune_error"] = json!(error);
                         }
@@ -4834,6 +4977,164 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(preflight_calls.load(Ordering::SeqCst), 5);
+
+        services.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sdd_artifacts_caches_with_racy_ns_and_preflight_invalidates_on_ir_bus() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountingPreflightDomain {
+            calls: Arc<AtomicUsize>,
+        }
+        impl Domain for CountingPreflightDomain {
+            fn execute<'a>(&'a self, op: &'a str, req: Value) -> Reply<'a> {
+                let calls = Arc::clone(&self.calls);
+                Box::pin(async move {
+                    if op == "knowledge.preflight" {
+                        let count = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        return Ok(Payload::Json(json!({
+                            "ok": true,
+                            "project_id": req["params"]["project_id"],
+                            "calls": count,
+                        })));
+                    }
+                    Ok(Payload::Json(json!({"ok": true})))
+                })
+            }
+        }
+        struct OkStub;
+        impl Domain for OkStub {
+            fn execute<'a>(&'a self, _op: &'a str, _req: Value) -> Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(proj.join("specs/auth-fix")).unwrap();
+        let spec_file = proj.join("specs/auth-fix/sdd-spec.md");
+        std::fs::write(&spec_file, "# Auth Spec v1\n").unwrap();
+        let pid = store.register(&proj).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = store
+            .create(
+                &json!({
+                    "project_id": pid,
+                    "provider": "claude",
+                    "workflow": "native",
+                    "mode": "plan",
+                    "sdd": {"phase": "plan", "feature": "auth-fix"},
+                }),
+                "Test SDD cache",
+                &[],
+            )
+            .unwrap();
+        let sid = created["id"].as_str().unwrap().to_owned();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ok_stub: Arc<dyn Domain> = Arc::new(OkStub);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "results",
+            "delivery",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "omnigraph",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&ok_stub)))
+        .collect();
+        domains.insert(
+            "knowledge".into(),
+            Arc::new(CountingPreflightDomain {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let services = NativeServices::new(
+            store.clone(),
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+
+        let sdd_req = json!({"params":{"session_id":sid},"query":{},"body":{}});
+        let Payload::Json(first_sdd) = services
+            .request("sdd.artifacts", sdd_req.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(first_sdd["files"][1]["text"], "# Auth Spec v1\n");
+        assert_eq!(services.runtime_cache.lock().unwrap().sdd_artifacts_hits, 0);
+
+        let Payload::Json(second_sdd) = services
+            .request("sdd.artifacts", sdd_req.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(second_sdd["files"][1]["text"], "# Auth Spec v1\n");
+        assert_eq!(services.runtime_cache.lock().unwrap().sdd_artifacts_hits, 1);
+
+        // Same-second overwrite inside KNOWLEDGE_RACY_NS invalidates via SHA-256 stamp.
+        std::fs::write(&spec_file, "# Auth Spec v2\n").unwrap();
+        let Payload::Json(third_sdd) = services
+            .request("sdd.artifacts", sdd_req.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(third_sdd["files"][1]["text"], "# Auth Spec v2\n");
+        assert_eq!(services.runtime_cache.lock().unwrap().sdd_artifacts_hits, 1);
+
+        let _ = services.request("sdd.artifacts", sdd_req).await.unwrap();
+        assert_eq!(services.runtime_cache.lock().unwrap().sdd_artifacts_hits, 2);
+
+        // Verify knowledge.preflight memo invalidates immediately on IR invalidation bus event.
+        let pre_req =
+            json!({"params":{"project_id":pid},"query":{},"body":{"prompt":"Inspect specs"}});
+        let _ = services
+            .request("knowledge.preflight", pre_req.clone())
+            .await
+            .unwrap();
+        let _ = services
+            .request("knowledge.preflight", pre_req.clone())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let delta = crate::graph_ir::IrUpdateDelta {
+            ir_revision: 42,
+            changed_paths: vec!["src/auth.php".into()],
+            ..Default::default()
+        };
+        on_ir_paths_updated(&store, &pid, &proj, &delta);
+        let _ = services
+            .request("knowledge.preflight", pre_req)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         services.close().await.unwrap();
     }

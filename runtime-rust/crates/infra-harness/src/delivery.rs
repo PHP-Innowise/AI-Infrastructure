@@ -8,14 +8,17 @@ use crate::{
 use infra_core::bank::publication::PublicationFiles;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicBool},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const TTL: Duration = Duration::from_secs(900);
 const MAX_FILES: usize = 500;
 const IMAGE: usize = 64 * 1024 * 1024;
+const DELIVERY_RACY_NS: i128 = 2_000_000_000;
+const MAX_DELIVERY_STAMP_ENTRIES: usize = 10_000;
+const MAX_DELIVERY_CACHE_ENTRIES: usize = 32;
 fn invalid(s: impl Into<String>) -> HarnessError {
     HarnessError::invalid(s)
 }
@@ -33,6 +36,258 @@ fn owned_hash(v: &str) -> bool {
 fn cancel() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
+fn delivery_time_ns(t: SystemTime) -> Option<i128> {
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+fn delivery_is_settled(max_mtime_ns: i128, now_ns: i128) -> bool {
+    max_mtime_ns > 0 && now_ns > DELIVERY_RACY_NS && max_mtime_ns <= now_ns - DELIVERY_RACY_NS
+}
+fn resolve_delivery_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dot_git = root.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    let git_dir = if meta.is_dir() {
+        dot_git
+    } else if meta.is_file() {
+        let raw = std::fs::read_to_string(&dot_git).ok()?;
+        let rel = raw.trim().strip_prefix("gitdir:")?.trim();
+        let cand = Path::new(rel);
+        if cand.is_absolute() {
+            cand.to_path_buf()
+        } else {
+            root.join(cand)
+        }
+    } else {
+        return None;
+    };
+    let common_dir = if let Ok(raw) = std::fs::read_to_string(git_dir.join("commondir")) {
+        let rel = raw.trim();
+        let cand = Path::new(rel);
+        if cand.is_absolute() {
+            cand.to_path_buf()
+        } else {
+            git_dir.join(cand)
+        }
+    } else {
+        git_dir.clone()
+    };
+    Some((git_dir, common_dir))
+}
+fn stamp_delivery_stat_path(
+    label: &str,
+    path: &Path,
+    out: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            out.push(format!("{label}:missing"));
+            true
+        }
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return false;
+            }
+            let Ok(mtime) = meta.modified().and_then(|t| {
+                delivery_time_ns(t).ok_or_else(|| std::io::Error::other("bad mtime"))
+            }) else {
+                return false;
+            };
+            *max_mtime_ns = (*max_mtime_ns).max(mtime);
+            if meta.is_dir() {
+                out.push(format!("{label}:dir:{mtime}"));
+            } else if meta.is_file() {
+                out.push(format!("{label}:file:{}:{mtime}", meta.len()));
+            } else {
+                return false;
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+fn stamp_delivery_subtree(
+    root: &Path,
+    skip_git: bool,
+    out: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> bool {
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    let mut visited = 0usize;
+    while let Some(dir) = queue.pop_front() {
+        let Ok(d_meta) = std::fs::symlink_metadata(&dir) else {
+            return false;
+        };
+        if d_meta.file_type().is_symlink() || !d_meta.is_dir() {
+            return false;
+        }
+        let Some(d_mtime) = d_meta.modified().ok().and_then(delivery_time_ns) else {
+            return false;
+        };
+        *max_mtime_ns = (*max_mtime_ns).max(d_mtime);
+        let rel_dir = dir
+            .strip_prefix(root)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        out.push(format!("d:{rel_dir}:{d_mtime}"));
+        visited += 1;
+        if visited > MAX_DELIVERY_STAMP_ENTRIES {
+            return false;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return false;
+        };
+        let mut children: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            let name = child.file_name();
+            let name_s = name.to_string_lossy();
+            if skip_git
+                && matches!(
+                    name_s.as_ref(),
+                    ".git" | "target" | "vendor" | "node_modules" | ".phpunit.cache"
+                )
+            {
+                continue;
+            }
+            let p = child.path();
+            let Ok(c_meta) = std::fs::symlink_metadata(&p) else {
+                return false;
+            };
+            if c_meta.file_type().is_symlink() {
+                return false;
+            }
+            if c_meta.is_dir() {
+                queue.push_back(p);
+            } else if c_meta.is_file() {
+                let Some(mtime) = c_meta.modified().ok().and_then(delivery_time_ns) else {
+                    return false;
+                };
+                *max_mtime_ns = (*max_mtime_ns).max(mtime);
+                let rel = p
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                out.push(format!("f:{rel}:{}:{mtime}", c_meta.len()));
+                visited += 1;
+                if visited > MAX_DELIVERY_STAMP_ENTRIES {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    true
+}
+fn compute_delivery_settled_stamp_at(session: &Value, root: &Path, now_ns: i128) -> Option<String> {
+    let root_canon = infra_core::fs::canonicalize(root).ok()?;
+    let (git_dir, common_dir) = resolve_delivery_git_dirs(&root_canon)?;
+    let mut max_mtime_ns = 0i128;
+    let mut parts = vec![
+        format!("root={}", root_canon.to_string_lossy()),
+        format!("branch={}", session["branch"].as_str().unwrap_or("")),
+        format!(
+            "base={}",
+            session["result_base"]["head"].as_str().unwrap_or("")
+        ),
+        format!("ws={}", session["workspace"].as_str().unwrap_or("")),
+    ];
+    for (label, p) in [
+        ("HEAD", git_dir.join("HEAD")),
+        ("index", git_dir.join("index")),
+        ("MERGE_HEAD", git_dir.join("MERGE_HEAD")),
+        ("CHERRY_PICK_HEAD", git_dir.join("CHERRY_PICK_HEAD")),
+        ("REVERT_HEAD", git_dir.join("REVERT_HEAD")),
+        ("rebase-merge", git_dir.join("rebase-merge")),
+        ("rebase-apply", git_dir.join("rebase-apply")),
+        ("sequencer", git_dir.join("sequencer")),
+        ("config", common_dir.join("config")),
+        ("packed-refs", common_dir.join("packed-refs")),
+        ("sparse", git_dir.join("info/sparse-checkout")),
+    ] {
+        if !stamp_delivery_stat_path(label, &p, &mut parts, &mut max_mtime_ns) {
+            return None;
+        }
+    }
+    if let Ok(head_text) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(ref_rel) = head_text.trim().strip_prefix("ref: ").map(str::trim)
+        && !ref_rel.is_empty()
+        && !ref_rel.contains("..")
+    {
+        parts.push(format!("head_ref={ref_rel}"));
+        if !stamp_delivery_stat_path(
+            "head_ref_file",
+            &common_dir.join(ref_rel),
+            &mut parts,
+            &mut max_mtime_ns,
+        ) {
+            return None;
+        }
+    }
+    if common_dir.join("refs/heads").is_dir()
+        && !stamp_delivery_subtree(
+            &common_dir.join("refs/heads"),
+            false,
+            &mut parts,
+            &mut max_mtime_ns,
+        )
+    {
+        return None;
+    }
+    if !stamp_delivery_subtree(&root_canon, true, &mut parts, &mut max_mtime_ns) {
+        return None;
+    }
+    delivery_is_settled(max_mtime_ns, now_ns).then(|| sha(parts.join("\n").as_bytes()))
+}
+#[derive(Clone)]
+struct CachedDeliveryGet {
+    stamp: String,
+    payload: Value,
+    last_used: u64,
+}
+#[derive(Default)]
+struct DeliveryGetCache {
+    seq: u64,
+    entries: HashMap<String, CachedDeliveryGet>,
+}
+impl DeliveryGetCache {
+    fn get(&mut self, sid: &str, stamp: &str) -> Option<Value> {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        let entry = self.entries.get_mut(sid)?;
+        if entry.stamp != stamp {
+            return None;
+        }
+        entry.last_used = use_seq;
+        Some(entry.payload.clone())
+    }
+    fn insert(&mut self, sid: String, stamp: String, payload: Value) {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        if self.entries.len() >= MAX_DELIVERY_CACHE_ENTRIES
+            && !self.entries.contains_key(&sid)
+            && let Some(evict) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&evict);
+        }
+        self.entries.insert(
+            sid,
+            CachedDeliveryGet {
+                stamp,
+                payload,
+                last_used: use_seq,
+            },
+        );
+    }
+}
 #[derive(Clone)]
 struct Preview {
     sid: String,
@@ -46,6 +301,9 @@ pub struct Delivery {
     folder: PathBuf,
     previews: Arc<Mutex<BTreeMap<String, Preview>>>,
     blocked: Arc<Mutex<BTreeMap<String, String>>>,
+    get_cache: Arc<Mutex<DeliveryGetCache>>,
+    #[cfg(test)]
+    get_computations: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Delivery {
     pub fn new(store: SessionStore, results: Arc<Results>) -> Result<Self> {
@@ -58,6 +316,9 @@ impl Delivery {
             folder,
             previews: Arc::new(Mutex::new(BTreeMap::new())),
             blocked: Arc::new(Mutex::new(BTreeMap::new())),
+            get_cache: Arc::new(Mutex::new(DeliveryGetCache::default())),
+            #[cfg(test)]
+            get_computations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
     /// Recovery must finish before HTTP dispatch/runner admission.
@@ -525,15 +786,114 @@ impl Delivery {
             .output)
     }
     pub async fn get(&self, sid: &str) -> Result<Value> {
-        self.store.get(sid)?;
+        self.get_with_options(sid, false).await
+    }
+    pub async fn get_with_options(&self, sid: &str, strict_bypass: bool) -> Result<Value> {
+        let now_ns = delivery_time_ns(SystemTime::now()).unwrap_or(0);
+        self.get_at(sid, now_ns, strict_bypass).await
+    }
+    async fn get_at(&self, sid: &str, now_ns: i128, strict_bypass: bool) -> Result<Value> {
+        self.get_at_with(sid, now_ns, strict_bypass, || async {
+            self.results.backend.idle()?;
+            let (s, root, info) = self.source(sid).await?;
+            let pending = self.pending(&root, &info).await?;
+            let branches = self
+                .branches(&root)
+                .await?
+                .into_iter()
+                .filter(|b| b["name"] != info["branch"])
+                .collect::<Vec<_>>();
+            Ok::<Value, HarnessError>(json!({
+                "available": true,
+                "preview": self.current_preview(sid).await?,
+                "workspace": root,
+                "branch": info["branch"],
+                "head": info["head"],
+                "snapshot_id": pending["snapshot_id"],
+                "files": pending["files"],
+                "commits": self.commits(&s, &root, &info).await?,
+                "branches": branches,
+                "notice": "Pending files are compared with current HEAD. Whole-file selection includes staged and unstaged content; unselected index entries and files are preserved. Local Git only."
+            }))
+        })
+        .await
+    }
+    async fn get_at_with<F, Fut>(
+        &self,
+        sid: &str,
+        now_ns: i128,
+        strict_bypass: bool,
+        compute: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
+        let session = self.store.get(sid)?;
         let lock = self.results.backend.operation_lock();
         let _guard = lock.lock().await;
-        let outcome=async{self.results.backend.idle()?;let(s,root,info)=self.source(sid).await?;let pending=self.pending(&root,&info).await?;let branches=self.branches(&root).await?.into_iter().filter(|b|b["name"]!=info["branch"]).collect::<Vec<_>>();Ok::<Value,HarnessError>(json!({"available":true,"preview":self.current_preview(sid).await?,"workspace":root,"branch":info["branch"],"head":info["head"],"snapshot_id":pending["snapshot_id"],"files":pending["files"],"commits":self.commits(&s,&root,&info).await?,"branches":branches,"notice":"Pending files are compared with current HEAD. Whole-file selection includes staged and unstaged content; unselected index entries and files are preserved. Local Git only."}))}.await;
+        let blocked = self
+            .blocked
+            .lock()
+            .map_err(|_| invalid("Delivery lock failed"))?
+            .contains_key(sid);
+        let bypass = strict_bypass
+            || std::env::var("HARNESS_DISABLE_CHECK_CACHE").as_deref() == Ok("1")
+            || blocked
+            || !session["creator"].is_null()
+            || session["workspace"] != "worktree"
+            || !session["result_base"]["head"].is_string();
+        let ws_root = if !bypass {
+            self.results.backend.workspace(&session).ok()
+        } else {
+            None
+        };
+        let pre_stamp = if !bypass && let Some(root) = ws_root.as_deref() {
+            compute_delivery_settled_stamp_at(&session, root, now_ns)
+        } else {
+            None
+        };
+        if let Some(ref stamp) = pre_stamp {
+            let hit = self
+                .get_cache
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.get(sid, stamp));
+            if let Some(mut cached) = hit
+                && self.results.backend.idle().is_ok()
+                && let Ok(preview) = self.current_preview(sid).await
+            {
+                cached["preview"] = preview;
+                return Ok(cached);
+            }
+        }
+        #[cfg(test)]
+        self.get_computations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let outcome = compute().await;
         match outcome {
-            Ok(v) => Ok(v),
-            Err(e) => Ok(
-                json!({"available":false,"reason":e.message,"preview":self.current_preview(sid).await?}),
-            ),
+            Ok(v) => {
+                if !bypass
+                    && let Some(stamp) = pre_stamp
+                    && let Some(root) = ws_root.as_deref()
+                {
+                    let after_ns = delivery_time_ns(SystemTime::now())
+                        .unwrap_or(now_ns)
+                        .max(now_ns);
+                    if compute_delivery_settled_stamp_at(&session, root, after_ns).as_deref()
+                        == Some(stamp.as_str())
+                        && let Ok(mut guard) = self.get_cache.lock()
+                    {
+                        guard.insert(sid.to_owned(), stamp, v.clone());
+                    }
+                }
+                Ok(v)
+            }
+            Err(e) => Ok(json!({
+                "available": false,
+                "reason": e.message,
+                "preview": self.current_preview(sid).await?
+            })),
         }
     }
     pub async fn preview_commit(&self, sid: &str, data: &Value) -> Result<Value> {
@@ -1280,7 +1640,18 @@ impl Domain for Delivery {
                 .ok_or_else(|| invalid("Missing session ID"))?
                 .to_owned();
             let value = match op {
-                "delivery.get" => self.get(&sid).await?,
+                "delivery.get" => {
+                    let strict_bypass = r["query"]["strict"].as_bool() == Some(true)
+                        || r["query"]["no_cache"].as_bool() == Some(true)
+                        || r["query"]["cache"].as_bool() == Some(false)
+                        || r["body"]["strict"].as_bool() == Some(true)
+                        || r["body"]["no_cache"].as_bool() == Some(true)
+                        || r["body"]["cache"].as_bool() == Some(false)
+                        || r["query"]["strict"].as_str() == Some("true")
+                        || r["query"]["no_cache"].as_str() == Some("true")
+                        || r["query"]["cache"].as_str() == Some("false");
+                    self.get_with_options(&sid, strict_bypass).await?
+                }
                 "delivery.act" => {
                     let owner = self.clone();
                     let body = r["body"].clone();
@@ -1649,5 +2020,190 @@ mod target_cleanup_boundary_tests {
         assert!(!path.exists());
         assert!(!fixture.stopped());
         assert!(fixture.delivery.blocked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_get_caches_settled_trees_and_honors_racy_ns_and_bypasses() {
+        struct CacheTestBackend {
+            project: PathBuf,
+            op: Arc<tokio::sync::Mutex<()>>,
+            stop: Arc<AtomicBool>,
+        }
+        impl crate::results::ResultsBackend for CacheTestBackend {
+            fn workspace(&self, _: &Value) -> Result<PathBuf> {
+                Ok(self.project.clone())
+            }
+            fn idle(&self) -> Result<()> {
+                Ok(())
+            }
+            fn enqueue_check(&self, _: &str, _: &str, _: &str) -> Result<String> {
+                Ok("chk".into())
+            }
+            fn operation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+                self.op.clone()
+            }
+            fn history_session_ids(&self, _: &Value) -> Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+            fn shutdown_cancel(&self) -> Arc<AtomicBool> {
+                self.stop.clone()
+            }
+            fn result_context(&self, _: &Value) -> Result<infra_core::RuntimeContext> {
+                Ok(infra_core::RuntimeContext::new(
+                    infra_core::Roots::installed(&self.project)?,
+                    "local",
+                    "governed",
+                )?)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/app.php"), "<?php\n// v1\n").unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "init"]);
+        let base_head = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "work"]);
+        std::fs::write(repo.join("src/app.php"), "<?php\n// pending v1\n").unwrap();
+
+        let reg = store.register(&repo).unwrap();
+        let created = store
+            .create(
+                &json!({
+                    "project_id": reg["id"],
+                    "provider": "codex",
+                    "workflow": "native",
+                    "mode": "edit",
+                    "workspace": "worktree",
+                }),
+                "Delivery cache test",
+                &[],
+            )
+            .unwrap();
+        let sid = created["id"].as_str().unwrap().to_owned();
+        store
+            .patch(
+                &sid,
+                &json!({
+                    "workspace": "worktree",
+                    "branch": "work",
+                    "result_base": {"head": base_head},
+                }),
+            )
+            .unwrap();
+
+        let results = Arc::new(
+            Results::new(
+                store.clone(),
+                Arc::new(CacheTestBackend {
+                    project: repo.clone(),
+                    op: Arc::new(tokio::sync::Mutex::new(())),
+                    stop: Arc::new(AtomicBool::new(false)),
+                }),
+            )
+            .unwrap(),
+        );
+        let delivery = Delivery::new(store, results).unwrap();
+
+        let fake_compute = {
+            let repo = repo.clone();
+            let head = base_head.clone();
+            move || {
+                let repo = repo.clone();
+                let head = head.clone();
+                async move {
+                    let bytes = std::fs::read(repo.join("src/app.php")).unwrap_or_default();
+                    let snap = sha(&bytes);
+                    Ok(json!({
+                        "available": true,
+                        "preview": Value::Null,
+                        "workspace": repo,
+                        "branch": "work",
+                        "head": head,
+                        "snapshot_id": snap,
+                        "files": [{"status": "M", "path": "src/app.php"}],
+                        "commits": [],
+                        "branches": [],
+                    }))
+                }
+            }
+        };
+
+        // Inside DELIVERY_RACY_NS window -> never serves or stores stale cache.
+        let racy_now = delivery_time_ns(SystemTime::now()).unwrap_or(0);
+        let r_racy = delivery
+            .get_at_with(&sid, racy_now, false, fake_compute.clone())
+            .await
+            .unwrap();
+        assert_eq!(r_racy["available"], true, "{r_racy}");
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 1);
+
+        // Settled past DELIVERY_RACY_NS -> computes once, then repeats reuse cache without re-compute.
+        let settled_now = racy_now + DELIVERY_RACY_NS + 5_000_000;
+        let r1 = delivery
+            .get_at_with(&sid, settled_now, false, fake_compute.clone())
+            .await
+            .unwrap();
+        assert_eq!(r1["available"], true);
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 2);
+
+        let r2 = delivery
+            .get_at_with(&sid, settled_now + 1_000, false, fake_compute.clone())
+            .await
+            .unwrap();
+        assert_eq!(r2["snapshot_id"], r1["snapshot_id"]);
+        assert_eq!(r2["files"], r1["files"]);
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 2);
+
+        // Explicit strict / no_cache bypass recomputes even when settled.
+        let r_bypass = delivery
+            .get_at_with(&sid, settled_now + 2_000, true, fake_compute.clone())
+            .await
+            .unwrap();
+        assert_eq!(r_bypass["snapshot_id"], r1["snapshot_id"]);
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 3);
+
+        // Creating a branch ref inside `.git/refs/heads/` invalidates settled stamp cleanly.
+        git(&["branch", "other-branch"]);
+        let settled_branch =
+            delivery_time_ns(SystemTime::now()).unwrap_or(0) + DELIVERY_RACY_NS + 5_000_000;
+        let r_branch = delivery
+            .get_at_with(&sid, settled_branch, false, fake_compute.clone())
+            .await
+            .unwrap();
+        assert_eq!(r_branch["available"], true);
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 4);
+
+        // Modifying pending file invalidates settled cache and changes snapshot_id.
+        std::fs::write(repo.join("src/app.php"), "<?php\n// pending v2 changed\n").unwrap();
+        let settled_after =
+            delivery_time_ns(SystemTime::now()).unwrap_or(0) + DELIVERY_RACY_NS + 5_000_000;
+        let r_changed = delivery
+            .get_at_with(&sid, settled_after, false, fake_compute)
+            .await
+            .unwrap();
+        assert_ne!(r_changed["snapshot_id"], r1["snapshot_id"]);
+        assert_eq!(delivery.get_computations.load(Ordering::SeqCst), 5);
     }
 }
