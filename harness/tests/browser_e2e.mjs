@@ -3314,6 +3314,19 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     themeBeforeSidebarClick,
   );
 
+  // Restore standard 1440x900 desktop viewport so later suites do not inherit 1280x800 sidebar compression.
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await driver.waitFor(
+    () => window.innerWidth === 1440 && window.innerHeight === 900,
+    'restore 1440x900 desktop viewport after Suite 5',
+    4_000,
+  );
+
   driver.assertNoErrors('Suite 5');
 }
 
@@ -4735,6 +4748,12 @@ async function suite12SkillCache(driver, opts) {
   // 2. The finished session: its stored option is its own, and its turn's SkillCache cards are in the conversation.
   const otherSel = `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.otherSessionId).replace(/"/g, '\\"')}"]`;
   await driver.click(otherSel);
+  await driver.waitFor(
+    (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+    'switch to other_session_id for Suite 12',
+    10_000,
+    otherSel,
+  );
   await driver.waitFor(() => {
     const phases = Array.from(document.querySelectorAll('#events .conversation-skillcache')).map((e) => e.dataset.phase);
     return ['observed', 'hit', 'program_failed', 'complete'].every((phase) => phases.includes(phase));
