@@ -3986,6 +3986,9 @@ async function suite7SystemMap(driver, cdp, opts) {
           return Boolean(c && c.getAttribute('aria-busy') !== 'true' && plane && denseCanvas && mounted > 0);
         }, 'System Map renders dense >=180-node Canvas2D graph', 12_000);
 
+        await driver.callFn(() => {
+          delete window.__e2eDenseHoverCandidate;
+        });
         const sysHoverPt = await driver.waitFor(() => {
           const c = document.getElementById('system-map-canvas');
           if (!c) return null;
@@ -3994,13 +3997,25 @@ async function suite7SystemMap(driver, cdp, opts) {
             const r = el.getBoundingClientRect();
             const cx = r.left + r.width / 2;
             const cy = r.top + r.height / 2;
-            if (r.width > 8 && r.height > 8 && cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
-              return { cx, cy, id: el.getAttribute('data-n') };
+            if (r.width > 8 && r.height > 8 && cx > cr.left + 20 && cx < cr.right - 20 && cy > cr.top + 20 && cy < cr.bottom - 20) {
+              const nid = el.getAttribute('data-n');
+              const prev = window.__e2eDenseHoverCandidate;
+              const stable = prev
+                && prev.id === nid
+                && Math.abs(prev.cx - cx) < 0.5
+                && Math.abs(prev.cy - cy) < 0.5;
+              window.__e2eDenseHoverCandidate = { cx, cy, id: nid };
+              if (stable) {
+                delete window.__e2eDenseHoverCandidate;
+                return { cx, cy, id: nid };
+              }
+              return null;
             }
           }
           return null;
         }, 'visible mounted node inside dense #system-map-canvas', 6_000);
 
+        await driver.moveTo(sysHoverPt.cx - 2, sysHoverPt.cy - 2);
         await driver.moveTo(sysHoverPt.cx, sysHoverPt.cy);
         await driver.waitFor((nid) => {
           const c = document.getElementById('system-map-canvas');
