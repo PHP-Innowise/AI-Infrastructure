@@ -280,7 +280,15 @@ fn strip_root_regex_cache() -> &'static Mutex<StripRootRegexCache> {
 }
 
 fn compile_strip_root_patterns(variant: &str, name: &str, win: bool) -> CompiledStripRoot {
-    let escaped = regex::escape(variant);
+    let escaped = if win {
+        variant
+            .split('/')
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join(r"[\\/]+")
+    } else {
+        regex::escape(variant)
+    };
     let mut compiled = Vec::with_capacity(6);
     for (start, inner) in [
         (
@@ -391,29 +399,42 @@ pub fn strip_root(value: &str, roots: &[String], home: Option<&str>) -> String {
         if root.chars().count() < 3 {
             continue;
         }
-        let mut variants = BTreeSet::new();
-        variants.insert(root.clone());
-        if win {
-            variants.insert(root.replace('\\', "/"));
-            variants.insert(root.replace('/', "\\"));
-        }
-        for variant in variants {
-            if !(if win {
-                result.to_lowercase().contains(&variant.to_lowercase())
-            } else {
-                result.contains(&variant)
-            }) {
-                continue;
+        let contains = if win {
+            fn collapse_seps_lower(text: &str) -> String {
+                let mut out = String::with_capacity(text.len());
+                let mut prev_sep = false;
+                for ch in text.chars() {
+                    let mapped = if ch == '\\' { '/' } else { ch };
+                    if mapped == '/' {
+                        if !prev_sep {
+                            out.push('/');
+                            prev_sep = true;
+                        }
+                    } else {
+                        prev_sep = false;
+                        for lc in mapped.to_lowercase() {
+                            out.push(lc);
+                        }
+                    }
+                }
+                out
             }
-            let Some(patterns) = cached_strip_root_patterns(&variant, name, win) else {
+            let needle = collapse_seps_lower(&root);
+            collapse_seps_lower(&result).contains(&needle)
+        } else {
+            result.contains(&root)
+        };
+        if !contains {
+            continue;
+        }
+        let Some(patterns) = cached_strip_root_patterns(&root, name, win) else {
+            return "[redacted]".into();
+        };
+        for (pattern, replacement) in patterns.iter() {
+            let Some(clean) = replace(pattern, &result, 0, Some(replacement)) else {
                 return "[redacted]".into();
             };
-            for (pattern, replacement) in patterns.iter() {
-                let Some(clean) = replace(pattern, &result, 0, Some(replacement)) else {
-                    return "[redacted]".into();
-                };
-                result = clean;
-            }
+            result = clean;
         }
     }
     result
@@ -1392,6 +1413,13 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let root_str = dir.path().to_string_lossy().into_owned();
         let unique_root = format!("{root_str}/unique-strip-root-cache-case");
+        let cache_key = {
+            let mut key = norm(&unique_root, windows(&unique_root));
+            while key.ends_with('/') || key.ends_with('\\') {
+                key.pop();
+            }
+            key
+        };
         let compiles_for = |key: &str| -> usize {
             strip_root_regex_compile_counts()
                 .lock()
@@ -1400,14 +1428,14 @@ mod tests {
                 .copied()
                 .unwrap_or(0)
         };
-        assert_eq!(compiles_for(&unique_root), 0);
+        assert_eq!(compiles_for(&cache_key), 0);
 
         let enricher_a = Enricher::new("claude", &unique_root, None, &[], None, None, false);
         let first = enricher_a
             .text(&format!("cat {unique_root}/src/main.rs"), 200)
             .unwrap();
         assert_eq!(first, "cat src/main.rs");
-        assert_eq!(compiles_for(&unique_root), 6);
+        assert_eq!(compiles_for(&cache_key), 6);
 
         let second = enricher_a
             .text(&format!("grep foo {unique_root}/src/lib.rs"), 200)
@@ -1419,10 +1447,29 @@ mod tests {
             .unwrap();
         assert_eq!(third, "ls tests");
         assert_eq!(
-            compiles_for(&unique_root),
+            compiles_for(&cache_key),
             6,
             "strip_root regexes must be cached across Enricher::text calls and instances"
         );
+
+        let win_root = r"C:\Users\dev\repo-strip-root-win-mixed";
+        assert_eq!(
+            strip_root(
+                r"cat C:\Users\dev\repo-strip-root-win-mixed/src/main.rs",
+                &[win_root.to_owned()],
+                None
+            ),
+            "cat src/main.rs"
+        );
+        assert_eq!(
+            strip_root(
+                "type C:/Users/dev/repo-strip-root-win-mixed\\src\\lib.rs",
+                &[win_root.to_owned()],
+                None
+            ),
+            r"type src\lib.rs"
+        );
+        assert_eq!(compiles_for("C:/Users/dev/repo-strip-root-win-mixed"), 6);
 
         assert_eq!(
             normalize_command_signature("  cargo test   -p infra-harness 2>&1 | tail -n 20 "),

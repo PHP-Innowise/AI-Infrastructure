@@ -66,6 +66,10 @@ impl Graphs {
         if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
             stores_ro.remove(project);
         }
+        crate::graph_ir::GraphIrStore::evict_readonly_cache_for_dir(&folder(
+            &self.store.state,
+            project,
+        ));
     }
     pub(super) fn stop_watcher(&self, project: &str) {
         let removed = self

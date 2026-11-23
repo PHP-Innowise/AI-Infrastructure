@@ -2073,6 +2073,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = infra_core::fs::canonicalize(dir.path()).unwrap();
         let state = root.join("state");
+        {
+            let _init = SessionStore::open(&state).unwrap();
+        }
         let source = root.join("source");
         let target = root.join("target");
         let run_dir = state.join("creator").join("run1");

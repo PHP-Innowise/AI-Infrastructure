@@ -94,6 +94,14 @@ mod windows {
         sid: Sid,
         attrs: u32,
     }
+    #[repr(C)]
+    struct AclHeader {
+        _revision: u8,
+        _sbz1: u8,
+        size: u16,
+        _count: u16,
+        _sbz2: u16,
+    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcess() -> Handle;
@@ -126,6 +134,11 @@ mod windows {
             present: *mut Bool,
             dacl: *mut *mut c_void,
             defaulted: *mut Bool,
+        ) -> Bool;
+        fn GetSecurityDescriptorControl(
+            descriptor: *mut c_void,
+            control: *mut u16,
+            revision: *mut u32,
         ) -> Bool;
         fn GetSecurityInfo(
             handle: Handle,
@@ -268,15 +281,16 @@ mod windows {
     }
     fn protect(file: &File, user: &User) -> Result<()> {
         let mut owner = ptr::null_mut();
+        let mut current_dacl = ptr::null_mut();
         let mut descriptor = ptr::null_mut();
         if unsafe {
             GetSecurityInfo(
                 file.as_raw_handle().cast(),
                 1,
-                OWNER,
+                OWNER | DACL,
                 &mut owner,
                 ptr::null_mut(),
-                ptr::null_mut(),
+                &mut current_dacl,
                 ptr::null_mut(),
                 &mut descriptor,
             )
@@ -291,7 +305,6 @@ mod windows {
         {
             return Err(denied());
         }
-        drop(owner_memory);
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl = ptr::null_mut();
@@ -302,6 +315,32 @@ mod windows {
             || dacl.is_null()
         {
             return Err(denied());
+        }
+        // Keep `owner_memory` alive while comparing `owner` and `current_dacl`.
+        // Skipping a no-op SetSecurityInfo avoids propagating ACLs across existing
+        // descendants and changing their NTFS ChangeTime custody stamps.
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        let unchanged = !current_dacl.is_null()
+            && unsafe { EqualSid(owner, user.sid) } != 0
+            && unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
+                != 0
+            && control & 0x1000 != 0
+            && {
+                let current = unsafe { &*current_dacl.cast::<AclHeader>() };
+                let wanted = unsafe { &*dacl.cast::<AclHeader>() };
+                usize::from(current.size) >= std::mem::size_of::<AclHeader>()
+                    && current.size == wanted.size
+                    && unsafe {
+                        std::slice::from_raw_parts(
+                            current_dacl.cast::<u8>(),
+                            usize::from(current.size),
+                        ) == std::slice::from_raw_parts(dacl.cast::<u8>(), usize::from(wanted.size))
+                    }
+            };
+        drop(owner_memory);
+        if unchanged {
+            return Ok(());
         }
         if unsafe {
             SetSecurityInfo(

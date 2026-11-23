@@ -3660,6 +3660,21 @@ mod tests {
         services.close().await.unwrap();
     }
 
+    fn set_dir_modified_for_test(dir: &Path, time: SystemTime) {
+        let mut opts = std::fs::File::options();
+        #[cfg(unix)]
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            opts.access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        opts.open(dir).unwrap().set_modified(time).unwrap();
+    }
+
     #[tokio::test]
     async fn handle_preflight_fans_out_concurrently_and_memoizes_by_revision() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3917,12 +3932,7 @@ mod tests {
             .unwrap()
             .set_modified(settled_att)
             .unwrap();
-        std::fs::File::options()
-            .read(true)
-            .open(&attached_bank)
-            .unwrap()
-            .set_modified(settled_att)
-            .unwrap();
+        set_dir_modified_for_test(&attached_bank, settled_att);
         let _ = services
             .request("knowledge.preflight", req2.clone())
             .await
@@ -3957,12 +3967,7 @@ mod tests {
             .unwrap()
             .set_modified(settled_time)
             .unwrap();
-        std::fs::File::options()
-            .read(true)
-            .open(&bank_dir)
-            .unwrap()
-            .set_modified(settled_time)
-            .unwrap();
+        set_dir_modified_for_test(&bank_dir, settled_time);
         let reg = store.register(&proj).unwrap();
         let pid = reg["id"].as_str().unwrap().to_owned();
 

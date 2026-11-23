@@ -3981,13 +3981,28 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
         }
         assert!(graphs.live_index(&pid).is_some());
 
-        // Read-only `GraphIrStore` handle cache hits and `evict_ir_store` clears both caches.
+        // Read-only `GraphIrStore` handle cache hits and `evict_ir_store` clears both per-manager and RO_CACHE handles.
         let ro1 = graphs.get_ir_store_readonly(&pid).expect("ro1");
         let ro2 = graphs.get_ir_store_readonly(&pid).expect("ro2");
         assert!(Arc::ptr_eq(&ro1, &ro2));
+        let cached_ro1 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro1");
+        let cached_ro2 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro2");
+        assert!(Arc::ptr_eq(&cached_ro1, &cached_ro2));
         graphs.evict_ir_store(&pid);
         let ro3 = graphs.get_ir_store_readonly(&pid).expect("ro3");
         assert!(!Arc::ptr_eq(&ro1, &ro3));
+        let cached_ro3 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro3");
+        assert!(!Arc::ptr_eq(&cached_ro1, &cached_ro3));
+        drop(cached_ro1);
+        drop(cached_ro2);
+        drop(cached_ro3);
+        graphs.evict_ir_store(&pid);
 
         // Rapid incremental updates coalesce via cooldown and produce exact full-rebuild parity.
         std::fs::write(

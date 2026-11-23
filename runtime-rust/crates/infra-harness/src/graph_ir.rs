@@ -268,6 +268,22 @@ fn map_stored_symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSymb
     })
 }
 
+const MAX_CACHED_RO_STORES: usize = 16;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CachedRoIdentity {
+    len: u64,
+    mtime_ns: u64,
+    ino: u64,
+}
+
+type CachedRoEntry = (PathBuf, CachedRoIdentity, Arc<GraphIrStore>);
+
+fn ro_store_cache() -> &'static Mutex<Vec<CachedRoEntry>> {
+    static RO_CACHE: OnceLock<Mutex<Vec<CachedRoEntry>>> = OnceLock::new();
+    RO_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 impl GraphIrStore {
     /// Opens (or initializes) `<state>/graphs/<project>/graph_ir.sqlite3` with custody checks and WAL mode.
     pub(crate) fn open(state: &Path, project: &str) -> Result<Self> {
@@ -486,18 +502,8 @@ impl GraphIrStore {
     /// Opens an existing SQLite IR store at `db_path` strictly read-only with bounded process-wide
     /// handle caching so concurrent readers reuse WAL read pools across calls.
     pub(crate) fn open_at_readonly_cached(db_path: &Path) -> Result<Option<Arc<Self>>> {
-        const MAX_CACHED_RO_STORES: usize = 16;
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        struct FileIdentity {
-            len: u64,
-            mtime_ns: u64,
-            ino: u64,
-        }
-        type CachedRoEntry = (PathBuf, FileIdentity, Arc<GraphIrStore>);
-        static RO_CACHE: OnceLock<Mutex<Vec<CachedRoEntry>>> = OnceLock::new();
-
         let Some(verified) = verify_existing_sqlite_path(db_path)? else {
-            if let Ok(mut guard) = RO_CACHE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+            if let Ok(mut guard) = ro_store_cache().lock() {
                 guard.retain(|(p, _, _)| p != db_path);
             }
             return Ok(None);
@@ -515,13 +521,13 @@ impl GraphIrStore {
         };
         #[cfg(not(unix))]
         let ino = 0;
-        let ident = FileIdentity {
+        let ident = CachedRoIdentity {
             len: meta.len(),
             mtime_ns,
             ino,
         };
 
-        let cache = RO_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+        let cache = ro_store_cache();
         if let Ok(mut guard) = cache.lock()
             && let Some(pos) = guard
                 .iter()
@@ -548,6 +554,41 @@ impl GraphIrStore {
             guard.push((verified, ident, Arc::clone(&shared)));
         }
         Ok(Some(shared))
+    }
+
+    /// Evicts any cached read-only SQLite handle rooted under `dir` so deletes succeed
+    /// immediately on Windows without sharing violations on `graph_ir.sqlite3`.
+    pub(crate) fn evict_readonly_cache_for_dir(dir: &Path) {
+        let canonical = infra_core::fs::python_realpath(dir).ok();
+        let matches_dir = |candidate: &Path| -> bool {
+            let check = |base: &Path| -> bool {
+                if candidate.starts_with(base) {
+                    return true;
+                }
+                if cfg!(windows) {
+                    let cand_s = candidate
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_lowercase();
+                    let base_s = base
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .trim_end_matches('/')
+                        .to_lowercase();
+                    !base_s.is_empty()
+                        && (cand_s == base_s
+                            || cand_s
+                                .strip_prefix(&base_s)
+                                .is_some_and(|rest| rest.starts_with('/')))
+                } else {
+                    false
+                }
+            };
+            check(dir) || canonical.as_ref().is_some_and(|c| check(c))
+        };
+        if let Ok(mut guard) = ro_store_cache().lock() {
+            guard.retain(|(p, _, _)| !matches_dir(p));
+        }
     }
 
     /// Opens an existing SQLite IR store at `db_path` strictly read-only without creating files
