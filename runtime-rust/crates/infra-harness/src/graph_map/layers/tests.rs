@@ -2465,3 +2465,270 @@ fn skip_layer_remediation_hints_and_compare_declared_layers_work() {
             .contains("port/interface")
     );
 }
+
+#[test]
+fn crate_and_folder_lod_preserve_extended_rules_and_violation_budget() {
+    use crate::graph_ir::{IrLinkSpec, IrNodeSpec};
+    let dir = tempfile::tempdir().unwrap();
+    for rel in [
+        "crates/app/Cargo.toml",
+        "packages/ui/Cargo.toml",
+        "packages/db/Cargo.toml",
+    ] {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "[package]\nname=\"demo\"\n").unwrap();
+    }
+    let rules_json = serde_json::json!({
+        "version": 1,
+        "layers": [
+            {
+                "id": "ctrl",
+                "name": "Controllers",
+                "paths": ["crates/app/src/**"],
+                "forbids_semantic": ["writes_table"]
+            }
+        ],
+        "package_rules": [
+            {
+                "id": "pkg-ui",
+                "paths": ["packages/ui/**"],
+                "forbids": ["pkg-db"]
+            },
+            {
+                "id": "pkg-db",
+                "paths": ["packages/db/**"]
+            }
+        ],
+        "semantic_rules": [
+            {
+                "id": "sem-orders-only",
+                "from": "crates/app/src/**",
+                "relation": "writes_table",
+                "target": "table:orders",
+                "effect": "forbid"
+            }
+        ]
+    });
+    let rules = Rules::parse(rules_json.to_string().as_bytes()).expect("parse extended rules");
+
+    let mk_file = |path: &str| IrNodeSpec {
+        id: format!("file:{path}"),
+        label: path.rsplit('/').next().unwrap_or(path).to_owned(),
+        source_file: path.to_owned(),
+        source_location: None,
+        end_line: 0,
+        file_type: Some("code".into()),
+        node_kind: Some("page".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_fn = |id: &str, path: &str, name: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: format!("{name}()"),
+        source_file: path.to_owned(),
+        source_location: Some("L1".into()),
+        end_line: 1,
+        file_type: None,
+        node_kind: Some("function".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_sem = |id: &str, label: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        source_file: "__semantic__/tables".into(),
+        source_location: Some("L2".into()),
+        end_line: 0,
+        file_type: None,
+        node_kind: Some("semantic".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_call = |src: &str, dst: &str, file: &str| IrLinkSpec {
+        source: src.into(),
+        target: dst.into(),
+        relation: Some("calls".into()),
+        confidence: Some("EXTRACTED".into()),
+        source_file: Some(file.into()),
+        context: None,
+        evidence: None,
+    };
+
+    let mut nodes = vec![
+        mk_file("crates/app/src/OrderCtrl.php"),
+        mk_fn("fn:ctrl", "crates/app/src/OrderCtrl.php", "store"),
+        mk_file("packages/ui/view.ts"),
+        mk_fn("fn:ui", "packages/ui/view.ts", "render"),
+        mk_file("packages/db/store.ts"),
+        mk_fn("fn:db", "packages/db/store.ts", "query"),
+        mk_sem("sem:table:orders", "table:orders"),
+        mk_sem("sem:table:orders_archive", "table:orders_archive"),
+    ];
+    let mut links = vec![
+        // Single call link (weight = 1), so 200 higher-weight clean edges outrank it past DRAWN=160.
+        mk_call("fn:ui", "fn:db", "packages/ui/view.ts"),
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:table:orders".into(),
+            relation: Some("writes_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("crates/app/src/OrderCtrl.php".into()),
+            context: Some("writes_table".into()),
+            evidence: Some("DB::table('orders')".into()),
+        },
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:table:orders_archive".into(),
+            relation: Some("reads_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("crates/app/src/OrderCtrl.php".into()),
+            context: Some("reads_table".into()),
+            evidence: Some("DB::table('orders_archive')".into()),
+        },
+    ];
+    // 22 clean crates * 9 outgoing crate-to-crate edges = 198 edges (> DRAWN = 160), while total
+    // bucket count (22 + 3 + 1 = 26) remains comfortably under SHOWN = 40 so all endpoints stay visible.
+    let clean_count = 22usize;
+    for i in 0..clean_count {
+        let cargo = dir.path().join(format!("crates/clean{i:02}/Cargo.toml"));
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(cargo, "[package]\nname=\"clean\"\n").unwrap();
+        let path = format!("crates/clean{i:02}/src/mod.ts");
+        let fn_id = format!("fn:c{i}");
+        nodes.push(mk_file(&path));
+        nodes.push(mk_fn(&fn_id, &path, "run"));
+    }
+    for i in 0..clean_count {
+        let src_path = format!("crates/clean{i:02}/src/mod.ts");
+        let src_fn = format!("fn:c{i}");
+        for off in 1..=9 {
+            let dst_fn = format!("fn:c{}", (i + off) % clean_count);
+            for _ in 0..3 {
+                links.push(mk_call(&src_fn, &dst_fn, &src_path));
+            }
+        }
+    }
+
+    let idx = Index::from_ir_parts(dir.path(), None, None, nodes, links).unwrap();
+    let filter = LodFilter {
+        scope: "",
+        focus: None,
+        filter: "",
+        certain: false,
+        offset: 0,
+        limit: None,
+    };
+
+    for lod in [Lod::Folder, Lod::Crate] {
+        let mut view = idx.view_at_lod_unfiltered("demo", lod, &filter);
+        idx.mark_architecture(&mut view, false, Some(&rules));
+        let edges = view["edges"].as_array().expect("edges array");
+        let pkg_edge = edges
+            .iter()
+            .find(|e| {
+                e["from"].as_str().unwrap_or("").starts_with("packages/ui")
+                    && e["to"].as_str().unwrap_or("").starts_with("packages/db")
+            })
+            .unwrap_or_else(|| {
+                panic!("expected preserved package violation at {lod:?}: {edges:?}")
+            });
+        assert!(
+            pkg_edge["architecture_violation"].as_u64().unwrap_or(0) >= 1,
+            "expected architecture_violation count on {lod:?} edge: {pkg_edge}"
+        );
+        assert!(
+            pkg_edge["rule_ids"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|v| v == "pkg-ui")),
+            "expected structured rule_ids on {lod:?} edge: {pkg_edge}"
+        );
+        assert!(
+            pkg_edge["architecture_rules"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|r| r["kind"] == "package")),
+            "expected structured architecture_rules on {lod:?} edge: {pkg_edge}"
+        );
+
+        let sem_orders_edge = edges.iter().find(|e| {
+            e["from"].as_str().unwrap_or("").starts_with("crates/app")
+                && e["to"] == "__semantic__/tables"
+                && e["architecture_rules"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|r| r["rule_id"] == "sem-orders-only"))
+        });
+        assert!(
+            sem_orders_edge.is_some(),
+            "expected preserved sem-orders-only edge at {lod:?}: {edges:?}"
+        );
+    }
+
+    // Also verify rollup_view_to_lod preserves structured rule_ids/architecture_rules, enforces
+    // exact semantic target matching, and preserves KEPT_VIOLATIONS past DRAWN=160.
+    let mut rollup_nodes = vec![
+        json!({"path": "packages/ui/view.ts", "name": "view.ts"}),
+        json!({"path": "packages/db/store.ts", "name": "store.ts"}),
+        json!({"path": "crates/app/src/OrderCtrl.php", "name": "OrderCtrl.php"}),
+        json!({"path": "sem:table:orders", "name": "table:orders", "node_kind": "semantic", "semantic": true}),
+        json!({"path": "sem:table:orders_archive", "name": "table:orders_archive", "node_kind": "semantic", "semantic": true}),
+    ];
+    let mut rollup_edges = vec![
+        json!({"from": "packages/ui/view.ts", "to": "packages/db/store.ts", "links": 1}),
+        json!({"from": "crates/app/src/OrderCtrl.php", "to": "sem:table:orders", "links": 1, "relation": "writes_table"}),
+        json!({"from": "crates/app/src/OrderCtrl.php", "to": "sem:table:orders_archive", "links": 2, "relation": "reads_table"}),
+    ];
+    for i in 0..clean_count {
+        rollup_nodes
+            .push(json!({"path": format!("crates/clean{i:02}/src/mod.ts"), "name": "mod.ts"}));
+    }
+    for i in 0..clean_count {
+        for off in 1..=9 {
+            rollup_edges.push(json!({
+                "from": format!("crates/clean{i:02}/src/mod.ts"),
+                "to": format!("crates/clean{:02}/src/mod.ts", (i + off) % clean_count),
+                "links": 5
+            }));
+        }
+    }
+    let mut marked_file_view = json!({"nodes": rollup_nodes, "edges": rollup_edges});
+    idx.mark_architecture(&mut marked_file_view, false, Some(&rules));
+    let archive_false_hit = marked_file_view["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| {
+            e["to"] == "sem:table:orders_archive"
+                && e["rule_ids"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|v| v == "sem-orders-only"))
+        });
+    assert!(
+        !archive_false_hit,
+        "target `table:orders` must not falsely match `table:orders_archive` via substring"
+    );
+    assert!(crate::graph_map::lod::rollup_view_to_lod(
+        &idx,
+        &mut marked_file_view,
+        Lod::Crate
+    ));
+    let rolled_edges = marked_file_view["edges"].as_array().unwrap();
+    let rolled_pkg = rolled_edges
+        .iter()
+        .find(|e| e["from"] == "packages/ui" && e["to"] == "packages/db")
+        .expect("rolled package violation preserved past DRAWN");
+    assert_eq!(rolled_pkg["kept"], "violation");
+    assert!(
+        rolled_pkg["rule_ids"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v == "pkg-ui"))
+    );
+}

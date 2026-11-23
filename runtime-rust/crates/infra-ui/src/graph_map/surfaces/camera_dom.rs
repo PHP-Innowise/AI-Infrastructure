@@ -1,4 +1,7 @@
 use super::*;
+use crate::graph_map::render::{
+    render_dense_node_dom_html, DenseNodeDomSeed, DenseRenderModeFlags,
+};
 
 #[derive(Clone, Debug)]
 pub(in crate::graph_map) struct Camera {
@@ -259,25 +262,25 @@ pub(in crate::graph_map) fn zoom_surface_camera_to_bbox(
 fn maybe_schedule_auto_lod_reload(surface: MapSurface, prev_scale: f64, next_scale: f64) {
     let st = surface_state(surface);
     let view = m::data(surface.view_key);
-    if super::state_urls::should_trigger_auto_lod_reload(
-        surface.embedded,
-        &st,
-        &view,
-        prev_scale,
-        next_scale,
-    ) {
+    if super::state_urls::should_trigger_auto_lod_reload(&st, &view, prev_scale, next_scale) {
         #[cfg(target_arch = "wasm32")]
         {
-            dom::later("graph-map-auto-lod", 180, move || {
-                if !open() || active_drag_surface().is_some() {
+            let timer_key = format!("{}-auto-lod", surface.id_prefix);
+            dom::later(&timer_key, 180, move || {
+                let surface_active = if surface.embedded {
+                    dom::get(surface.canvas).is_some() && !surface_scope(surface).is_empty()
+                } else {
+                    open()
+                };
+                if !surface_active || active_drag_surface().is_some() {
                     return;
                 }
-                let cur_cam = load_surface_camera(MODAL_SURFACE);
+                let cur_cam = load_surface_camera(surface);
                 if cur_cam.fit_mode {
                     return;
                 }
-                let cur_st = surface_state(MODAL_SURFACE);
-                let cur_view = m::data(MODAL_SURFACE.view_key);
+                let cur_st = surface_state(surface);
+                let cur_view = m::data(surface.view_key);
                 if !super::state_urls::should_trigger_auto_lod_for_target(
                     &cur_st,
                     &cur_view,
@@ -285,11 +288,17 @@ fn maybe_schedule_auto_lod_reload(surface: MapSurface, prev_scale: f64, next_sca
                 ) {
                     return;
                 }
-                spawn_local(async {
-                    modal_lifecycle::load(true).await;
+                spawn_local(async move {
+                    if surface.embedded {
+                        super::embedded::load_embedded_surface(surface, true).await;
+                    } else {
+                        modal_lifecycle::load(true).await;
+                    }
                 });
             });
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = surface;
     }
 }
 
@@ -312,13 +321,11 @@ pub(in crate::graph_map) fn zoom_surface_camera_at(
     ));
     cam.fit_mode = false;
     let next_scale = cam.scale;
-    if !surface.embedded {
-        let mut st = state();
-        st["zoom"] = json!(next_scale);
-        st["scale"] = json!(next_scale);
-        st["fit"] = json!(false);
-        m::set("graph-map", st);
-    }
+    let mut st = surface_state(surface);
+    st["zoom"] = json!(next_scale);
+    st["scale"] = json!(next_scale);
+    st["fit"] = json!(false);
+    save_surface_state(surface, &st);
     save_surface_camera(surface, &cam);
     apply_surface_camera(surface, &cam);
     maybe_schedule_auto_lod_reload(surface, prev_scale, next_scale);
@@ -335,13 +342,11 @@ pub(in crate::graph_map) fn reset_surface_camera_100(surface: MapSurface) {
     ));
     cam.fit_mode = false;
     let next_scale = cam.scale;
-    if !surface.embedded {
-        let mut st = state();
-        st["zoom"] = V::Null;
-        st["scale"] = V::Null;
-        st["fit"] = json!(false);
-        m::set("graph-map", st);
-    }
+    let mut st = surface_state(surface);
+    st["zoom"] = V::Null;
+    st["scale"] = V::Null;
+    st["fit"] = json!(false);
+    save_surface_state(surface, &st);
     save_surface_camera(surface, &cam);
     apply_surface_camera(surface, &cam);
     maybe_schedule_auto_lod_reload(surface, prev_scale, next_scale);
@@ -505,6 +510,8 @@ pub(in crate::graph_map) struct CachedSurfacePlan {
     pub(in crate::graph_map) node_labels: Vec<String>,
     pub(in crate::graph_map) is_dense: bool,
     pub(in crate::graph_map) dense_node_htmls: Vec<String>,
+    pub(in crate::graph_map) dense_node_seeds: Vec<Option<DenseNodeDomSeed>>,
+    pub(in crate::graph_map) dense_render_modes: DenseRenderModeFlags,
     pub(in crate::graph_map) dense_extra_specs: Vec<Option<DenseNodeExtraSpec>>,
     pub(in crate::graph_map) latest_patch: Option<CanvasSelectionPatch>,
     pub(in crate::graph_map) latest_roving_focus: Option<usize>,
@@ -574,6 +581,8 @@ impl CachedSurfacePlan {
             node_labels: rendered.node_labels.clone(),
             is_dense: rendered.dense_scene.is_some(),
             dense_node_htmls: rendered.dense_node_htmls.clone(),
+            dense_node_seeds: rendered.dense_node_seeds.clone(),
+            dense_render_modes: rendered.dense_render_modes,
             dense_extra_specs: rendered.dense_extra_specs.clone(),
             latest_patch: None,
             latest_roving_focus: overlay.and_then(|ctx| ctx.roving_focus),
@@ -582,6 +591,27 @@ impl CachedSurfacePlan {
                 .cloned()
                 .unwrap_or_default(),
         }
+    }
+
+    pub(in crate::graph_map) fn materialize_node_html(
+        &self,
+        view: Option<&V>,
+        idx: usize,
+    ) -> Option<String> {
+        if let Some(existing) = self.dense_node_htmls.get(idx).filter(|s| !s.is_empty()) {
+            return Some(existing.clone());
+        }
+        let view = view?;
+        let seed = self.dense_node_seeds.get(idx)?.as_ref()?;
+        let nodes = m::array(&view["nodes"]);
+        let node = nodes.get(idx)?;
+        Some(render_dense_node_dom_html(
+            view,
+            node,
+            seed,
+            self.dense_render_modes,
+            self.latest_roving_focus == Some(idx),
+        ))
     }
 }
 
@@ -750,16 +780,14 @@ pub(in crate::graph_map) fn mount_dense_node_if_needed(
         return Some(existing);
     }
     let plane = canvas.query_selector(".graph-map-plane").ok().flatten()?;
+    let surface_view = pan_surface_for_canvas(canvas_id).map(|s| m::data(s.view_key));
     let (html, extra_spec, patch, roving, path_nodes) = SURFACE_PLAN_CACHE.with(|cache| {
         let guard = cache.borrow();
         let entry = guard.get(canvas_id)?;
         if !entry.is_dense {
             return None;
         }
-        let html = entry.dense_node_htmls.get(idx)?.clone();
-        if html.is_empty() {
-            return None;
-        }
+        let html = entry.materialize_node_html(surface_view.as_ref(), idx)?;
         let spec = entry.dense_extra_specs.get(idx).and_then(|s| s.clone());
         Some((
             html,
@@ -818,7 +846,7 @@ pub(in crate::graph_map) fn try_patch_canvas_dom_in_place(
         return None;
     }
     if cached.is_dense
-        && (cached.dense_node_htmls.len() != patch.nodes.len()
+        && (cached.nodes.len() != patch.nodes.len()
             || node_els.iter().any(|el| {
                 el.get_attribute("data-n")
                     .and_then(|s| s.parse::<usize>().ok())
@@ -860,8 +888,8 @@ pub(in crate::graph_map) fn try_patch_canvas_dom_in_place(
             if !important {
                 continue;
             }
-            if let Some(html) = cached.dense_node_htmls.get(idx).filter(|s| !s.is_empty()) {
-                batch_html.push_str(html);
+            if let Some(html) = cached.materialize_node_html(Some(view), idx) {
+                batch_html.push_str(&html);
                 batch_indices.push(idx);
             }
         }
@@ -1034,7 +1062,7 @@ pub(in crate::graph_map) fn sync_viewport_culling(canvas_id: &str, bounds: Optio
         }
     }
 
-    if cached.is_dense && cached.dense_node_htmls.len() == cached.nodes.len() {
+    if cached.is_dense && cached.dense_node_seeds.len() == cached.nodes.len() {
         if let Some(plane) =
             dom::get(canvas_id).and_then(|c| c.query_selector(".graph-map-plane").ok().flatten())
         {
@@ -1081,22 +1109,13 @@ pub(in crate::graph_map) fn sync_viewport_culling(canvas_id: &str, bounds: Optio
                 280.0,
                 &mut mounted_els,
                 |idx, el_opt| {
-                    cached
-                        .dense_node_htmls
-                        .get(idx)
-                        .is_none_or(|s| s.is_empty())
+                    cached.dense_node_seeds.get(idx).is_none_or(|s| s.is_none())
                         || el_opt.map_or_else(
                             || is_important_cached_node(&cached, idx),
                             |el| is_important_node_el(&cached, idx, el),
                         )
                 },
-                |idx| {
-                    cached
-                        .dense_node_htmls
-                        .get(idx)
-                        .filter(|s| !s.is_empty())
-                        .cloned()
-                },
+                |idx| cached.materialize_node_html(view_opt.as_ref(), idx),
                 |idx, el| {
                     if let Some(np) = cached.latest_patch.as_ref().and_then(|p| p.nodes.get(idx)) {
                         apply_node_patch_to_el(

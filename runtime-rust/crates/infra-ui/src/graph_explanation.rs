@@ -1477,6 +1477,50 @@ fn link_evidence(view: &V) -> V {
     json!({"pairs": pairs, "links": count, "omitted": count.saturating_sub(pairs.len() as u64)})
 }
 
+fn is_semantic_selection_key(key: &str) -> bool {
+    key.starts_with("sem:") || key.starts_with("__semantic__/")
+}
+
+fn is_semantic_node(node: Option<&V>) -> bool {
+    node.is_some_and(|n| m::yes(&n["semantic"]) || n["node_kind"].as_str() == Some("semantic"))
+}
+
+fn semantic_bucket_for_key(key: &str) -> &'static str {
+    let trimmed = key.trim();
+    if let Some(sub) = trimmed.strip_prefix("__semantic__/") {
+        return match sub {
+            "routes" => "__semantic__/routes",
+            "tables" => "__semantic__/tables",
+            "events" => "__semantic__/events",
+            "services" => "__semantic__/services",
+            _ => "__semantic__/contracts",
+        };
+    }
+    let clean = trimmed.strip_prefix("sem:").unwrap_or(trimmed);
+    let head = clean.split(':').next().unwrap_or("");
+    match head {
+        "route" => "__semantic__/routes",
+        "table" => "__semantic__/tables",
+        "event" => "__semantic__/events",
+        "service" | "di" => "__semantic__/services",
+        _ => "__semantic__/contracts",
+    }
+}
+
+fn semantic_target_query(key: &str) -> String {
+    let trimmed = key.trim();
+    if let Some(sub) = trimmed.strip_prefix("__semantic__/") {
+        return match sub {
+            "routes" => "route:".to_owned(),
+            "tables" => "table:".to_owned(),
+            "events" => "event:".to_owned(),
+            "services" => "service:".to_owned(),
+            _ => "contract".to_owned(),
+        };
+    }
+    trimmed.strip_prefix("sem:").unwrap_or(trimmed).to_owned()
+}
+
 fn aggregate_kind_for_selection(
     view: &V,
     node: Option<&V>,
@@ -1486,6 +1530,9 @@ fn aggregate_kind_for_selection(
 ) -> String {
     let view_mode = view["mode"].as_str().unwrap_or("");
     let view_lod = view["lod"].as_str().unwrap_or("");
+    if is_semantic_node(node) || (!link && is_semantic_selection_key(key)) {
+        return "semantic".to_owned();
+    }
     if node.is_some_and(|n| m::yes(&n["layer"]))
         || view_mode == "layers"
         || key.starts_with("layer:")
@@ -1724,6 +1771,13 @@ enum EvidenceFetchKind {
     },
     CodeFocus {
         focus_key: String,
+    },
+    SemanticFocus {
+        focus_key: String,
+    },
+    SemanticTarget {
+        focus_key: String,
+        query: String,
     },
     CodeLink,
     DiffCycle {
@@ -1988,6 +2042,8 @@ fn plan_evidence_requests(
             || m::yes(&context["modules"])
         {
             "module".to_owned()
+        } else if is_semantic_selection_key(&key) {
+            "semantic".to_owned()
         } else if matches!(lod.as_str(), "crate" | "folder") {
             lod.clone()
         } else {
@@ -2139,6 +2195,47 @@ fn plan_evidence_requests(
                         lod: eff_lod,
                     },
                     req,
+                ));
+            }
+            "semantic" => {
+                let target_query = semantic_target_query(&key);
+                if let Some(find_req) =
+                    graph_map::build_scoped_find_path(scope, &non_diff_context, &target_query)
+                {
+                    plan.push((
+                        EvidenceFetchKind::SemanticTarget {
+                            focus_key: key.clone(),
+                            query: target_query,
+                        },
+                        find_req,
+                    ));
+                }
+                let sem_scope = selection["file"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !s.starts_with("sem:")
+                            && (*s == "__semantic__" || s.starts_with("__semantic__/"))
+                    })
+                    .unwrap_or_else(|| {
+                        if key.starts_with("__semantic__/") {
+                            "__semantic__"
+                        } else {
+                            semantic_bucket_for_key(&key)
+                        }
+                    });
+                let mut params = vec![("scope", sem_scope.to_owned()), ("focus", key.clone())];
+                if matches!(lod.as_str(), "crate" | "folder") && key.starts_with("__semantic__/") {
+                    params.push(("lod", lod.clone()));
+                }
+                let map_req =
+                    graph_map::build_scoped_graph_request(scope, params, &non_diff_context);
+                plan.push((
+                    EvidenceFetchKind::SemanticFocus {
+                        focus_key: key.clone(),
+                    },
+                    map_req,
                 ));
             }
             _ => {
@@ -2612,6 +2709,52 @@ fn merge_evidence_response(
                 }
             }
         }
+        EvidenceFetchKind::SemanticTarget { focus_key, query } => {
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || m::yes(&doc["missing"])
+            {
+                return;
+            }
+            let matches: Vec<V> = rows(doc, "rows").iter().take(LIMIT).cloned().collect();
+            ensure_evidence_object(selection);
+            selection["graph_evidence"]["semantic_target"] = json!({
+                "key": focus_key,
+                "bucket": semantic_bucket_for_key(focus_key),
+                "query": query,
+            });
+            if !matches.is_empty() {
+                selection["graph_evidence"]["semantic_matches"] = json!(matches);
+            }
+        }
+        EvidenceFetchKind::SemanticFocus { focus_key } => {
+            let actual = graph_selection(doc, &V::Null);
+            if (!scope.is_system() && doc["project_id"] != scope.project_id())
+                || (!context["base"].is_string()
+                    && context["revision"].is_string()
+                    && actual["revision"] != context["revision"])
+                || m::yes(&doc["preliminary"])
+            {
+                return;
+            }
+            ensure_evidence_object(selection);
+            if doc["focus"].is_object() {
+                let focus = &doc["focus"];
+                if focus["path"].as_str() == Some(focus_key.as_str()) {
+                    selection["graph_evidence"]["uses"] = neighbors(focus, "uses");
+                    selection["graph_evidence"]["used_by"] = neighbors(focus, "used_by");
+                    return;
+                }
+            }
+            let summary = summarize_aggregate_neighbors(doc, focus_key);
+            if let (Some(ev_obj), Some(sum_obj)) = (
+                selection["graph_evidence"].as_object_mut(),
+                summary.as_object(),
+            ) {
+                for (k, v) in sum_obj {
+                    ev_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
         EvidenceFetchKind::CodeFocus { focus_key } => {
             let actual = graph_selection(doc, &V::Null);
             if (!scope.is_system() && doc["project_id"] != scope.project_id())
@@ -2743,6 +2886,30 @@ fn truncate_largest_array(val: &mut V, depth: u8) -> bool {
     }
 }
 
+fn clip_string_fields(val: &mut V, max_len: usize) {
+    match val {
+        V::String(s) if s.len() > max_len => {
+            let mut cut = max_len;
+            while !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            s.truncate(cut);
+            s.push('…');
+        }
+        V::Object(map) => {
+            for child in map.values_mut() {
+                clip_string_fields(child, max_len);
+            }
+        }
+        V::Array(arr) => {
+            for child in arr.iter_mut() {
+                clip_string_fields(child, max_len);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn bound_graph_evidence(mut evidence: V, max_bytes: usize) -> V {
     if evidence.to_string().len() <= max_bytes {
         return evidence;
@@ -2762,22 +2929,109 @@ fn bound_graph_evidence(mut evidence: V, max_bytes: usize) -> V {
         return evidence;
     }
     // Trim oversized string values while keeping short structural fields intact.
+    clip_string_fields(&mut evidence, 512);
+    if evidence.to_string().len() <= max_bytes {
+        return evidence;
+    }
+
+    // Progressively drop low-priority secondary collections before touching core identity/summary fields.
+    const SECONDARY_DROP_PRIORITY: &[&str] = &[
+        "semantic_matches",
+        "edge_diffs",
+        "risk_callers",
+        "violations",
+        "matching_edges",
+        "used_by",
+        "uses",
+        "incoming",
+        "outgoing",
+        "neighbors",
+        "files",
+        "nodes",
+        "edges",
+        "diff_node",
+        "diff",
+        "cycle",
+        "layer_link",
+        "module_link",
+        "aggregate_link",
+        "services",
+        "details",
+    ];
+    const CORE_PRIMARY_KEYS: &[&str] = &[
+        "scope",
+        "node",
+        "focus",
+        "subject",
+        "from",
+        "to",
+        "service",
+        "summary",
+        "semantic_target",
+        "state",
+        "truncated",
+        "dropped_fields",
+    ];
+
+    let mut dropped: Vec<String> = Vec::new();
     if let Some(obj) = evidence.as_object_mut() {
-        for v in obj.values_mut() {
-            if let V::String(s) = v {
-                if s.len() > 512 {
-                    let mut cut = 512;
-                    while !s.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    s.truncate(cut);
-                    s.push('…');
+        for &key in SECONDARY_DROP_PRIORITY {
+            if obj.remove(key).is_some() {
+                dropped.push(key.to_owned());
+                obj.remove(&format!("{key}_omitted"));
+                obj.insert("dropped_fields".to_owned(), json!(dropped));
+                if serde_json::to_string(obj).map_or(usize::MAX, |s| s.len()) <= max_bytes {
+                    return evidence;
+                }
+            }
+        }
+        let extra_keys: Vec<String> = obj
+            .keys()
+            .filter(|k| !CORE_PRIMARY_KEYS.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        for key in extra_keys {
+            if obj.remove(&key).is_some() {
+                dropped.push(key);
+                obj.insert("dropped_fields".to_owned(), json!(dropped));
+                if serde_json::to_string(obj).map_or(usize::MAX, |s| s.len()) <= max_bytes {
+                    return evidence;
                 }
             }
         }
     }
-    if evidence.to_string().len() <= max_bytes {
-        return evidence;
+
+    // Tighten remaining core string values before shrinking core metadata.
+    for limit in [160usize, 64] {
+        clip_string_fields(&mut evidence, limit);
+        if evidence.to_string().len() <= max_bytes {
+            return evidence;
+        }
+    }
+    if let Some(obj) = evidence.as_object_mut() {
+        obj.remove("dropped_fields");
+        if serde_json::to_string(obj).map_or(usize::MAX, |s| s.len()) <= max_bytes {
+            return evidence;
+        }
+        for key in [
+            "semantic_target",
+            "summary",
+            "service",
+            "to",
+            "from",
+            "subject",
+            "node",
+        ] {
+            if obj.len() > 2
+                && obj.remove(key).is_some()
+                && serde_json::to_string(obj).map_or(usize::MAX, |s| s.len()) <= max_bytes
+            {
+                return evidence;
+            }
+        }
+        if serde_json::to_string(obj).map_or(usize::MAX, |s| s.len()) <= max_bytes {
+            return evidence;
+        }
     }
     json!({
         "state": "truncated",
@@ -3741,6 +3995,34 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
             bounded["uses"][0]["path"],
             json!("src/mod_0/very_long_component_name_0.rs")
         );
+
+        // Tight budget drops secondary collections progressively while preserving core identity fields.
+        let structured_ev = json!({
+            "scope": "visible semantic aggregate",
+            "focus": "sem:table:orders",
+            "node": { "path": "sem:table:orders", "name": "table:orders", "kind": "semantic" },
+            "summary": "Core orders table contract",
+            "uses": (0..30).map(|i| json!({"path": format!("src/target_{i}.php"), "detail": "x".repeat(60)})).collect::<Vec<_>>(),
+            "used_by": (0..30).map(|i| json!({"path": format!("src/caller_{i}.php"), "detail": "y".repeat(60)})).collect::<Vec<_>>(),
+            "edge_diffs": { "added": [{"from": "a", "to": "b", "note": "z".repeat(400)}] },
+            "semantic_matches": (0..25).map(|i| json!({"file": format!("app/Repo{i}.php")})).collect::<Vec<_>>(),
+        });
+        let tight = bound_graph_evidence(structured_ev, 420);
+        assert!(tight.to_string().len() <= 420, "{}", tight);
+        assert_eq!(tight["truncated"], json!(true));
+        assert_eq!(tight["scope"], json!("visible semantic aggregate"));
+        assert_eq!(tight["focus"], json!("sem:table:orders"));
+        assert_eq!(tight["summary"], json!("Core orders table contract"));
+        assert!(
+            tight.get("state").is_none(),
+            "must not wipe entire payload to state=truncated: {tight}"
+        );
+        assert!(
+            tight["dropped_fields"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|v| v == "semantic_matches")),
+            "expected progressive dropped_fields telemetry: {tight}"
+        );
     }
 
     #[test]
@@ -4039,5 +4321,57 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
             EvidenceFetchKind::SystemTopologyChanges { .. }
         ));
         assert!(sys_plan[1].1.starts_with("/api/systems/graph/changes?"));
+
+        // 5. Semantic hub selections (`sem:*` & `__semantic__/*`) route to semantic target find + namespace queries.
+        let sem_route_sel = json!({
+            "kind": "node",
+            "data": "sem:route:GET /api/orders",
+            "context": {
+                "canvas": "graph-map-canvas",
+                "view_scope": ""
+            }
+        });
+        let sem_plan = plan_evidence_requests(&sem_route_sel, &code_scope);
+        assert_eq!(sem_plan.len(), 2);
+        assert!(matches!(
+            sem_plan[0].0,
+            EvidenceFetchKind::SemanticTarget { .. }
+        ));
+        assert!(
+            sem_plan[0]
+                .1
+                .starts_with("/api/projects/proj-1/graph/find?")
+                && sem_plan[0].1.contains("query=route%3AGET"),
+            "expected semantic target /graph/find query: {}",
+            sem_plan[0].1
+        );
+        assert!(matches!(
+            sem_plan[1].0,
+            EvidenceFetchKind::SemanticFocus { .. }
+        ));
+        assert!(
+            sem_plan[1].1.contains("scope=__semantic__%2Froutes"),
+            "must scope to __semantic__/routes instead of scope='' or rsplit '/': {}",
+            sem_plan[1].1
+        );
+
+        let mut sem_merged = sem_route_sel.clone();
+        merge_evidence_response(
+            &mut sem_merged,
+            &code_scope,
+            &sem_plan[0].0,
+            &json!({
+                "project_id": "proj-1",
+                "rows": [{ "name": "route:GET /api/orders", "file": "routes/api.php", "line": 12 }]
+            }),
+        );
+        assert_eq!(
+            sem_merged["graph_evidence"]["semantic_target"]["bucket"],
+            json!("__semantic__/routes")
+        );
+        assert_eq!(
+            sem_merged["graph_evidence"]["semantic_matches"][0]["file"],
+            json!("routes/api.php")
+        );
     }
 }

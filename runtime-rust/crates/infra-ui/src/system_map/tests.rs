@@ -1032,6 +1032,30 @@ fn system_digest_pin_deltas_and_dense_scene_sync_behave_consistently() {
     assert!(!bundle.html.contains("system-map-hit"));
     assert!(!bundle.html.contains("system-map-edge-label"));
     assert_eq!(bundle.node_htmls.len(), dense_layout.nodes.len());
+    assert!(bundle.node_htmls.iter().all(|h| h.is_empty()));
+    let svc5_idx = dense_layout
+        .nodes
+        .iter()
+        .position(|n| n.id == "svc-5")
+        .expect("svc-5 layout index");
+    assert!(bundle
+        .materialize_node_html(
+            CHANGES_SURFACE,
+            &dense_doc,
+            &dense_state,
+            &dense_layout,
+            svc5_idx
+        )
+        .is_some_and(|h| h.contains("data-n=\"svc-5\"")));
+    // Shares lowered dense threshold (48 nodes).
+    let thresh_nodes: Vec<V> = (0..crate::graph_map::DENSE_GRAPH_NODE_THRESHOLD)
+        .map(|i| json!({"id": format!("s-{i}"), "name": format!("s-{i}"), "kind": "service"}))
+        .collect();
+    let thresh_doc = json!({"nodes": thresh_nodes, "edges": []});
+    let thresh_layout = layout_system_nodes_with_pins(&thresh_doc, false, &BTreeMap::new());
+    let thresh_bundle =
+        render_canvas_bundle_with_layout(CHANGES_SURFACE, &thresh_doc, &json!({}), &thresh_layout);
+    assert!(thresh_bundle.is_dense);
 
     let mut scene =
         build_dense_scene_for_surface(CHANGES_SURFACE, &dense_doc, &dense_state, &dense_layout)

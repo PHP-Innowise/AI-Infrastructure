@@ -447,11 +447,46 @@ pub(super) struct SysRenderBundle {
     pub(super) html: String,
     pub(super) is_dense: bool,
     pub(super) node_htmls: Vec<String>,
+    pub(super) node_seeds: Vec<bool>,
     pub(super) edge_endpoints: Vec<(String, String)>,
     pub(super) active_roving_id: String,
     pub(super) highlight_nodes: BTreeSet<String>,
     pub(super) failed_services: BTreeSet<String>,
     pub(super) pinned_ids: BTreeSet<String>,
+}
+
+impl SysRenderBundle {
+    #[allow(dead_code)]
+    pub(super) fn materialize_node_html(
+        &self,
+        surface: SysMapSurface,
+        view_doc: &V,
+        state: &V,
+        layout: &SysLayout,
+        idx: usize,
+    ) -> Option<String> {
+        if let Some(existing) = self.node_htmls.get(idx).filter(|s| !s.is_empty()) {
+            return Some(existing.clone());
+        }
+        if !self.node_seeds.get(idx).copied().unwrap_or(false) {
+            return None;
+        }
+        let placed = layout.nodes.get(idx)?;
+        let nodes = m::array(&view_doc["nodes"]);
+        let node = nodes.iter().find(|n| node_id(n) == placed.id)?;
+        let vis = compute_sys_visual_state(view_doc, state);
+        let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
+        Some(render_single_system_node_html(
+            surface,
+            placed,
+            node,
+            &vis,
+            &pins,
+            idx,
+            &self.active_roving_id,
+            false,
+        ))
+    }
 }
 
 pub(super) fn render_canvas_html_with_layout(
@@ -479,6 +514,7 @@ pub(super) fn render_canvas_bundle_with_layout(
             html: String::new(),
             is_dense: false,
             node_htmls: Vec::new(),
+            node_seeds: Vec::new(),
             edge_endpoints: Vec::new(),
             active_roving_id: String::new(),
             highlight_nodes: BTreeSet::new(),
@@ -498,7 +534,8 @@ pub(super) fn render_canvas_bundle_with_layout(
     let focus_id = vis.focus_id.clone();
     let sel_edge_pair = vis.sel_edge_pair.clone();
 
-    let is_dense = layout.nodes.len() >= 180 || layout.wires.len() >= 400;
+    let is_dense = layout.nodes.len() >= crate::graph_map::DENSE_GRAPH_NODE_THRESHOLD
+        || layout.wires.len() >= crate::graph_map::DENSE_GRAPH_EDGE_THRESHOLD;
     let tier_attr = if is_dense {
         " data-scale-tier=\"dense\""
     } else {
@@ -714,6 +751,11 @@ pub(super) fn render_canvas_bundle_with_layout(
     } else {
         Vec::new()
     };
+    let mut node_seeds = if is_dense {
+        Vec::with_capacity(layout.nodes.len())
+    } else {
+        Vec::new()
+    };
     let pinned_ids: BTreeSet<String> = pins.keys().cloned().collect();
 
     // Interactive service & unfolded child HTML node cards
@@ -721,6 +763,7 @@ pub(super) fn render_canvas_bundle_with_layout(
         let Some(&node) = node_by_id.get(&placed.id) else {
             if is_dense {
                 node_htmls.push(String::new());
+                node_seeds.push(false);
             }
             continue;
         };
@@ -731,15 +774,6 @@ pub(super) fn render_canvas_bundle_with_layout(
                 || placed.y + placed.h < vy - pad
                 || placed.y > vy + vh + pad
         });
-        let kind = node["kind"].as_str().unwrap_or("service");
-        let name = {
-            let n = m::text(node, "name");
-            if n.is_empty() {
-                placed.id.clone()
-            } else {
-                n
-            }
-        };
         let parent_svc = placed
             .child_of
             .clone()
@@ -749,209 +783,30 @@ pub(super) fn render_canvas_bundle_with_layout(
         } else {
             parent_svc
         };
-        let is_selected = focus_id == placed.id;
-        let is_highlighted = vis.highlight_nodes.contains(&placed.id);
-        let is_pinned = pins.contains_key(&placed.id);
-        let is_failed =
-            vis.failed_services.contains(&placed.id) || vis.failed_services.contains(&svc_id);
-        let is_roving = active_roving_id == placed.id;
-        let is_important = is_selected || is_highlighted || is_pinned || is_failed || is_roving;
-        let tabindex = if is_roving { "0" } else { "-1" };
-
-        let waiting = vis.beyond(&placed.id);
-        let blast_role = vis.blast_role(&placed.id);
-        let step_state = vis.step_state(&placed.id);
-        let unopened_warn = vis.unopened_consumers.contains(&placed.id);
-        let graph_state = m::text(&node["graph_status"], "state");
-
-        let payload = payload_attr(&json!({
-            "surface": surface.id,
-            "path": placed.id,
-            "id": placed.id,
-            "service": svc_id,
-            "kind": kind,
-        }));
-
-        let child_extra = format!(
-            "{}{}{} tabindex=\"{tabindex}\" data-roving-index=\"{node_roving_idx}\"",
-            if is_pinned {
-                " data-pinned=\"true\""
-            } else {
-                ""
-            },
-            if is_failed {
-                " data-failed=\"true\""
-            } else {
-                ""
-            },
-            if is_dense && offscreen && !is_important {
-                " data-offscreen=\"true\""
-            } else {
-                ""
-            },
-        );
-
-        let node_html = if let Some(parent_id) = placed.child_of.as_deref() {
-            let badge = match kind {
-                "contract" => "C",
-                "capability" => "Cap",
-                "source" => "Src",
-                "more" => "...",
-                _ => "•",
-            };
-            let title_text = if kind == "more" {
-                let d = m::text(node, "detail");
-                if d.is_empty() {
-                    name.clone()
-                } else {
-                    d
-                }
-            } else {
-                name.clone()
-            };
-            let child_payload = if kind == "more" {
-                payload_attr(&json!({
-                    "surface": surface.id,
-                    "path": parent_id,
-                    "id": parent_id,
-                    "service": parent_id,
-                    "kind": "service",
-                }))
-            } else {
-                payload.clone()
-            };
-            format!(
-                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-parent=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{child_payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
-                escape(&placed.id),
-                escape(parent_id),
-                escape(kind),
-                if is_selected { "true" } else { "false" },
-                if is_highlighted {
-                    " data-shared-path=\"true\""
-                } else {
-                    ""
-                },
-                placed.x,
-                placed.y,
-                placed.w,
-                placed.h,
-                escape(&svc_id),
-                escape(&title_text),
-                escape(&title_text),
-                escape(badge),
-                escape(&name),
-            )
-        } else {
-            let mut meta_parts = Vec::new();
-            let lang = m::text(node, "language");
-            if !lang.is_empty() {
-                meta_parts.push(lang);
-            }
-            let provides_n = m::array(&node["provides"]).len();
-            if provides_n > 0 {
-                meta_parts.push(format!("{provides_n} contracts"));
-            } else if placed.id == "__system__" {
-                let sh = m::array(&node["shared_sources"]).len();
-                meta_parts.push(format!("{sh} shared docs"));
-            }
-            if !step_state.is_empty() {
-                meta_parts.push(step_state.clone());
-            } else if !blast_role.is_empty() {
-                meta_parts.push(match blast_role {
-                    "seed" => "seed".to_owned(),
-                    "direct" => "wave 1".to_owned(),
-                    _ => format!(
-                        "wave {}",
-                        vis.blast
-                            .wave_by_service
-                            .get(&placed.id)
-                            .copied()
-                            .unwrap_or(2)
-                    ),
-                });
-            }
-            let meta_line = meta_parts.join(" · ");
-
-            let status_dot_state = if !step_state.is_empty() {
-                step_state.as_str()
-            } else if !graph_state.is_empty() {
-                graph_state.as_str()
-            } else {
-                "idle"
-            };
-
-            let cycle_badge = if placed.cycle {
-                "<span class=\"system-cycle-mark\" title=\"Participates in a cross-service dependency cycle\">↻</span>"
-            } else {
-                ""
-            };
-            let unopened_badge = if unopened_warn {
-                "<span class=\"system-unopened-mark\" title=\"Unopened downstream contract consumer\">!</span>"
-            } else {
-                ""
-            };
-
-            let aria_label = if meta_line.is_empty() {
-                name.clone()
-            } else {
-                format!("{name} ({meta_line})")
-            };
-
-            let mut node_extra = String::new();
-            if is_pinned {
-                push_raw_attr(&mut node_extra, "data-pinned", "true");
-            }
-            if is_failed {
-                push_raw_attr(&mut node_extra, "data-failed", "true");
-            }
-            if is_dense && offscreen && !is_important {
-                push_raw_attr(&mut node_extra, "data-offscreen", "true");
-            }
-            push_attr(&mut node_extra, "tabindex", tabindex);
-            push_raw_attr(
-                &mut node_extra,
-                "data-roving-index",
-                &node_roving_idx.to_string(),
-            );
-
-            format!(
-                "<button type=\"button\" class=\"graph-map-node system-map-node\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\" data-blast=\"{}\" data-step-state=\"{}\" data-unopened=\"{}\" data-graph-state=\"{}\"{}{}{} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{} — double-click to open service code map\" aria-label=\"{}\"><span class=\"system-node-top\"><span class=\"system-node-dot\" data-state=\"{}\" aria-hidden=\"true\"></span><span class=\"system-node-title\">{}</span>{cycle_badge}{unopened_badge}</span><span class=\"system-node-meta\">{}</span></button>",
-                escape(&placed.id),
-                escape(kind),
-                if is_selected { "true" } else { "false" },
-                blast_role,
-                escape(&step_state),
-                if unopened_warn { "true" } else { "false" },
-                escape(&graph_state),
-                node_extra,
-                if is_highlighted {
-                    " data-shared-path=\"true\""
-                } else {
-                    ""
-                },
-                if waiting {
-                    " data-beyond=\"true\""
-                } else {
-                    ""
-                },
-                placed.x,
-                placed.y,
-                placed.w,
-                placed.h,
-                escape(&svc_id),
-                escape(&name),
-                escape(&aria_label),
-                escape(status_dot_state),
-                escape(&name),
-                escape(&meta_line),
-            )
-        };
+        let is_important = focus_id == placed.id
+            || vis.highlight_nodes.contains(&placed.id)
+            || pins.contains_key(&placed.id)
+            || vis.failed_services.contains(&placed.id)
+            || vis.failed_services.contains(&svc_id)
+            || active_roving_id == placed.id;
         if is_dense {
-            node_htmls.push(node_html.clone());
+            // Defer dense node HTML allocation until mounted in DOM or needed by roving focus.
+            node_htmls.push(String::new());
+            node_seeds.push(true);
+            if offscreen && !is_important {
+                continue;
+            }
         }
-        if is_dense && offscreen && !is_important {
-            continue;
-        }
+        let node_html = render_single_system_node_html(
+            surface,
+            placed,
+            node,
+            &vis,
+            &pins,
+            node_roving_idx,
+            &active_roving_id,
+            is_dense && offscreen && !is_important,
+        );
         html.push_str(&node_html);
     }
 
@@ -960,11 +815,240 @@ pub(super) fn render_canvas_bundle_with_layout(
         html,
         is_dense,
         node_htmls,
+        node_seeds,
         edge_endpoints,
         active_roving_id,
         highlight_nodes: vis.highlight_nodes,
         failed_services: vis.failed_services,
         pinned_ids,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_single_system_node_html(
+    surface: SysMapSurface,
+    placed: &super::layout::PlacedSysNode,
+    node: &V,
+    vis: &SysVisualState,
+    pins: &BTreeMap<String, (f64, f64)>,
+    node_roving_idx: usize,
+    active_roving_id: &str,
+    mark_offscreen: bool,
+) -> String {
+    let focus_id = vis.focus_id.as_str();
+    let kind = node["kind"].as_str().unwrap_or("service");
+    let name = {
+        let n = m::text(node, "name");
+        if n.is_empty() {
+            placed.id.clone()
+        } else {
+            n
+        }
+    };
+    let parent_svc = placed
+        .child_of
+        .clone()
+        .unwrap_or_else(|| m::text(node, "service"));
+    let svc_id = if parent_svc.is_empty() {
+        placed.id.clone()
+    } else {
+        parent_svc
+    };
+    let is_selected = focus_id == placed.id;
+    let is_highlighted = vis.highlight_nodes.contains(&placed.id);
+    let is_pinned = pins.contains_key(&placed.id);
+    let is_failed =
+        vis.failed_services.contains(&placed.id) || vis.failed_services.contains(&svc_id);
+    let is_roving = active_roving_id == placed.id;
+    let tabindex = if is_roving { "0" } else { "-1" };
+
+    let waiting = vis.beyond(&placed.id);
+    let blast_role = vis.blast_role(&placed.id);
+    let step_state = vis.step_state(&placed.id);
+    let unopened_warn = vis.unopened_consumers.contains(&placed.id);
+    let graph_state = m::text(&node["graph_status"], "state");
+
+    let payload = payload_attr(&json!({
+        "surface": surface.id,
+        "path": placed.id,
+        "id": placed.id,
+        "service": svc_id,
+        "kind": kind,
+    }));
+
+    let child_extra = format!(
+        "{}{}{} tabindex=\"{tabindex}\" data-roving-index=\"{node_roving_idx}\"",
+        if is_pinned {
+            " data-pinned=\"true\""
+        } else {
+            ""
+        },
+        if is_failed {
+            " data-failed=\"true\""
+        } else {
+            ""
+        },
+        if mark_offscreen {
+            " data-offscreen=\"true\""
+        } else {
+            ""
+        },
+    );
+
+    if let Some(parent_id) = placed.child_of.as_deref() {
+        let badge = match kind {
+            "contract" => "C",
+            "capability" => "Cap",
+            "source" => "Src",
+            "more" => "...",
+            _ => "•",
+        };
+        let title_text = if kind == "more" {
+            let d = m::text(node, "detail");
+            if d.is_empty() {
+                name.clone()
+            } else {
+                d
+            }
+        } else {
+            name.clone()
+        };
+        let child_payload = if kind == "more" {
+            payload_attr(&json!({
+                "surface": surface.id,
+                "path": parent_id,
+                "id": parent_id,
+                "service": parent_id,
+                "kind": "service",
+            }))
+        } else {
+            payload
+        };
+        format!(
+            "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-parent=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{child_payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
+            escape(&placed.id),
+            escape(parent_id),
+            escape(kind),
+            if is_selected { "true" } else { "false" },
+            if is_highlighted {
+                " data-shared-path=\"true\""
+            } else {
+                ""
+            },
+            placed.x,
+            placed.y,
+            placed.w,
+            placed.h,
+            escape(&svc_id),
+            escape(&title_text),
+            escape(&title_text),
+            escape(badge),
+            escape(&name),
+        )
+    } else {
+        let mut meta_parts = Vec::new();
+        let lang = m::text(node, "language");
+        if !lang.is_empty() {
+            meta_parts.push(lang);
+        }
+        let provides_n = m::array(&node["provides"]).len();
+        if provides_n > 0 {
+            meta_parts.push(format!("{provides_n} contracts"));
+        } else if placed.id == "__system__" {
+            let sh = m::array(&node["shared_sources"]).len();
+            meta_parts.push(format!("{sh} shared docs"));
+        }
+        if !step_state.is_empty() {
+            meta_parts.push(step_state.clone());
+        } else if !blast_role.is_empty() {
+            meta_parts.push(match blast_role {
+                "seed" => "seed".to_owned(),
+                "direct" => "wave 1".to_owned(),
+                _ => format!(
+                    "wave {}",
+                    vis.blast
+                        .wave_by_service
+                        .get(&placed.id)
+                        .copied()
+                        .unwrap_or(2)
+                ),
+            });
+        }
+        let meta_line = meta_parts.join(" · ");
+
+        let status_dot_state = if !step_state.is_empty() {
+            step_state.as_str()
+        } else if !graph_state.is_empty() {
+            graph_state.as_str()
+        } else {
+            "idle"
+        };
+
+        let cycle_badge = if placed.cycle {
+            "<span class=\"system-cycle-mark\" title=\"Participates in a cross-service dependency cycle\">↻</span>"
+        } else {
+            ""
+        };
+        let unopened_badge = if unopened_warn {
+            "<span class=\"system-unopened-mark\" title=\"Unopened downstream contract consumer\">!</span>"
+        } else {
+            ""
+        };
+
+        let aria_label = if meta_line.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} ({meta_line})")
+        };
+
+        let mut node_extra = String::new();
+        if is_pinned {
+            push_raw_attr(&mut node_extra, "data-pinned", "true");
+        }
+        if is_failed {
+            push_raw_attr(&mut node_extra, "data-failed", "true");
+        }
+        if mark_offscreen {
+            push_raw_attr(&mut node_extra, "data-offscreen", "true");
+        }
+        push_attr(&mut node_extra, "tabindex", tabindex);
+        push_raw_attr(
+            &mut node_extra,
+            "data-roving-index",
+            &node_roving_idx.to_string(),
+        );
+
+        format!(
+            "<button type=\"button\" class=\"graph-map-node system-map-node\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\" data-blast=\"{}\" data-step-state=\"{}\" data-unopened=\"{}\" data-graph-state=\"{}\"{}{}{} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{} — double-click to open service code map\" aria-label=\"{}\"><span class=\"system-node-top\"><span class=\"system-node-dot\" data-state=\"{}\" aria-hidden=\"true\"></span><span class=\"system-node-title\">{}</span>{cycle_badge}{unopened_badge}</span><span class=\"system-node-meta\">{}</span></button>",
+            escape(&placed.id),
+            escape(kind),
+            if is_selected { "true" } else { "false" },
+            blast_role,
+            escape(&step_state),
+            if unopened_warn { "true" } else { "false" },
+            escape(&graph_state),
+            node_extra,
+            if is_highlighted {
+                " data-shared-path=\"true\""
+            } else {
+                ""
+            },
+            if waiting {
+                " data-beyond=\"true\""
+            } else {
+                ""
+            },
+            placed.x,
+            placed.y,
+            placed.w,
+            placed.h,
+            escape(&svc_id),
+            escape(&name),
+            escape(&aria_label),
+            escape(status_dot_state),
+            escape(&name),
+            escape(&meta_line),
+        )
     }
 }
 
@@ -975,10 +1059,14 @@ thread_local! {
 
 #[derive(Clone, Debug)]
 pub(super) struct SysDenseCacheEntry {
+    pub(super) surface: SysMapSurface,
+    pub(super) view_doc: V,
+    pub(super) state: V,
     pub(super) layout: SysLayout,
     pub(super) node_ids: Vec<String>,
     pub(super) node_index_by_id: HashMap<String, usize>,
     pub(super) node_htmls: Vec<String>,
+    pub(super) node_seeds: Vec<bool>,
     pub(super) edge_endpoints: Vec<(String, String)>,
     pub(super) is_dense: bool,
     pub(super) latest_roving_id: String,
@@ -989,6 +1077,32 @@ pub(super) struct SysDenseCacheEntry {
     pub(super) failed_services: BTreeSet<String>,
     pub(super) pinned_ids: BTreeSet<String>,
     pub(super) blast_roles: HashMap<String, (&'static str, String, bool)>,
+}
+
+impl SysDenseCacheEntry {
+    pub(super) fn materialize_node_html(&self, idx: usize) -> Option<String> {
+        if let Some(existing) = self.node_htmls.get(idx).filter(|s| !s.is_empty()) {
+            return Some(existing.clone());
+        }
+        if !self.node_seeds.get(idx).copied().unwrap_or(false) {
+            return None;
+        }
+        let placed = self.layout.nodes.get(idx)?;
+        let nodes = m::array(&self.view_doc["nodes"]);
+        let node = nodes.iter().find(|n| node_id(n) == placed.id)?;
+        let vis = compute_sys_visual_state(&self.view_doc, &self.state);
+        let pins = graph_viewport::load_pins(&sys_pin_key(self.surface, &self.state));
+        Some(render_single_system_node_html(
+            self.surface,
+            placed,
+            node,
+            &vis,
+            &pins,
+            idx,
+            &self.latest_roving_id,
+            false,
+        ))
+    }
 }
 
 thread_local! {
@@ -1103,11 +1217,8 @@ pub(super) fn mount_system_dense_node_if_needed(
         return None;
     }
     let &idx = entry.node_index_by_id.get(nid)?;
-    let html = entry.node_htmls.get(idx)?.as_str();
-    if html.is_empty() {
-        return None;
-    }
-    let mut created = graph_viewport::append_html_elements(&plane, html);
+    let html = entry.materialize_node_html(idx)?;
+    let mut created = graph_viewport::append_html_elements(&plane, &html);
     let el = created.pop()?;
     let _ = el.remove_attribute("data-offscreen");
     patch_system_node_el(
@@ -1147,7 +1258,7 @@ pub(super) fn sync_system_viewport_culling(surface: SysMapSurface, cam: &Camera)
         }
     }
 
-    if entry.is_dense && entry.node_htmls.len() == entry.layout.nodes.len() {
+    if entry.is_dense && entry.node_seeds.len() == entry.layout.nodes.len() {
         if let Some(plane) = dom::get(surface.canvas_id)
             .and_then(|c| c.query_selector(".system-map-plane").ok().flatten())
         {
@@ -1171,18 +1282,12 @@ pub(super) fn sync_system_viewport_culling(surface: SysMapSurface, cam: &Camera)
                     let Some(n) = entry_ref.layout.nodes.get(idx) else {
                         return false;
                     };
-                    if entry_ref.node_htmls.get(idx).is_none_or(|h| h.is_empty()) {
+                    if !entry_ref.node_seeds.get(idx).copied().unwrap_or(false) {
                         return false;
                     }
                     is_important_system_node(entry_ref, &n.id, el)
                 },
-                |idx| {
-                    entry_ref
-                        .node_htmls
-                        .get(idx)
-                        .filter(|s| !s.is_empty())
-                        .cloned()
-                },
+                |idx| entry_ref.materialize_node_html(idx),
                 |idx, el| {
                     let _ = el.remove_attribute("data-offscreen");
                     if let Some(placed) = entry_ref.layout.nodes.get(idx) {
@@ -1561,7 +1666,9 @@ pub(super) fn build_dense_scene_and_meta_for_surface(
     graph_viewport::canvas2d::DenseScene,
     graph_viewport::canvas2d::DenseSceneMeta,
 )> {
-    if layout.nodes.len() < 180 && layout.wires.len() < 400 {
+    if layout.nodes.len() < crate::graph_map::DENSE_GRAPH_NODE_THRESHOLD
+        && layout.wires.len() < crate::graph_map::DENSE_GRAPH_EDGE_THRESHOLD
+    {
         return None;
     }
     let vis = compute_sys_visual_state(doc, state);
@@ -1855,10 +1962,14 @@ pub(super) fn render_surface(surface: SysMapSurface, refit: bool) {
             .collect();
         let blast_roles = build_blast_roles_map(&layout.nodes, &vis_for_cache);
         let cache_entry = SysDenseCacheEntry {
+            surface,
+            view_doc: view_doc.clone(),
+            state: state.clone(),
             layout: layout.clone(),
             node_ids,
             node_index_by_id,
             node_htmls: bundle.node_htmls,
+            node_seeds: bundle.node_seeds,
             edge_endpoints: bundle.edge_endpoints,
             is_dense: bundle.is_dense,
             latest_roving_id: bundle.active_roving_id,

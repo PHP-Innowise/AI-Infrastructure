@@ -232,7 +232,57 @@ impl Index {
     }
 }
 
+/// Maps a semantic hub path (`__semantic__/*`, `sem:*`, or `file#L1:table:*`) into its dedicated
+/// virtual semantic namespace bucket so semantic hubs never fold into an arbitrary code folder or
+/// root `"."` crate.
+pub(super) fn semantic_namespace_bucket_for(raw: &str) -> Option<&'static str> {
+    let trimmed = raw.trim();
+    if let Some(sub) = trimmed.strip_prefix("__semantic__/") {
+        let head = sub
+            .split('/')
+            .next()
+            .unwrap_or(sub)
+            .split('#')
+            .next()
+            .unwrap_or(sub);
+        return Some(match head {
+            "routes" => "__semantic__/routes",
+            "tables" => "__semantic__/tables",
+            "events" => "__semantic__/events",
+            "services" => "__semantic__/services",
+            _ => "__semantic__/contracts",
+        });
+    }
+    if trimmed.starts_with("sem:") {
+        return Some(crate::graph_ir::semantic_namespace_bucket(trimmed));
+    }
+    if let Some((_, frag)) = trimmed.split_once('#') {
+        let without_line = frag
+            .strip_prefix('L')
+            .and_then(|rest| {
+                rest.split_once(':').and_then(|(digits, label)| {
+                    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                        .then_some(label)
+                })
+            })
+            .unwrap_or(frag);
+        let candidate = without_line.strip_prefix("sem:").unwrap_or(without_line);
+        if candidate.starts_with("route:")
+            || candidate.starts_with("table:")
+            || candidate.starts_with("event:")
+            || candidate.starts_with("service:")
+            || without_line.starts_with("sem:")
+        {
+            return Some(crate::graph_ir::semantic_namespace_bucket(candidate));
+        }
+    }
+    None
+}
+
 pub(super) fn crate_bucket(manifest_dirs: &[String], path: &str) -> String {
+    if let Some(sem_bucket) = semantic_namespace_bucket_for(path) {
+        return sem_bucket.to_owned();
+    }
     if let Some(dir) = manifest_dirs.iter().find(|dir| {
         dir.is_empty()
             || path
@@ -252,6 +302,9 @@ pub(super) fn crate_bucket(manifest_dirs: &[String], path: &str) -> String {
 }
 
 pub(super) fn folder_bucket(path: &str) -> String {
+    if let Some(sem_bucket) = semantic_namespace_bucket_for(path) {
+        return sem_bucket.to_owned();
+    }
     match path.rsplit_once('/') {
         Some((dir, _)) if !dir.is_empty() => dir.to_owned(),
         _ => ".".to_owned(),
@@ -570,6 +623,7 @@ pub(crate) fn rebuild_default_map_at_lod(
         within: u64,
         out: u64,
         into: u64,
+        is_semantic: bool,
     }
     let mut tallies: BTreeMap<String, BucketTally> = BTreeMap::new();
     let mut file_to_bucket: HashMap<u32, String> = HashMap::new();
@@ -581,6 +635,7 @@ pub(crate) fn rebuild_default_map_at_lod(
         let tally = tallies.entry(b.clone()).or_default();
         tally.files += 1;
         tally.symbols += index.holds(id as u32);
+        tally.is_semantic |= semantic_namespace_bucket_for(file).is_some();
         file_to_bucket.insert(id as u32, b);
     }
     let mut flows: BTreeMap<(String, String), EdgeFlow> = BTreeMap::new();
@@ -730,7 +785,7 @@ pub(crate) fn rebuild_default_map_at_lod(
         rows.into_iter()
             .map(|(k, t)| {
                 let is_folder = matches!(lod, Lod::Crate | Lod::Folder);
-                json!({
+                let mut obj = json!({
                     "path": k,
                     "name": if k == "." { ".".to_owned() } else { name(&k).to_owned() },
                     "folder": is_folder,
@@ -739,7 +794,12 @@ pub(crate) fn rebuild_default_map_at_lod(
                     "within": t.within,
                     "out": t.out,
                     "in": t.into,
-                })
+                });
+                if t.is_semantic {
+                    obj["node_kind"] = json!("semantic");
+                    obj["semantic"] = json!(true);
+                }
+                obj
             })
             .collect(),
     );
@@ -776,6 +836,7 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         out: u64,
         into: u64,
         folder: bool,
+        is_semantic: bool,
         changed: u64,
         touched: u64,
         patterns: u64,
@@ -801,10 +862,20 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         else {
             continue;
         };
+        let node_is_sem = node.get("node_kind").and_then(Value::as_str) == Some("semantic")
+            || node.get("semantic").and_then(Value::as_bool) == Some(true)
+            || semantic_namespace_bucket_for(raw_path).is_some();
         let file_part = raw_path.split('#').next().unwrap_or(raw_path);
-        let b = node_bucket(manifest_dirs, lod, file_part);
+        let b = if node_is_sem {
+            semantic_namespace_bucket_for(raw_path)
+                .unwrap_or("__semantic__/contracts")
+                .to_owned()
+        } else {
+            node_bucket(manifest_dirs, lod, file_part)
+        };
         path_to_bucket.insert(raw_path.to_owned(), b.clone());
         let entry = buckets.entry(b.clone()).or_default();
+        entry.is_semantic |= node_is_sem;
         entry.files += node.get("files").and_then(Value::as_u64).unwrap_or(1);
         entry.symbols += node.get("symbols").and_then(Value::as_u64).unwrap_or(0);
         entry.within += node.get("within").and_then(Value::as_u64).unwrap_or(0);
@@ -868,7 +939,11 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         against: bool,
         added: bool,
         detour: bool,
+        kept_violation: bool,
         arch_violation: u64,
+        rule_ids: BTreeSet<String>,
+        arch_rules: Vec<Value>,
+        seen_arch_rules: BTreeSet<(String, String, String, String)>,
     }
     let mut aggregated: BTreeMap<(String, String), AggEdge> = BTreeMap::new();
     if let Some(edges) = view.get("edges").and_then(Value::as_array) {
@@ -915,6 +990,8 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                 entry.against |= edge.get("against").and_then(Value::as_bool) == Some(true);
                 entry.added |= edge.get("added").and_then(Value::as_bool) == Some(true);
                 entry.detour |= edge.get("detour").and_then(Value::as_bool) == Some(true);
+                entry.kept_violation |=
+                    edge.get("kept").and_then(Value::as_str) == Some("violation");
                 entry.arch_violation += edge
                     .get("architecture_violation")
                     .and_then(|v| {
@@ -922,6 +999,46 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                             .or_else(|| (v.as_bool() == Some(true)).then_some(links))
                     })
                     .unwrap_or(0);
+                if let Some(ids) = edge.get("rule_ids").and_then(Value::as_array) {
+                    for id in ids.iter().filter_map(Value::as_str) {
+                        if !id.is_empty() {
+                            entry.rule_ids.insert(id.to_owned());
+                        }
+                    }
+                }
+                if let Some(rules_arr) = edge.get("architecture_rules").and_then(Value::as_array) {
+                    for rule_val in rules_arr {
+                        let r_kind = rule_val
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        let r_id = rule_val
+                            .get("rule_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        if !r_id.is_empty() {
+                            entry.rule_ids.insert(r_id.clone());
+                        }
+                        let r_rel = rule_val
+                            .get("relation")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        let r_target = rule_val
+                            .get("target")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        if entry
+                            .seen_arch_rules
+                            .insert((r_kind, r_id, r_rel, r_target))
+                        {
+                            entry.arch_rules.push(rule_val.clone());
+                        }
+                    }
+                }
                 if let Some(kinds) = edge.get("kinds").and_then(Value::as_array) {
                     for k in kinds {
                         if let Some(name) = k.get("kind").and_then(Value::as_str) {
@@ -954,6 +1071,10 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                     "out": b.out,
                     "in": b.into,
                 });
+                if b.is_semantic {
+                    obj["node_kind"] = json!("semantic");
+                    obj["semantic"] = json!(true);
+                }
                 if b.changed > 0 {
                     obj["changed"] = json!(b.changed);
                 }
@@ -1005,10 +1126,32 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
     let mut edge_rows: Vec<_> = aggregated.into_iter().collect();
     edge_rows.sort_by(|a, b| b.1.links.cmp(&a.1.links).then(a.0.cmp(&b.0)));
     view["between"] = json!(edge_rows.len());
+    // Truncate rolled-up edges past DRAWN while reserving up to KEPT_VIOLATIONS slots for
+    // architecture/package/semantic breaches so dense rollups never drop violating edges.
+    if edge_rows.len() > super::DRAWN {
+        let is_violating = |agg: &AggEdge| {
+            agg.against
+                || agg.arch_violation > 0
+                || !agg.rule_ids.is_empty()
+                || !agg.arch_rules.is_empty()
+        };
+        let mut kept_rows = Vec::with_capacity(super::DRAWN + super::layers::KEPT_VIOLATIONS);
+        let mut extra_violations = 0usize;
+        for (idx, (ends, mut agg)) in edge_rows.into_iter().enumerate() {
+            if idx < super::DRAWN {
+                kept_rows.push((ends, agg));
+            } else if is_violating(&agg) && extra_violations < super::layers::KEPT_VIOLATIONS {
+                agg.kept_violation = true;
+                extra_violations += 1;
+                kept_rows.push((ends, agg));
+            }
+        }
+        edge_rows = kept_rows;
+    }
     view["edges"] = Value::Array(
         edge_rows
             .into_iter()
-            .map(|((from, to), agg)| {
+            .map(|((from, to), mut agg)| {
                 let mut obj = json!({
                     "from": from,
                     "to": to,
@@ -1034,8 +1177,38 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                 if agg.detour {
                     obj["detour"] = json!(true);
                 }
+                if agg.kept_violation {
+                    obj["kept"] = json!("violation");
+                }
                 if agg.arch_violation > 0 {
                     obj["architecture_violation"] = json!(agg.arch_violation);
+                }
+                if !agg.rule_ids.is_empty() {
+                    let ids: Vec<String> = agg.rule_ids.into_iter().collect();
+                    obj["rule_ids"] = json!(ids);
+                }
+                if !agg.arch_rules.is_empty() {
+                    agg.arch_rules.sort_by(|a, b| {
+                        a.get("kind")
+                            .and_then(Value::as_str)
+                            .cmp(&b.get("kind").and_then(Value::as_str))
+                            .then_with(|| {
+                                a.get("rule_id")
+                                    .and_then(Value::as_str)
+                                    .cmp(&b.get("rule_id").and_then(Value::as_str))
+                            })
+                            .then_with(|| {
+                                a.get("relation")
+                                    .and_then(Value::as_str)
+                                    .cmp(&b.get("relation").and_then(Value::as_str))
+                            })
+                            .then_with(|| {
+                                a.get("target")
+                                    .and_then(Value::as_str)
+                                    .cmp(&b.get("target").and_then(Value::as_str))
+                            })
+                    });
+                    obj["architecture_rules"] = Value::Array(agg.arch_rules);
                 }
                 obj
             })

@@ -467,6 +467,8 @@ pub(crate) fn watch_root_recursive(
 // Shared Extraction Context & Builders
 // =========================================================================
 
+type TsRouterLeaves = Vec<(String, String, Option<String>, u32, String)>;
+
 struct ExtractCtx<'a> {
     rel_path: String,
     grammar: AstGrammar,
@@ -481,6 +483,9 @@ struct ExtractCtx<'a> {
     test_lines: BTreeSet<u32>,
     seen_semantic: BTreeSet<(String, String, u32)>,
     seen_decls: BTreeSet<(String, Option<String>, String, u32)>,
+    attr_route_prefix_stack: Vec<String>,
+    call_route_prefix_stack: Vec<String>,
+    ts_router_leaves: BTreeMap<String, TsRouterLeaves>,
 }
 
 impl<'a> ExtractCtx<'a> {
@@ -499,7 +504,69 @@ impl<'a> ExtractCtx<'a> {
             test_lines: BTreeSet::new(),
             seen_semantic: BTreeSet::new(),
             seen_decls: BTreeSet::new(),
+            attr_route_prefix_stack: Vec::new(),
+            call_route_prefix_stack: Vec::new(),
+            ts_router_leaves: BTreeMap::new(),
         }
+    }
+
+    fn compose_segments(prefixes: &[String], leaf_path: &str) -> String {
+        let leaf = leaf_path.trim();
+        if prefixes.is_empty() || leaf.starts_with("http://") || leaf.starts_with("https://") {
+            return leaf.to_owned();
+        }
+        let mut segments: Vec<&str> = Vec::new();
+        for pref in prefixes {
+            for seg in pref.trim().split('/').filter(|s| !s.is_empty()) {
+                segments.push(seg);
+            }
+        }
+        let (leaf_route, leaf_suffix) = match leaf.find(['?', '#']) {
+            Some(idx) => (&leaf[..idx], &leaf[idx..]),
+            None => (leaf, ""),
+        };
+        for seg in leaf_route.split('/').filter(|s| !s.is_empty()) {
+            segments.push(seg);
+        }
+        if segments.is_empty() {
+            format!("/{leaf_suffix}")
+        } else {
+            format!("/{}{}", segments.join("/"), leaf_suffix)
+        }
+    }
+
+    fn push_attr_route_prefix(&mut self, prefix: &str) -> usize {
+        let mark = self.attr_route_prefix_stack.len();
+        let clean = prefix.trim();
+        if !clean.is_empty() && clean != "/" {
+            self.attr_route_prefix_stack.push(clean.to_owned());
+        }
+        mark
+    }
+
+    fn truncate_attr_route_prefixes(&mut self, len: usize) {
+        self.attr_route_prefix_stack.truncate(len);
+    }
+
+    fn compose_attr_route_path(&self, leaf_path: &str) -> String {
+        Self::compose_segments(&self.attr_route_prefix_stack, leaf_path)
+    }
+
+    fn push_call_route_prefix(&mut self, prefix: &str) -> usize {
+        let mark = self.call_route_prefix_stack.len();
+        let clean = prefix.trim();
+        if !clean.is_empty() && clean != "/" {
+            self.call_route_prefix_stack.push(clean.to_owned());
+        }
+        mark
+    }
+
+    fn truncate_call_route_prefixes(&mut self, len: usize) {
+        self.call_route_prefix_stack.truncate(len);
+    }
+
+    fn compose_call_route_path(&self, leaf_path: &str) -> String {
+        Self::compose_segments(&self.call_route_prefix_stack, leaf_path)
     }
 
     fn text(&self, node: Node<'_>) -> &'a str {

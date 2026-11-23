@@ -113,6 +113,7 @@ fn walk_ts_js(
             if kind == "abstract_class_declaration" {
                 push_unique_mod(&mut mods, "abstract");
             }
+            let class_route_prefix = extract_ts_class_route_prefix(node, ctx.source);
             emit_ts_decorators(ctx, node, Some(&name));
 
             if !name.is_empty() {
@@ -129,6 +130,9 @@ fn walk_ts_js(
                     String::new(),
                 );
                 extract_ts_heritage(ctx, node, &name);
+                let attr_mark = class_route_prefix
+                    .as_deref()
+                    .map(|p| ctx.push_attr_route_prefix(p));
                 if let Some(body) = body_node {
                     walk_ts_js(
                         ctx,
@@ -140,6 +144,9 @@ fn walk_ts_js(
                         this_props,
                         var_types,
                     );
+                }
+                if let Some(mark) = attr_mark {
+                    ctx.truncate_attr_route_prefixes(mark);
                 }
                 this_props.clear();
                 return;
@@ -534,17 +541,122 @@ fn walk_ts_js(
                     ) {
                         let obj_txt = ctx.text(obj).trim();
                         let prop_txt = ctx.text(prop).trim();
-                        emit_semantic_from_call(
-                            ctx,
-                            Some(obj_txt),
-                            prop_txt,
-                            args_txt,
-                            &str_args,
-                            evidence,
-                            owner_class.map(str::to_owned),
-                            line,
-                        );
                         let owner_ty = resolve_ts_receiver_type(obj_txt, this_props, var_types);
+                        let effective_recv = owner_ty
+                            .as_deref()
+                            .filter(|ty| {
+                                let t = ty.to_ascii_lowercase();
+                                t.contains("router") || t.contains("route")
+                            })
+                            .unwrap_or(obj_txt);
+
+                        // Chained `router.route('/orders').get(fn)` -> compose `/orders` with HTTP verb.
+                        let chained_route =
+                            chained_express_route_path(obj, prop_txt, &str_args, ctx.source);
+                        let (chained_route_leaf, route_root_obj) = match chained_route {
+                            Some((leaf, root_obj)) => (Some(leaf), root_obj),
+                            None => (None, obj_txt.to_owned()),
+                        };
+                        let root_owner_ty = if route_root_obj == obj_txt {
+                            owner_ty.clone()
+                        } else {
+                            resolve_ts_receiver_type(&route_root_obj, this_props, var_types)
+                        };
+                        let effective_route_recv = root_owner_ty
+                            .as_deref()
+                            .filter(|ty| {
+                                let t = ty.to_ascii_lowercase();
+                                t.contains("router") || t.contains("route")
+                            })
+                            .unwrap_or(route_root_obj.as_str());
+                        if let Some(leaf_path) = chained_route_leaf.as_deref() {
+                            let composed = ctx.compose_call_route_path(leaf_path);
+                            let verb = match prop_txt.to_ascii_lowercase().as_str() {
+                                "get" => "GET",
+                                "post" => "POST",
+                                "put" => "PUT",
+                                "patch" => "PATCH",
+                                "delete" => "DELETE",
+                                "options" => "OPTIONS",
+                                "head" => "HEAD",
+                                _ => "ANY",
+                            };
+                            if let Some(target) =
+                                normalize_route_contract(Some(verb), &composed, false)
+                            {
+                                ctx.push_semantic(
+                                    "exposes_route",
+                                    target,
+                                    owner_class.map(str::to_owned),
+                                    line,
+                                    evidence,
+                                );
+                            }
+                        } else {
+                            emit_semantic_from_call(
+                                ctx,
+                                Some(effective_recv),
+                                prop_txt,
+                                args_txt,
+                                &str_args,
+                                evidence,
+                                owner_class.map(str::to_owned),
+                                line,
+                            );
+                        }
+
+                        // Record simple Express router variable leaves so `app.use('/prefix', routerVar)`
+                        // mounts propagate cleanly.
+                        let prop_low = prop_txt.to_ascii_lowercase();
+                        if is_ts_route_receiver_hint(effective_route_recv)
+                            && matches!(
+                                prop_low.as_str(),
+                                "get"
+                                    | "post"
+                                    | "put"
+                                    | "patch"
+                                    | "delete"
+                                    | "options"
+                                    | "head"
+                                    | "all"
+                            )
+                            && let Some(leaf) = chained_route_leaf
+                                .as_deref()
+                                .or_else(|| str_args.first().map(String::as_str))
+                            && !route_root_obj.is_empty()
+                            && route_root_obj
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                        {
+                            let verb = if prop_low == "all" {
+                                "ANY".to_owned()
+                            } else {
+                                prop_low.to_ascii_uppercase()
+                            };
+                            let leaf_composed = ctx.compose_call_route_path(leaf);
+                            ctx.ts_router_leaves
+                                .entry(route_root_obj)
+                                .or_default()
+                                .push((
+                                    verb,
+                                    leaf_composed,
+                                    owner_class.map(str::to_owned),
+                                    line,
+                                    evidence.to_owned(),
+                                ));
+                        }
+
+                        let mounted_prefix =
+                            if prop_low == "use" && is_ts_route_receiver_hint(effective_recv) {
+                                str_args
+                                    .first()
+                                    .map(|s| s.trim())
+                                    .filter(|s| s.starts_with('/'))
+                                    .map(str::to_owned)
+                            } else {
+                                None
+                            };
+
                         let target = owner_ty.as_deref().unwrap_or(obj_txt).to_owned();
                         ctx.push_ref(AstRef {
                             target_name: target,
@@ -558,6 +670,35 @@ fn walk_ts_js(
                             line,
                             evidence: clip_str(evidence, 160),
                         });
+
+                        if let Some(ref prefix) = mounted_prefix {
+                            if let Some(args) = args_node {
+                                emit_mounted_router_routes(ctx, args, prefix);
+                                let mark = ctx.push_call_route_prefix(prefix);
+                                walk_ts_js(
+                                    ctx,
+                                    args,
+                                    depth + 1,
+                                    owner_class,
+                                    fn_depth,
+                                    false,
+                                    this_props,
+                                    var_types,
+                                );
+                                ctx.truncate_call_route_prefixes(mark);
+                            }
+                            walk_ts_js(
+                                ctx,
+                                obj,
+                                depth + 1,
+                                owner_class,
+                                fn_depth,
+                                false,
+                                this_props,
+                                var_types,
+                            );
+                            return;
+                        }
                     }
                 } else {
                     emit_semantic_from_call(
@@ -851,6 +992,125 @@ fn extract_ts_heritage(ctx: &mut ExtractCtx<'_>, class_node: Node<'_>, class_nam
     }
 }
 
+fn is_ts_route_receiver_hint(recv: &str) -> bool {
+    let r = recv.trim().to_ascii_lowercase();
+    r.contains("route")
+        || r.contains("app")
+        || r.contains("mux")
+        || r.contains("fastify")
+        || r.contains("server")
+        || r.contains("hono")
+        || matches!(r.as_str(), "r" | "api")
+}
+
+fn chained_express_route_path(
+    obj: Node<'_>,
+    callee: &str,
+    str_args: &[String],
+    source: &str,
+) -> Option<(String, String)> {
+    if !str_args.is_empty() {
+        return None;
+    }
+    let cal_low = callee.to_ascii_lowercase();
+    if !matches!(
+        cal_low.as_str(),
+        "get" | "post" | "put" | "patch" | "delete" | "options" | "head" | "all"
+    ) {
+        return None;
+    }
+    let mut cur = Some(obj);
+    while let Some(node) = cur {
+        if node.kind() != "call_expression" {
+            break;
+        }
+        let Some(func) = node.child_by_field_name("function") else {
+            break;
+        };
+        if func.kind() != "member_expression" {
+            break;
+        }
+        let Some(prop) = func.child_by_field_name("property") else {
+            break;
+        };
+        if node_text(prop, source).trim().eq_ignore_ascii_case("route")
+            && let Some(args) = node.child_by_field_name("arguments")
+            && let Some(path) = all_string_arg_texts(args, source).into_iter().next()
+        {
+            let root = func
+                .child_by_field_name("object")
+                .map(|r| node_text(r, source).trim().to_owned())
+                .unwrap_or_default();
+            return Some((path, root));
+        }
+        cur = func.child_by_field_name("object");
+    }
+    None
+}
+
+fn emit_mounted_router_routes(ctx: &mut ExtractCtx<'_>, args: Node<'_>, prefix: &str) {
+    let mut mounted_leaves = Vec::new();
+    for i in 0..args.named_child_count() {
+        let Some(ch) = args.named_child(i) else {
+            continue;
+        };
+        if ch.kind() == "identifier" {
+            let ident = ctx.text(ch).trim();
+            if let Some(leaves) = ctx.ts_router_leaves.get(ident) {
+                mounted_leaves.extend(leaves.iter().cloned());
+            }
+        }
+    }
+    if mounted_leaves.is_empty() {
+        return;
+    }
+    let mark = ctx.push_call_route_prefix(prefix);
+    for (verb, leaf_path, enclosing, line, evidence) in mounted_leaves {
+        let composed = ctx.compose_call_route_path(&leaf_path);
+        if let Some(target) = normalize_route_contract(Some(&verb), &composed, false) {
+            ctx.push_semantic("exposes_route", target, enclosing, line, &evidence);
+        }
+    }
+    ctx.truncate_call_route_prefixes(mark);
+}
+
+fn extract_ts_class_route_prefix(node: Node<'_>, source: &str) -> Option<String> {
+    let check_container = |container: Node<'_>| -> Option<String> {
+        for deco in children_by_kind(container, "decorator") {
+            let txt = node_text(deco, source);
+            let name = txt
+                .trim_start_matches('@')
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .rsplit(['.', ':'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(
+                name.as_str(),
+                "controller" | "route" | "requestmapping" | "path"
+            ) && let Some(first) = all_string_arg_texts(deco, source)
+                .into_iter()
+                .find(|s| !s.trim().is_empty())
+            {
+                return Some(first);
+            }
+        }
+        None
+    };
+    if let Some(found) = check_container(node) {
+        return Some(found);
+    }
+    if let Some(parent) = node.parent()
+        && parent.kind() == "export_statement"
+    {
+        return check_container(parent);
+    }
+    None
+}
+
 fn emit_ts_decorators(ctx: &mut ExtractCtx<'_>, node: Node<'_>, sym: Option<&str>) {
     let mut emit_from = |container: Node<'_>| {
         for deco in children_by_kind(container, "decorator") {
@@ -1035,6 +1295,19 @@ fn infer_ts_expr_type(
                     .to_owned()
             })
             .filter(|s| !s.is_empty()),
+        "call_expression" => rhs.child_by_field_name("function").and_then(|f| {
+            let fn_low = ctx.text(f).trim().to_ascii_lowercase();
+            if fn_low.ends_with(".router")
+                || fn_low == "router"
+                || fn_low == "express"
+                || fn_low == "fastify"
+                || fn_low == "hono"
+            {
+                Some("ExpressRouter".to_owned())
+            } else {
+                None
+            }
+        }),
         "member_expression" => {
             let txt = ctx.text(rhs).trim();
             if let Some(prop) = txt.strip_prefix("this.") {

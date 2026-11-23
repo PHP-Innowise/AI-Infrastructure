@@ -9283,9 +9283,18 @@ fn dense_canvas_captures_node_htmls_preserves_wire_edge_indices_and_refreshes_sc
         "offscreen non-important node should be omitted from initial html"
     );
     assert!(
-        rendered.dense_node_htmls[183].contains("data-n=\"183\""),
-        "cached dense_node_htmls must retain omitted node HTML for reveal-on-pan"
+        rendered.dense_node_htmls[183].is_empty(),
+        "dense_node_htmls must defer offscreen HTML allocation until roving focus or mount"
     );
+    assert!(
+        rendered
+            .materialize_dense_node_html(&view, 183)
+            .is_some_and(|h| h.contains("data-n=\"183\"")),
+        "lazy materialize_dense_node_html must render omitted node HTML on demand"
+    );
+    assert!(!rendered.html.contains("graph-map-edge-mark"));
+    assert!(!rendered.html.contains("graph-map-edge-chevron"));
+    assert!(!rendered.html.contains("graph-map-violation-halo"));
 
     // Every DenseEdgeSpec index points back into pairs (valid even for multi-segment wires).
     let pairs = pairs_for_view(
@@ -9833,7 +9842,12 @@ fn dense_portals_route_valid_actions_and_patch_preserves_semantics_and_isolate()
     // Semantic hub node metadata and progressive LOD + witness display.
     let sem_meta = meta.nodes.get(&0).expect("semantic node meta");
     assert_eq!(sem_meta.symbol_kind, "contract");
-    assert!(rendered.dense_node_htmls[0].contains("data-semantic=\"true\""));
+    assert!(rendered.dense_node_htmls[0].is_empty());
+    assert!(rendered
+        .materialize_dense_node_html(&view, 0)
+        .is_some_and(|h| h.contains("data-semantic=\"true\"")));
+    assert!(!rendered.html.contains("graph-map-edge-synthetic"));
+    assert!(!rendered.html.contains("graph-map-edge-mark"));
     assert!(note(&view).contains("Progressive LOD (overview)"));
     let cut_html = cycle_cut_hints_html(&view);
     assert!(cut_html.contains("<strong>Cycle witness</strong>:"));
