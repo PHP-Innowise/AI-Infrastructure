@@ -2854,15 +2854,15 @@ async fn tool_chain_observe_compile_and_warm_reuse() {
         "capsule": {
             "mu": {"name": "inspect-invoices", "description": "Inspect invoices files without modifying workspace"},
             "source": {"skills": []},
-            "capabilities": {"network": "none", "runtimes": [runtime()]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
             "bindings": [],
             "programs": [{
                 "id": "inspect",
                 "description": "Inspect invoices",
-                "entry": [runtime(), "programs/inspect/program.json"],
+                "entry": ["python3", "programs/inspect/main.py"],
                 "inputs": [],
                 "outputs": [],
-                "check": [runtime(), "programs/inspect/program.json", "--check"],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
                 "timeout_seconds": 30,
                 "read_only": true
             }],
@@ -2870,12 +2870,12 @@ async fn tool_chain_observe_compile_and_warm_reuse() {
             "verification": []
         },
         "files": [{
-            "path": "programs/inspect/program.json",
-            "content": json!({"result": {"summary": "total=42"}, "require_file": "invoices/a.txt"}).to_string()
+            "path": "programs/inspect/main.py",
+            "content": "import json, os, sys\nif '--check' in sys.argv:\n    print(json.dumps({'status': 'complete', 'result': {}}))\n    sys.exit(0)\nif os.path.exists('trigger-fallback.flag'):\n    sys.exit(2)\nwith open('invoices/a.txt') as f:\n    lines = [ln.strip() for ln in f if ln.strip()]\nprint(json.dumps({'status': 'complete', 'result': {'summary': f'Checked invoices total ({len(lines)} lines).'}}))\n"
         }],
         "examples": {
             "bindings": {},
-            "steps": {"0": {"result": {"summary": "total=42"}}}
+            "steps": {}
         }
     });
     stand.compiler(1, &tc_answer);
@@ -2916,6 +2916,93 @@ async fn tool_chain_observe_compile_and_warm_reuse() {
     assert_eq!(
         on_preflight["skillcache"]["capsule"]["capsule_id"],
         capsule_id
+    );
+
+    // Direct warm dispatch executes deterministic read-only ToolChain capsule without spawning claude.
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let (status, direct_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": stand.project_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true},
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{direct_created}");
+    let direct_sid = direct_created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&direct_sid, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "direct warm dispatch should skip spawning the provider CLI"
+    );
+    let direct_events = stand.store.events(&direct_sid, 0).unwrap();
+    let direct_sc = stand.skillcache_events(&direct_sid);
+    assert!(
+        direct_sc
+            .iter()
+            .any(|ev| ev["phase"] == "hit" && ev["direct_dispatch"] == true),
+        "{direct_sc:?}"
+    );
+    assert!(
+        direct_events
+            .iter()
+            .any(|ev| ev["kind"] == "usage" && ev["cost_usd"] == 0.0 && ev["model_calls"] == 0),
+        "{direct_events:?}"
+    );
+    assert!(
+        direct_events.iter().any(|ev| {
+            ev["kind"] == "text"
+                && ev["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Checked invoices total (2 lines)."))
+        }),
+        "{direct_events:?}"
+    );
+
+    // When direct execution fails at runtime, fallback seamlessly runs observed cold turn.
+    fs::write(project.join("trigger-fallback.flag"), "1\n").unwrap();
+    stand.script("claude", &ro_turn);
+    let (status, fallback_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": stand.project_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true},
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{fallback_created}");
+    let fallback_sid = fallback_created["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    stand.finished(&fallback_sid, 1).await;
+    assert!(
+        claude_args.exists(),
+        "direct failure should fall back cleanly to provider cold run"
+    );
+    let fallback_sc = stand.skillcache_events(&fallback_sid);
+    assert!(
+        fallback_sc
+            .iter()
+            .any(|ev| ev["reason"] == "direct_fallback"),
+        "{fallback_sc:?}"
     );
     stand.close().await;
 }

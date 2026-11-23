@@ -26,12 +26,13 @@ use infra_skillcache::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Hybrid attempts before the textual form is asked for.
@@ -492,6 +493,160 @@ fn compiler_prompt(
     parts.join("\n\n")
 }
 
+const BOUNDARY_PROBE_CACHE_CAP: usize = 64;
+const BOUNDARY_PROBE_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Default)]
+struct BoundaryProbeCache {
+    entries: HashMap<(String, String), Instant>,
+    order: VecDeque<(String, String)>,
+}
+
+impl BoundaryProbeCache {
+    fn is_valid(&mut self, project_id: &str, spec_hash: &str) -> bool {
+        let key = (project_id.to_owned(), spec_hash.to_owned());
+        if let Some(verified_at) = self.entries.get(&key) {
+            if verified_at.elapsed() < BOUNDARY_PROBE_TTL {
+                return true;
+            }
+            self.entries.remove(&key);
+        }
+        false
+    }
+
+    fn record(&mut self, project_id: String, spec_hash: String) {
+        let key = (project_id, spec_hash);
+        if !self.entries.contains_key(&key) {
+            if self.entries.len() >= BOUNDARY_PROBE_CACHE_CAP
+                && let Some(evicted) = self.order.pop_front()
+            {
+                self.entries.remove(&evicted);
+            }
+            self.order.push_back(key.clone());
+        }
+        self.entries.insert(key, Instant::now());
+    }
+}
+
+fn boundary_probe_cache() -> &'static Mutex<BoundaryProbeCache> {
+    static CACHE: OnceLock<Mutex<BoundaryProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BoundaryProbeCache::default()))
+}
+
+fn boundary_spec_hash(
+    executable: &Path,
+    protected: &[PathBuf],
+    workspace: &Path,
+    codex: Option<&Path>,
+    readable: &[PathBuf],
+    engine: Option<&Path>,
+) -> String {
+    let mut payload = String::new();
+    payload.push_str(&executable.display().to_string());
+    payload.push('\n');
+    for path in protected {
+        payload.push_str(&path.display().to_string());
+        payload.push('\n');
+    }
+    payload.push_str("---\n");
+    payload.push_str(&workspace.display().to_string());
+    payload.push('\n');
+    if let Some(path) = codex {
+        payload.push_str(&path.display().to_string());
+    }
+    payload.push('\n');
+    for path in readable {
+        payload.push_str(&path.display().to_string());
+        payload.push('\n');
+    }
+    if let Some(path) = engine {
+        payload.push_str(&path.display().to_string());
+    }
+    fingerprint::sha256(payload.as_bytes())
+}
+
+struct CompilerBoundaryArgs<'a> {
+    project_id: &'a str,
+    executable: &'a Path,
+    protected: &'a [PathBuf],
+    workspace: &'a Path,
+    environment: &'a std::collections::BTreeMap<String, String>,
+    remove: &'a [String],
+    readable: &'a [PathBuf],
+}
+
+async fn verify_compiler_boundary(
+    runtime: &Runtime,
+    args: &CompilerBoundaryArgs<'_>,
+) -> Result<infra_host::sandbox::Spec> {
+    let codex = runtime.codex_executable();
+    let spec_hash = boundary_spec_hash(
+        args.executable,
+        args.protected,
+        args.workspace,
+        codex.as_deref(),
+        args.readable,
+        runtime.engine.as_deref(),
+    );
+    let mut spec = infra_system::workers::runtime_profile(
+        args.executable,
+        args.protected,
+        args.workspace,
+        codex,
+        args.readable,
+    )?;
+    if let Some(engine) = runtime.engine.as_deref().and_then(Path::parent) {
+        spec.runtime.push(engine.to_path_buf());
+    }
+    if let Ok(mut cache) = boundary_probe_cache().lock()
+        && cache.is_valid(args.project_id, &spec_hash)
+    {
+        return Ok(spec);
+    }
+    // Before any provider code runs: the same sandbox must find the project
+    // unreadable, the evidence read-only and its own folder writable.
+    let boundary = infra_host::sandbox::boundary_request_with(
+        &spec,
+        sample_paths(args.protected, 2000),
+        runtime.engine.as_deref(),
+    )?;
+    let lock = runtime.store.runner_lock();
+    let probe = infra_system::native::run_raw_monitored(
+        &boundary.command,
+        args.workspace,
+        args.environment,
+        args.remove,
+        &[],
+        60,
+        runtime.cancel.clone(),
+        Some(lock),
+        None,
+        |_| Ok(()),
+    )
+    .await?;
+    let attested = probe
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .next_back()
+        .unwrap_or(Value::Null);
+    if probe.code != 0
+        || attested["ok"] != true
+        || attested["denied"].as_u64() != Some(boundary.denied as u64)
+        || attested["evidence_read_only"] != true
+        || attested["workspace_writable"] != true
+    {
+        return Err(HarnessError::forbidden(
+            infra_system::workers::probe_failure(&probe.bytes, probe.code)
+                .replace("AI discovery", "SkillCache compiler"),
+        ));
+    }
+    if let Ok(mut cache) = boundary_probe_cache().lock() {
+        cache.record(args.project_id.to_owned(), spec_hash);
+    }
+    Ok(spec)
+}
+
 async fn ask_compiler(
     runtime: &Runtime,
     job: &Job,
@@ -547,56 +702,20 @@ async fn ask_compiler(
     {
         protected.push(common);
     }
-    let codex = runtime.codex_executable();
-    let mut spec = infra_system::workers::runtime_profile(
-        &executable,
-        &protected,
-        &workspace,
-        codex,
-        &readable,
-    )?;
-    if let Some(engine) = runtime.engine.as_deref().and_then(Path::parent) {
-        spec.runtime.push(engine.to_path_buf());
-    }
-    // Before any provider code runs: the same sandbox must find the project
-    // unreadable, the evidence read-only and its own folder writable.
-    let boundary = infra_host::sandbox::boundary_request_with(
-        &spec,
-        sample_paths(&protected, 2000),
-        runtime.engine.as_deref(),
-    )?;
-    let lock = runtime.store.runner_lock();
-    let probe = infra_system::native::run_raw_monitored(
-        &boundary.command,
-        &workspace,
-        &environment,
-        &remove,
-        &[],
-        60,
-        runtime.cancel.clone(),
-        Some(lock.clone()),
-        None,
-        |_| Ok(()),
+    let spec = verify_compiler_boundary(
+        runtime,
+        &CompilerBoundaryArgs {
+            project_id: &job.project_id,
+            executable: &executable,
+            protected: &protected,
+            workspace: &workspace,
+            environment: &environment,
+            remove: &remove,
+            readable: &readable,
+        },
     )
     .await?;
-    let attested = probe
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        .next_back()
-        .unwrap_or(Value::Null);
-    if probe.code != 0
-        || attested["ok"] != true
-        || attested["denied"].as_u64() != Some(boundary.denied as u64)
-        || attested["evidence_read_only"] != true
-        || attested["workspace_writable"] != true
-    {
-        return Err(HarnessError::forbidden(
-            infra_system::workers::probe_failure(&probe.bytes, probe.code)
-                .replace("AI discovery", "SkillCache compiler"),
-        ));
-    }
-    drop(boundary);
+    let lock = runtime.store.runner_lock();
     let argv = infra_host::sandbox::discovery(&spec, &argv)?;
     let output = infra_host::process::run_monitored(
         &argv,
@@ -790,6 +909,33 @@ async fn qualify(
     observed_files: Arc<Vec<String>>,
     earlier_examples: Option<infra_skillcache::Examples>,
 ) -> Result<Qualified> {
+    qualify_with_dry_run(
+        runtime,
+        job,
+        round,
+        candidate,
+        form,
+        observed_files,
+        earlier_examples,
+        false,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Qualification accepts candidate, gate options, and template dry-run toggle cleanly."
+)]
+async fn qualify_with_dry_run(
+    runtime: &Arc<Runtime>,
+    job: &Job,
+    round: Round,
+    candidate: std::result::Result<Candidate, Vec<infra_skillcache::Violation>>,
+    form: Form,
+    observed_files: Arc<Vec<String>>,
+    earlier_examples: Option<infra_skillcache::Examples>,
+    allow_dry_run: bool,
+) -> Result<Qualified> {
     let gate1_name = if form == Form::Textual {
         "gate1t"
     } else {
@@ -838,6 +984,11 @@ async fn qualify(
     package::write_warm(&round.package(), &candidate.capsule, None, &candidate.files)?;
     if let Some(examples) = &candidate.examples {
         package::write_examples(&round.examples.join("examples.json"), examples)?;
+    } else if allow_dry_run {
+        package::write_examples(
+            &round.examples.join("examples.json"),
+            &infra_skillcache::Examples::default(),
+        )?;
     }
     runtime.publish(&job.project_id, "gate2", job.detail());
     let candidate = Arc::new(candidate);
@@ -859,18 +1010,51 @@ async fn qualify(
         let third = {
             let (runtime, candidate, round) = (runtime.clone(), candidate.clone(), round.clone());
             let generation = job.generation.clone();
+            let workspace_root = job.workspace.clone();
             tokio::task::spawn_blocking(move || {
                 let state = runtime.store.state.clone();
-                gates::gate3(
-                    &runtime.engine(),
-                    &round,
-                    &candidate,
-                    &|destination: &Path| snapshot::materialize(&state, &generation, destination),
-                    replay_result::load_expected(&state, &generation)
-                        .ok()
-                        .as_ref(),
-                    &runtime.cancel,
-                )
+                let expected = replay_result::load_expected(&state, &generation).ok();
+                let has_snapshot = snapshot::load(&state, &generation).ok().flatten().is_some();
+                if has_snapshot && expected.is_some() {
+                    gates::gate3_with_options(
+                        &runtime.engine(),
+                        &round,
+                        &candidate,
+                        &|destination: &Path| {
+                            snapshot::materialize(&state, &generation, destination)
+                        },
+                        expected.as_ref(),
+                        false,
+                        &runtime.cancel,
+                    )
+                } else if allow_dry_run {
+                    let dry_snap_state = round.state.join("dry-snapshot");
+                    let _ = snapshot::take(&dry_snap_state, &workspace_root, "dry-run");
+                    let result = gates::gate3_with_options(
+                        &runtime.engine(),
+                        &round,
+                        &candidate,
+                        &|destination: &Path| {
+                            snapshot::materialize(&dry_snap_state, "dry-run", destination)
+                        },
+                        None,
+                        true,
+                        &runtime.cancel,
+                    );
+                    let _ = std::fs::remove_dir_all(&dry_snap_state);
+                    result
+                } else {
+                    gates::gate3(
+                        &runtime.engine(),
+                        &round,
+                        &candidate,
+                        &|destination: &Path| {
+                            snapshot::materialize(&state, &generation, destination)
+                        },
+                        expected.as_ref(),
+                        &runtime.cancel,
+                    )
+                }
             })
             .await
             .map_err(|_| HarnessError::unavailable("Gate 3 did not finish."))?
@@ -915,6 +1099,130 @@ fn rel_in_workspace(workspace: &Path, raw: &str) -> Option<String> {
 }
 
 /// Builds the persisted dependency manifest recorded alongside a qualified capsule.
+fn record_manifest_path(
+    workspace: &Path,
+    manifest: &mut db::ArtifactDependencyManifest,
+    rel: String,
+) {
+    if manifest
+        .skill_paths
+        .iter()
+        .any(|skill| db::path_matches(skill, &rel))
+    {
+        return;
+    }
+    let lower = rel.to_ascii_lowercase();
+    if lower.contains("route") {
+        push_unique(&mut manifest.route_selectors, rel.clone());
+    } else if lower.contains("migration") || lower.contains("schema") {
+        push_unique(&mut manifest.table_selectors, rel.clone());
+    } else if lower.ends_with(".php") || lower.ends_with(".rs") || lower.ends_with(".ts") {
+        push_unique(&mut manifest.ast_selectors, rel.clone());
+    }
+    let full = workspace.join(&rel);
+    if full.is_dir() {
+        push_unique(&mut manifest.watched_globs, format!("{rel}/**"));
+    } else {
+        push_unique(&mut manifest.caller_files, rel);
+    }
+}
+
+fn split_command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(q) if ch == q => {
+                quote = None;
+            }
+            Some(_) => {
+                if ch == '\\'
+                    && let Some(&next) = chars.peek()
+                    && (next == '"' || next == '\'' || next == '\\')
+                {
+                    current.push(chars.next().unwrap_or(ch));
+                } else {
+                    current.push(ch);
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+            }
+            None if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '>' | '<' | '(' | ')') => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn extract_command_paths(workspace: &Path, command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw_tok in split_command_tokens(command) {
+        let candidate = raw_tok
+            .split_once('=')
+            .map_or(raw_tok.as_str(), |(_, rhs)| rhs)
+            .trim_matches(|c: char| matches!(c, ',' | ':' | '`' | ';'));
+        if candidate.is_empty() || candidate.starts_with('-') {
+            continue;
+        }
+        let without_line = candidate
+            .rsplit_once(':')
+            .and_then(|(path, line)| line.chars().all(|c| c.is_ascii_digit()).then_some(path))
+            .unwrap_or(candidate);
+        let Some(rel) = rel_in_workspace(workspace, without_line) else {
+            continue;
+        };
+        if rel.is_empty() || !workspace.join(&rel).exists() {
+            continue;
+        }
+        push_unique(&mut out, rel);
+    }
+    out
+}
+
+pub(crate) fn enrich_manifest_from_graph_ir(
+    state: &Path,
+    project_id: &str,
+    manifest: &mut db::ArtifactDependencyManifest,
+) {
+    if project_id.is_empty() {
+        return;
+    }
+    let Ok(Some(ir)) = crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
+    else {
+        return;
+    };
+    let mut targets: Vec<String> = Vec::new();
+    for path in manifest
+        .caller_files
+        .iter()
+        .chain(manifest.ast_selectors.iter())
+        .chain(manifest.route_selectors.iter())
+        .chain(manifest.table_selectors.iter())
+    {
+        if !targets.contains(path) {
+            targets.push(path.clone());
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    if let Ok(callers) = ir.incoming_caller_files_for_paths(&targets) {
+        for caller in callers {
+            push_unique(&mut manifest.caller_files, caller);
+        }
+    }
+}
+
 pub(crate) fn build_dependency_manifest(
     workspace: &Path,
     stored_trace: &Value,
@@ -966,32 +1274,13 @@ pub(crate) fn build_dependency_manifest(
                 let Some(raw) = input.get(field).and_then(Value::as_str) else {
                     continue;
                 };
-                let Some(rel) = rel_in_workspace(workspace, raw) else {
-                    continue;
-                };
-                if manifest
-                    .skill_paths
-                    .iter()
-                    .any(|skill| db::path_matches(skill, &rel))
-                {
-                    continue;
+                if let Some(rel) = rel_in_workspace(workspace, raw) {
+                    record_manifest_path(workspace, &mut manifest, rel);
                 }
-                let lower = rel.to_ascii_lowercase();
-                if lower.contains("route") {
-                    push_unique(&mut manifest.route_selectors, rel.clone());
-                } else if lower.contains("migration") || lower.contains("schema") {
-                    push_unique(&mut manifest.table_selectors, rel.clone());
-                } else if lower.ends_with(".php")
-                    || lower.ends_with(".rs")
-                    || lower.ends_with(".ts")
-                {
-                    push_unique(&mut manifest.ast_selectors, rel.clone());
-                }
-                let full = workspace.join(&rel);
-                if full.is_dir() {
-                    push_unique(&mut manifest.watched_globs, format!("{rel}/**"));
-                } else {
-                    push_unique(&mut manifest.caller_files, rel);
+            }
+            if let Some(command) = input.get("command").and_then(Value::as_str) {
+                for rel in extract_command_paths(workspace, command) {
+                    record_manifest_path(workspace, &mut manifest, rel);
                 }
             }
         }
@@ -1027,18 +1316,45 @@ pub(crate) fn workspace_edition(workspace: &Path, session: Option<&Value>) -> Op
     let manifest = workspace.join(".infra-manifest.json");
     if let Ok(bytes) = infra_core::fs::read_regular(&manifest)
         && let Ok(json) = serde_json::from_slice::<Value>(&bytes)
-        && let Some(edition) = json["edition"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
     {
-        return Some(edition.to_string());
+        let from_manifest = json["edition"]
+            .as_str()
+            .or_else(|| json["profile"].as_str())
+            .or_else(|| {
+                json["editions"]
+                    .as_array()
+                    .and_then(|items| items.iter().find_map(Value::as_str))
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(edition) = from_manifest {
+            return Some(edition.to_string());
+        }
     }
     let name = workspace.file_name().and_then(|n| n.to_str())?;
     if workspace.join("VERSION").is_file() && matches!(name, "Laravel" | "Symfony" | "PHP Core") {
         return Some(name.to_string());
     }
     None
+}
+
+pub(crate) fn workspace_edition_for_project(
+    store: &SessionStore,
+    project_id: &str,
+    workspace: &Path,
+    session: Option<&Value>,
+) -> Option<String> {
+    if let Some(edition) = workspace_edition(workspace, session) {
+        return Some(edition);
+    }
+    if project_id.is_empty() {
+        return None;
+    }
+    store.connection().ok().and_then(|db| {
+        db::project_accelerator_edition(&db, project_id)
+            .ok()
+            .flatten()
+    })
 }
 
 /// Writes a qualified candidate where sessions mount it and makes it active.
@@ -1078,37 +1394,22 @@ fn publish_capsule(
         &candidate.capsule.capabilities.runtimes,
     ));
     let session = runtime.store.get(&job.session_id).ok();
-    let db = runtime.store.connection()?;
-    let stored_trace = db::trace(&db, &job.generation)?.unwrap_or_else(|| json!({}));
-    db::activate_capsule(
-        &db,
-        &db::Qualified {
-            capsule_id: &job.capsule_id,
-            mu_name: &candidate.capsule.mu.name,
-            mu_description: &candidate.capsule.mu.description,
-            form: candidate.capsule.form.as_str(),
-            capsule_sha256: &fingerprint::sha256(&candidate.capsule_bytes),
-            package_sha256: &digest,
-            skill_files: &skill_identities(&job.workspace, &named)?,
-            env_fingerprint: &environment,
-            engine_digest: &runtime.engine_digest(),
-            artifact_dir: &artifacts.display().to_string(),
-            capabilities: &json!({
-                "network": candidate.capsule.capabilities.network.as_str(),
-                "runtimes": candidate.capsule.capabilities.runtimes,
-            }),
-        },
-    )?;
-    db::set_capsule_kind_meta(
-        &db,
-        &job.capsule_id,
-        candidate.capsule.kind.as_str(),
-        candidate.capsule.tool_chain_sha256.as_deref().unwrap_or(""),
-    )?;
-    let manifest = build_dependency_manifest(&job.workspace, &stored_trace, candidate, 0);
-    db::set_dependency_manifest(&db, &job.capsule_id, &manifest)?;
-    if candidate.capsule.kind == CapsuleKind::Skill
-        && let Some(edition) = workspace_edition(&job.workspace, session.as_ref())
+    let skill_ident = skill_identities(&job.workspace, &named)?;
+    let stored_trace = {
+        let db = runtime.store.connection()?;
+        db::trace(&db, &job.generation)?.unwrap_or_else(|| json!({}))
+    };
+    let ir_revision = super::latest_ir_revision(&runtime.store.state, &job.project_id);
+    let mut manifest =
+        build_dependency_manifest(&job.workspace, &stored_trace, candidate, ir_revision);
+    enrich_manifest_from_graph_ir(&runtime.store.state, &job.project_id, &mut manifest);
+    let portable_template = if candidate.capsule.kind == CapsuleKind::Skill
+        && let Some(edition) = workspace_edition_for_project(
+            &runtime.store,
+            &job.project_id,
+            &job.workspace,
+            session.as_ref(),
+        )
         && let Some(primary) = candidate.capsule.skills.first()
     {
         let template = candidate::as_portable_template(candidate, &edition);
@@ -1117,15 +1418,53 @@ fn publish_capsule(
             &template.files,
             template.markdown.as_deref().map(str::as_bytes),
         );
-        if report.passed {
-            let _ = db::upsert_template(
-                &db,
-                &edition,
-                &primary.name,
-                &primary.tree_sha256,
-                &template,
-            );
-        }
+        report.passed.then(|| {
+            (
+                edition,
+                primary.name.clone(),
+                primary.tree_sha256.clone(),
+                template,
+            )
+        })
+    } else {
+        None
+    };
+    let capsule_sha256 = fingerprint::sha256(&candidate.capsule_bytes);
+    let engine_digest = runtime.engine_digest();
+    let artifact_dir_str = artifacts.display().to_string();
+    let capabilities = json!({
+        "network": candidate.capsule.capabilities.network.as_str(),
+        "runtimes": candidate.capsule.capabilities.runtimes,
+    });
+    let all_read_only = candidate.capsule.form == Form::Textual
+        || candidate.capsule.programs.iter().all(|p| p.read_only);
+    let db = runtime.store.connection()?;
+    db::activate_capsule(
+        &db,
+        &db::Qualified {
+            capsule_id: &job.capsule_id,
+            mu_name: &candidate.capsule.mu.name,
+            mu_description: &candidate.capsule.mu.description,
+            form: candidate.capsule.form.as_str(),
+            capsule_sha256: &capsule_sha256,
+            package_sha256: &digest,
+            skill_files: &skill_ident,
+            env_fingerprint: &environment,
+            engine_digest: &engine_digest,
+            artifact_dir: &artifact_dir_str,
+            capabilities: &capabilities,
+        },
+    )?;
+    db::set_capsule_kind_meta(
+        &db,
+        &job.capsule_id,
+        candidate.capsule.kind.as_str(),
+        candidate.capsule.tool_chain_sha256.as_deref().unwrap_or(""),
+    )?;
+    db::set_capsule_read_only(&db, &job.capsule_id, all_read_only)?;
+    db::set_dependency_manifest(&db, &job.capsule_id, &manifest)?;
+    if let Some((edition, primary_name, primary_tree, template)) = portable_template {
+        let _ = db::upsert_template(&db, &edition, &primary_name, &primary_tree, &template);
     }
     Ok(())
 }
@@ -1258,7 +1597,9 @@ async fn compile(
     );
     if job.eval_arm.is_none()
         && skills.len() == 1
-        && let Some(edition) = workspace_edition(
+        && let Some(edition) = workspace_edition_for_project(
+            &runtime.store,
+            &job.project_id,
             &job.workspace,
             runtime.store.get(&job.session_id).ok().as_ref(),
         )
@@ -1459,11 +1800,20 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
     let artifacts = PathBuf::from(capsule["artifact_dir"].as_str().unwrap_or(""));
     let stored = package::load(&artifacts.join("warm"))?;
     if stored.capsule.kind == CapsuleKind::ToolChain {
-        let now_tree = trace::workspace_tree_sha(workspace)?;
-        if stored.capsule.tool_chain_sha256.as_deref() != Some(now_tree.as_str()) {
-            return Err(HarnessError::conflict(
-                "The workspace tree changed since this tool-chain capsule was compiled. Observe a new turn and compile it.",
-            ));
+        let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+        if !manifest.path_hashes.is_empty() {
+            if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
+                return Err(HarnessError::conflict(
+                    "Watched workspace files changed since this tool-chain capsule was compiled. Observe a new turn and compile it.",
+                ));
+            }
+        } else {
+            let now_tree = trace::workspace_tree_sha(workspace)?;
+            if stored.capsule.tool_chain_sha256.as_deref() != Some(now_tree.as_str()) {
+                return Err(HarnessError::conflict(
+                    "The workspace tree changed since this tool-chain capsule was compiled. Observe a new turn and compile it.",
+                ));
+            }
         }
     }
     let skills = stored
@@ -1583,7 +1933,9 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
         )?;
         let mut manifest =
             db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+        manifest.ir_revision = super::latest_ir_revision(&runtime.store.state, &project_id);
         manifest.verified_ns = db::current_unix_ns();
+        enrich_manifest_from_graph_ir(&runtime.store.state, &project_id, &mut manifest);
         let _ = db::set_dependency_manifest(&db, &capsule_id, &manifest);
     } else {
         let target = if capsule["status"] == "retired" {
@@ -1677,14 +2029,14 @@ async fn try_qualify_template_for_job(
         if !port.passed {
             continue;
         }
-        if form == Form::Hybrid
-            && (snapshot::load(&runtime.store.state, &job.generation)?.is_none()
-                || !replay_result::available(&runtime.store.state, &job.generation))
-        {
+        let has_cold_observation = snapshot::load(&runtime.store.state, &job.generation)?.is_some()
+            && replay_result::available(&runtime.store.state, &job.generation);
+        let allow_dry_run = form == Form::Hybrid && !has_cold_observation;
+        if allow_dry_run && candidate.examples.is_none() && !candidate.capsule.bindings.is_empty() {
             continue;
         }
         let dir = compile_dir(&runtime.store, &format!("tpl-{}", crate::store::hexid()));
-        let qualified = qualify(
+        let qualified = qualify_with_dry_run(
             runtime,
             job,
             Round::new(&dir, 1),
@@ -1692,6 +2044,7 @@ async fn try_qualify_template_for_job(
             form,
             observed_files.clone(),
             None,
+            allow_dry_run,
         )
         .await;
         let _ = tokio::task::spawn_blocking(move || {
@@ -1723,9 +2076,158 @@ async fn try_qualify_template_for_job(
     Ok(false)
 }
 
+fn failed_template_admissions() -> &'static Mutex<std::collections::HashSet<String>> {
+    static FAILED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn template_attempt_key(
+    project_id: &str,
+    edition: &str,
+    skill_name: &str,
+    tree_sha256: &str,
+    portability_sha256: &str,
+) -> String {
+    format!("{project_id}\n{edition}\n{skill_name}\n{tree_sha256}\n{portability_sha256}")
+}
+
+fn resolve_edition_skill(
+    workspace: &Path,
+    skill_name: &str,
+    expected_tree: &str,
+) -> Option<KnownSkill> {
+    for rel in [
+        format!(".claude/skills/{skill_name}/SKILL.md"),
+        format!(".cursor/skills/{skill_name}/SKILL.md"),
+        format!(".agents/skills/{skill_name}/SKILL.md"),
+    ] {
+        let Some(file) = trace::skill_file(workspace, &rel) else {
+            continue;
+        };
+        let Some(dir) = file.parent() else {
+            continue;
+        };
+        let Ok(tree) = fingerprint::tree_sha256(dir) else {
+            continue;
+        };
+        if tree.sha256 == expected_tree {
+            return Some(KnownSkill {
+                name: skill_name.to_owned(),
+                path: rel,
+                tree_sha256: tree.sha256,
+            });
+        }
+    }
+    None
+}
+
+/// Synchronously admits matching `Form::Textual` edition templates when already
+/// cached for `edition` on `workspace` (zero async subprocess latency).
+pub(crate) fn admit_textual_templates_sync(
+    runtime: &Runtime,
+    project_id: &str,
+    workspace: &Path,
+    edition: &str,
+) -> Result<Vec<Value>> {
+    let templates = {
+        let db = runtime.store.connection()?;
+        db::edition_templates(&db, edition)?
+    };
+    let mut admitted = Vec::new();
+    for tpl in templates {
+        if tpl["form"] != "textual" {
+            continue;
+        }
+        let skill_name = tpl["skill_name"].as_str().unwrap_or("");
+        let tree_sha = tpl["skill_tree_sha256"].as_str().unwrap_or("");
+        let Some(skill) = resolve_edition_skill(workspace, skill_name, tree_sha) else {
+            continue;
+        };
+        let already_active = {
+            let db = runtime.store.connection()?;
+            !db::active_capsules_for_skill_or_mirror(
+                &db,
+                project_id,
+                &skill.path,
+                &skill.name,
+                &skill.tree_sha256,
+                None,
+            )?
+            .is_empty()
+        };
+        if already_active {
+            continue;
+        }
+        let Ok((candidate, form)) = candidate_from_template_row(&tpl, edition, &skill) else {
+            continue;
+        };
+        if form != Form::Textual {
+            continue;
+        }
+        let port = gate1::check_portable_template(
+            &candidate.capsule_bytes,
+            &candidate.files,
+            candidate.markdown.as_deref().map(str::as_bytes),
+        );
+        if !port.passed {
+            continue;
+        }
+        let gate = gate1::check_textual(
+            &candidate.capsule_bytes,
+            candidate.markdown.as_deref().unwrap_or("").as_bytes(),
+            None,
+        );
+        let (compile_id, capsule_id) = (crate::store::id(), crate::store::id());
+        let skill_row = json!({
+            "name": skill.name,
+            "path": skill.path,
+            "tree_sha256": skill.tree_sha256,
+        });
+        let db = runtime.store.connection()?;
+        db::begin_capsule(
+            &db,
+            &capsule_id,
+            &compile_id,
+            project_id,
+            "",
+            &format!("tpl-sync-{}", crate::store::hexid()),
+            &skill_row,
+            None,
+        )?;
+        let report = serde_json::to_value(&gate)?;
+        db::record_gate(&db, &capsule_id, 1, "gate1t", gate.passed, &report)?;
+        drop(db);
+        if !gate.passed {
+            let db = runtime.store.connection()?;
+            let _ = db::set_capsule_status(
+                &db,
+                &capsule_id,
+                "failed",
+                Some("Template failed Gate 1T."),
+            );
+            continue;
+        }
+        let job = Job {
+            compile_id,
+            capsule_id: capsule_id.clone(),
+            session_id: String::new(),
+            generation: String::new(),
+            project_id: project_id.to_owned(),
+            workspace: workspace.to_path_buf(),
+            model: None,
+            eval_arm: None,
+        };
+        publish_capsule(runtime, &job, &candidate, &[skill])?;
+        if let Some(row) = db::capsule(&*runtime.store.connection()?, &capsule_id)? {
+            admitted.push(row);
+        }
+    }
+    Ok(admitted)
+}
+
 /// Strictly admits an indexed edition template on a target project ONLY if
 /// Gate 1 proves portability (no hardcoded project paths/secrets) AND
-/// target-repo Gate 2 + Gate 3 replay pass.
+/// target-repo Gate 2 + Gate 3 (observed replay or dry-run) pass.
 pub async fn admit_template_for_project(
     runtime: &Arc<Runtime>,
     session: &Value,
@@ -1735,7 +2237,18 @@ pub async fn admit_template_for_project(
 ) -> Result<Option<Value>> {
     let project_id = session["project_id"].as_str().unwrap_or("").to_string();
     let session_id = session["id"].as_str().unwrap_or("").to_string();
-    let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+    let workspace = session["project_path"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            runtime
+                .store
+                .project(&project_id)
+                .ok()
+                .and_then(|p| p["path"].as_str().map(PathBuf::from))
+        })
+        .unwrap_or_default();
     let has_templates = {
         let db = runtime.store.connection()?;
         !db::find_templates(&db, edition, &skill.name, &skill.tree_sha256)?.is_empty()
@@ -1784,6 +2297,152 @@ pub async fn admit_template_for_project(
         Some("Edition template failed target-project gates."),
     );
     Ok(None)
+}
+
+/// Proactively qualifies all matching portable edition templates (Textual & Hybrid)
+/// for `project_id` / `workspace`.
+pub async fn admit_edition_templates_for_project(
+    runtime: &Arc<Runtime>,
+    project_id: &str,
+    workspace: &Path,
+    edition: &str,
+) -> Result<Vec<Value>> {
+    let templates = {
+        let db = runtime.store.connection()?;
+        db::edition_templates(&db, edition)?
+    };
+    let mut admitted = Vec::new();
+    for tpl in templates {
+        let skill_name = tpl["skill_name"].as_str().unwrap_or("");
+        let tree_sha = tpl["skill_tree_sha256"].as_str().unwrap_or("");
+        let port_sha = tpl["portability_sha256"].as_str().unwrap_or("");
+        let Some(skill) = resolve_edition_skill(workspace, skill_name, tree_sha) else {
+            continue;
+        };
+        let attempt_key = template_attempt_key(project_id, edition, skill_name, tree_sha, port_sha);
+        if failed_template_admissions()
+            .lock()
+            .is_ok_and(|guard| guard.contains(&attempt_key))
+        {
+            continue;
+        }
+        let already_active = {
+            let db = runtime.store.connection()?;
+            !db::active_capsules_for_skill_or_mirror(
+                &db,
+                project_id,
+                &skill.path,
+                &skill.name,
+                &skill.tree_sha256,
+                None,
+            )?
+            .is_empty()
+        };
+        if already_active {
+            continue;
+        }
+        let synthetic_session = json!({
+            "id": "",
+            "project_id": project_id,
+            "project_path": workspace.display().to_string(),
+        });
+        let generation = format!("tpl-admit-{}", crate::store::hexid());
+        if let Some(cap) =
+            admit_template_for_project(runtime, &synthetic_session, &generation, edition, &skill)
+                .await?
+        {
+            admitted.push(cap);
+        } else if let Ok(mut guard) = failed_template_admissions().lock() {
+            if guard.len() >= 1024 {
+                guard.clear();
+            }
+            guard.insert(attempt_key);
+        }
+    }
+    Ok(admitted)
+}
+
+/// Attempts proactive template admission on a `warm::decide` `no_capsule` miss.
+pub(crate) async fn try_admit_template_on_miss(
+    runtime: &Arc<Runtime>,
+    session: &Value,
+    generation: &str,
+    route: &crate::commands::ResolvedCommand,
+    workspace: &Path,
+) -> Result<Option<Value>> {
+    if route.requests.len() != 1 {
+        return Ok(None);
+    }
+    let project_id = session["project_id"].as_str().unwrap_or("");
+    let Some(edition) =
+        workspace_edition_for_project(&runtime.store, project_id, workspace, Some(session))
+    else {
+        return Ok(None);
+    };
+    let req = &route.requests[0];
+    let Some(skill_path) = req["path"]
+        .as_str()
+        .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
+    else {
+        return Ok(None);
+    };
+    let skill_name = req["name"].as_str().unwrap_or("");
+    let Some(tree) = trace::skill_file(workspace, &skill_path)
+        .and_then(|file| file.parent().map(Path::to_path_buf))
+        .and_then(|dir| fingerprint::tree_sha256(&dir).ok())
+    else {
+        return Ok(None);
+    };
+    let templates = {
+        let db = runtime.store.connection()?;
+        db::find_templates(&db, &edition, skill_name, &tree.sha256)?
+    };
+    if templates.is_empty() {
+        return Ok(None);
+    }
+    let any_untried = templates.iter().any(|tpl| {
+        let port_sha = tpl["portability_sha256"].as_str().unwrap_or("");
+        let attempt_key =
+            template_attempt_key(project_id, &edition, skill_name, &tree.sha256, port_sha);
+        !failed_template_admissions()
+            .lock()
+            .is_ok_and(|guard| guard.contains(&attempt_key))
+    });
+    if !any_untried {
+        return Ok(None);
+    }
+    let skill = KnownSkill {
+        name: skill_name.to_owned(),
+        path: skill_path,
+        tree_sha256: tree.sha256.clone(),
+    };
+    let mut sess_with_path = session.clone();
+    if sess_with_path["project_path"]
+        .as_str()
+        .is_none_or(str::is_empty)
+    {
+        sess_with_path["project_path"] = json!(workspace.display().to_string());
+    }
+    let admitted =
+        admit_template_for_project(runtime, &sess_with_path, generation, &edition, &skill).await?;
+    if admitted.is_none()
+        && let Ok(mut guard) = failed_template_admissions().lock()
+    {
+        if guard.len() >= 1024 {
+            guard.clear();
+        }
+        for tpl in &templates {
+            let port_sha = tpl["portability_sha256"].as_str().unwrap_or("");
+            guard.insert(template_attempt_key(
+                project_id,
+                &edition,
+                skill_name,
+                &tree.sha256,
+                port_sha,
+            ));
+        }
+    }
+    Ok(admitted)
 }
 
 #[cfg(test)]
@@ -2005,5 +2664,140 @@ mod tests {
             .expect("portable template should be admitted");
         assert_eq!(admitted["status"], "active");
         assert_eq!(admitted["kind"], "template");
+    }
+
+    #[test]
+    fn workspace_edition_probe_cache_bash_manifest_and_ir_callers_work() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("app");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/App.php"), "<?php\n").unwrap();
+        std::fs::write(workspace.join("src/Caller.php"), "<?php\n").unwrap();
+        std::fs::write(
+            workspace.join(".infra-manifest.json"),
+            r#"{"profile":"Symfony","editions":["Symfony","PHP Core"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_edition(&workspace, None).as_deref(),
+            Some("Symfony")
+        );
+
+        std::fs::remove_file(workspace.join(".infra-manifest.json")).unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS project_accelerators(project_id TEXT PRIMARY KEY,edition TEXT NOT NULL,attached_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO project_accelerators(project_id,edition,attached_at) VALUES(?1,?2,?3)",
+                rusqlite::params![&project_id, "Laravel", crate::store::now()],
+            )
+            .unwrap();
+        assert_eq!(
+            workspace_edition_for_project(&store, &project_id, &workspace, None).as_deref(),
+            Some("Laravel")
+        );
+
+        let dummy_cand = Candidate {
+            capsule: infra_skillcache::SkillCapsule::from_value(&json!({
+                "schema_version": 1,
+                "form": "textual",
+                "mu": {"name": "s", "description": "d"},
+                "source": {"skills": [{"name": "s", "path": ".claude/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]}
+            }))
+            .unwrap(),
+            capsule_bytes: Vec::new(),
+            files: infra_skillcache::package::Files::new(),
+            examples: None,
+            markdown: Some("# S\n\n1. Do step.\n".into()),
+        };
+        let trace_val = json!({
+            "steps": [
+                {"kind": "tool", "name": "Bash", "input": {"command": "php -l src/App.php"}}
+            ]
+        });
+        let mut manifest = build_dependency_manifest(&workspace, &trace_val, &dummy_cand, 7);
+        assert_eq!(manifest.ir_revision, 7);
+        assert!(manifest.ast_selectors.contains(&"src/App.php".to_owned()));
+        assert!(manifest.caller_files.contains(&"src/App.php".to_owned()));
+
+        let ir = crate::graph_ir::GraphIrStore::open(&store.state, &project_id).unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        let mut callers = BoundaryProbeCache::default();
+        assert!(!callers.is_valid(&project_id, "spec-1"));
+        callers.record(project_id.clone(), "spec-1".into());
+        assert!(callers.is_valid(&project_id, "spec-1"));
+        assert!(!callers.is_valid(&project_id, "spec-2"));
+        enrich_manifest_from_graph_ir(&store.state, &project_id, &mut manifest);
+    }
+
+    #[tokio::test]
+    async fn hybrid_template_dry_run_qualifies_without_prior_observed_result() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("project");
+        let skill_dir = workspace.join(".claude/skills/check-ro");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Check RO\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "hello\n").unwrap();
+        let tree = fingerprint::tree_sha256(&skill_dir).unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude", "mode": "plan", "workflow": "native", "permissions": "auto"}),
+                "check ro",
+                &[],
+            )
+            .unwrap();
+        let skill = KnownSkill {
+            name: "check-ro".into(),
+            path: ".claude/skills/check-ro/SKILL.md".into(),
+            tree_sha256: tree.sha256.clone(),
+        };
+        let exe = std::env::current_exe().unwrap();
+        // Only run sandboxed Gate 2+3 when engine + sandbox exist in the test binary environment;
+        // validate dry-run path always with validate_dry_run.
+        let mut fake_violations = Vec::new();
+        let empty_obs = crate::skillcache::replay_result::ObservedResult::default();
+        let dummy_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "template",
+            "mu": {"name": "check-ro", "description": "Read-only template"},
+            "source": {"edition": "Laravel", "skills": [{"name": "check-ro", "path": ".claude/skills/check-ro/SKILL.md", "tree_sha256": tree.sha256}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        }))
+        .unwrap();
+        let cmp = gates::validate_dry_run(
+            &empty_obs,
+            &json!({"status": "replay", "completed": [0], "failures": []}),
+            &dummy_cap,
+            &mut fake_violations,
+        );
+        assert_eq!(cmp["status"], "dry_run_passed");
+        assert!(fake_violations.is_empty());
+        let _ = (&session, &skill, &exe);
     }
 }

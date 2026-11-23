@@ -1220,3 +1220,103 @@ fn live_run_fails_read_only_program_that_mutates_workspace() {
     assert_eq!(edit_answer["diagnostics"]["reason"], "read_only_violation");
     assert!(stand_edit.state()["bindings"].get("rows_file").is_none());
 }
+
+#[test]
+fn step_level_memoization_and_parameterized_helper_reuse_invalidate_on_mutation() {
+    let mut cap = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "mu": {"name": "memo-helper-demo", "description": "Parameterized read-only helper memoization"},
+        "source": {"skills": [{"name": "pdf", "path": SKILL, "tree_sha256": "0".repeat(64)}]},
+        "capabilities": {"network": "none", "runtimes": [runtime()]},
+        "bindings": [
+            {"name": "path_a", "type": "path", "origin": "request"},
+            {"name": "path_b", "type": "path", "origin": "request"}
+        ],
+        "programs": [
+            {
+                "id": "inspect_item",
+                "entry": [runtime(), "programs/inspect_item/program.json"],
+                "inputs": ["target"],
+                "outputs": ["digest"],
+                "check": [runtime(), "programs/inspect_item/program.json", "--check"],
+                "timeout_seconds": 20,
+                "read_only": true
+            },
+            {
+                "id": "mutate_ws",
+                "entry": [runtime(), "programs/mutate_ws/program.json"],
+                "inputs": ["d_a1", "d_a2", "d_b"],
+                "outputs": ["done_flag"],
+                "check": [runtime(), "programs/mutate_ws/program.json", "--check"],
+                "timeout_seconds": 20,
+                "read_only": false
+            },
+            {
+                "id": "finalize",
+                "entry": [runtime(), "programs/finalize/program.json"],
+                "inputs": ["done_flag", "d_a3"],
+                "outputs": [],
+                "check": [runtime(), "programs/finalize/program.json", "--check"],
+                "timeout_seconds": 20,
+                "read_only": true
+            }
+        ],
+        "steps": [
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_a"},
+                "outputs": {"digest": "d_a1"}
+            },
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_a"},
+                "outputs": {"digest": "d_a2"}
+            },
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_b"},
+                "outputs": {"digest": "d_b"}
+            },
+            {"kind": "program", "program": "mutate_ws"},
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_a"},
+                "outputs": {"digest": "d_a3"}
+            },
+            {"kind": "program", "program": "finalize"}
+        ],
+        "verification": []
+    });
+    let step_specs = vec![
+        (
+            "inspect_item",
+            json!({"result": {"digest": "sha-item"}, "echo_input": true}),
+        ),
+        (
+            "mutate_ws",
+            json!({"result": {"done_flag": "ok"}, "write": {"mutated.txt": "1"}}),
+        ),
+        ("finalize", json!({"result": {}})),
+    ];
+    let stand = Stand::with(cap.take(), step_specs);
+    let answer = stand.ok(&["run", r#"{"path_a":"src/a.txt","path_b":"src/b.txt"}"#]);
+    assert_eq!(answer["status"], "complete", "{answer}");
+    let log = infra_skillcache::state::read_log(&stand.state_file, 0).unwrap();
+    let completed_events: Vec<&Value> = log
+        .iter()
+        .filter(|e| e["event"] == "program_completed")
+        .collect();
+    assert_eq!(completed_events.len(), 6, "{completed_events:?}");
+    assert_eq!(completed_events[0]["memoized"], false);
+    assert_eq!(completed_events[1]["memoized"], true);
+    assert_eq!(completed_events[2]["memoized"], false);
+    assert_eq!(completed_events[3]["memoized"], false);
+    // After the mutating step, step memo was cleared so step 4 runs fresh.
+    assert_eq!(completed_events[4]["memoized"], false);
+    assert_eq!(completed_events[5]["memoized"], false);
+}

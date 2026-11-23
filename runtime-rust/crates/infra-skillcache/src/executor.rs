@@ -10,13 +10,17 @@
 //! the plan stays compiled.
 use crate::{
     capsule::{BINDING_BYTES, Examples, SkillCapsule, Step, is_admitted_value},
+    fingerprint::sha256,
     gate1,
     package::Package,
     state::{Awaiting, Failure, RunLog, RunState},
     tool,
 };
 use serde_json::{Map, Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 /// A refusal of a command: the agent or the host called the executor in a way
 /// the protocol does not allow. The run's state is left as it was.
@@ -75,6 +79,8 @@ struct Runner<'a> {
     record_changes: bool,
     /// Replay only: the diagnostics of every failure, by plan index.
     failures: Vec<Value>,
+    /// Safe step-level memoization keyed by `(program_digest, input_digest)` for read-only helpers.
+    step_memo: BTreeMap<(String, String), Map<String, Value>>,
 }
 
 fn is_instruction(step: &Step) -> bool {
@@ -275,6 +281,7 @@ impl<'a> Runner<'a> {
             check_read_only: true,
             record_changes: true,
             failures: Vec::new(),
+            step_memo: BTreeMap::new(),
         })
     }
     fn save(&self) -> Result<(), Refusal> {
@@ -512,11 +519,49 @@ impl<'a> Runner<'a> {
         mut attempt: u8,
     ) -> Result<Option<Value>, Refusal> {
         let capsule = self.capsule;
-        let program = capsule
+        let step = capsule
             .plan_step(step_index)
-            .and_then(Step::program)
+            .ok_or_else(|| Refusal::new("invalid_capsule", "The plan names an unknown step."))?;
+        let program = step
+            .program()
             .and_then(|id| capsule.program(id))
             .ok_or_else(|| Refusal::new("invalid_capsule", "The plan names an unknown program."))?;
+        let step_inputs = step.program_inputs();
+        let step_outputs = step.program_outputs();
+        let mut effective_bindings = self.state.bindings.clone();
+        if let Some(mapped) = step_inputs {
+            for (param, source_name) in mapped {
+                if let Some(val) = self.state.bindings.get(source_name) {
+                    effective_bindings.insert(param.clone(), val.clone());
+                }
+            }
+        }
+        let prog_digest = if program.read_only {
+            let desc = format!(
+                "{}\n{}\n{:?}\n{:?}\n{:?}",
+                self.session.package.package_sha256,
+                program.id,
+                program.entry,
+                program.inputs,
+                program.outputs
+            );
+            Some(sha256(desc.as_bytes()))
+        } else {
+            None
+        };
+        let input_digest = if program.read_only {
+            let mut pairs = BTreeMap::new();
+            for input in &program.inputs {
+                if let Some(val) = effective_bindings.get(input) {
+                    pairs.insert(input.clone(), val.clone());
+                }
+            }
+            Some(sha256(
+                serde_json::to_vec(&pairs).unwrap_or_default().as_slice(),
+            ))
+        } else {
+            None
+        };
         loop {
             // Written and flushed before the program starts: a crash leaves
             // the attempt on disk.
@@ -529,72 +574,117 @@ impl<'a> Runner<'a> {
                 "program_started",
                 json!({"step_index": step_index, "program": program.id, "attempt": attempt}),
             )?;
-            let allowlist = &self.session.package.capsule.capabilities.allow_ignored;
-            let before = if self.check_read_only && program.read_only {
-                workspace_listing(self.session.workspace, allowlist)
-            } else if self.record_changes {
-                workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
+            let memo_key = prog_digest
+                .as_ref()
+                .zip(input_digest.as_ref())
+                .map(|(p, i)| (p.clone(), i.clone()));
+            let memo_hit = if attempt == 1
+                && let Some(key) = &memo_key
+            {
+                self.step_memo.get(key).cloned()
             } else {
                 None
             };
-            let outcome = tool::run(
-                self.session.package,
-                program,
-                tool::Mode::Run(&self.state.bindings),
-                self.session.workspace,
-            )?;
-            let after = if before.is_some() {
-                if self.check_read_only && program.read_only {
+            let (outcome, memoized) = if let Some(cached_result) = memo_hit {
+                (
+                    tool::Outcome::Completed(tool::Completed {
+                        result: cached_result,
+                        seconds: 0.0,
+                    }),
+                    true,
+                )
+            } else {
+                let allowlist = &self.session.package.capsule.capabilities.allow_ignored;
+                let before = if self.check_read_only && program.read_only {
                     workspace_listing(self.session.workspace, allowlist)
-                } else {
+                } else if self.record_changes {
                     workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
+                } else {
+                    None
+                };
+                let outcome = tool::run(
+                    self.session.package,
+                    program,
+                    tool::Mode::Run(&effective_bindings),
+                    self.session.workspace,
+                )?;
+                let after = if before.is_some() {
+                    if self.check_read_only && program.read_only {
+                        workspace_listing(self.session.workspace, allowlist)
+                    } else {
+                        workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
+                    }
+                } else {
+                    None
+                };
+                let changed_files = match (&before, &after) {
+                    (Some(prev), Some(next)) if self.record_changes => {
+                        diff_workspace_changes(prev, next, self.session.workspace)
+                    }
+                    _ => Vec::new(),
+                };
+                if !changed_files.is_empty() {
+                    let _ = crate::state::append_changes(
+                        self.log.path(),
+                        self.log.generation(),
+                        &changed_files,
+                    );
                 }
-            } else {
-                None
-            };
-            let changed_files = match (&before, &after) {
-                (Some(prev), Some(next)) if self.record_changes => {
-                    diff_workspace_changes(prev, next, self.session.workspace)
-                }
-                _ => Vec::new(),
-            };
-            if !changed_files.is_empty() {
-                let _ = crate::state::append_changes(
-                    self.log.path(),
-                    self.log.generation(),
-                    &changed_files,
-                );
-            }
-            let outcome = match outcome {
-                tool::Outcome::Completed(completed)
-                    if self.check_read_only
-                        && program.read_only
-                        && before.is_some()
-                        && after != before =>
+                if !program.read_only
+                    || !changed_files.is_empty()
+                    || (before.is_some() && after != before)
                 {
-                    tool::Outcome::Failed(tool::Failed {
-                        reason: "read_only_violation",
-                        exit_code: Some(0),
-                        diagnostics: "The program is declared read-only but changed the workspace."
-                            .into(),
-                        missing: Vec::new(),
-                        seconds: completed.seconds,
-                    })
+                    self.step_memo.clear();
                 }
-                other => other,
+                let checked = match outcome {
+                    tool::Outcome::Completed(completed)
+                        if self.check_read_only
+                            && program.read_only
+                            && before.is_some()
+                            && after != before =>
+                    {
+                        tool::Outcome::Failed(tool::Failed {
+                            reason: "read_only_violation",
+                            exit_code: Some(0),
+                            diagnostics:
+                                "The program is declared read-only but changed the workspace."
+                                    .into(),
+                            missing: Vec::new(),
+                            seconds: completed.seconds,
+                        })
+                    }
+                    other => other,
+                };
+                (checked, false)
             };
             match outcome {
                 tool::Outcome::Completed(completed) => {
+                    if !memoized
+                        && program.read_only
+                        && let Some(key) = memo_key
+                        && self.step_memo.len() < crate::capsule::PLAN_STEPS
+                    {
+                        self.step_memo.insert(key, completed.result.clone());
+                    }
                     for output in &program.outputs {
+                        let dest = step_outputs.and_then(|m| m.get(output)).unwrap_or(output);
                         if let Some(value) = completed.result.get(output) {
-                            self.state.bindings.insert(output.clone(), value.clone());
+                            self.state.bindings.insert(dest.clone(), value.clone());
                         }
                     }
                     let result = Value::Object(completed.result);
+                    let result_key = if self.state.results.contains_key(&program.id)
+                        && (step_inputs.is_some_and(|m| !m.is_empty())
+                            || step_outputs.is_some_and(|m| !m.is_empty()))
+                    {
+                        format!("{}@{step_index}", program.id)
+                    } else {
+                        program.id.clone()
+                    };
                     self.state
                         .results
-                        .insert(program.id.clone(), result.clone());
-                    self.results.insert(program.id.clone(), result);
+                        .insert(result_key.clone(), result.clone());
+                    self.results.insert(result_key, result);
                     self.state.completed.push(step_index);
                     self.state.position = step_index + 1;
                     self.state.awaiting = Awaiting::None;
@@ -606,6 +696,7 @@ impl<'a> Runner<'a> {
                             "program": program.id,
                             "attempt": attempt,
                             "seconds": completed.seconds,
+                            "memoized": memoized,
                         }),
                     )?;
                     return Ok(None);
@@ -633,6 +724,7 @@ impl<'a> Runner<'a> {
                 return Ok(self.complete());
             };
             if is_instruction(step) {
+                self.step_memo.clear();
                 let (indexes, names) = self.instruction_steps(index);
                 self.state.awaiting = Awaiting::Steps {
                     step_indexes: indexes.clone(),
@@ -653,11 +745,14 @@ impl<'a> Runner<'a> {
                 .ok_or_else(|| {
                     Refusal::new("invalid_capsule", "The plan names an unknown program.")
                 })?;
+            let step_inputs = step.program_inputs();
             let missing = program
                 .inputs
                 .iter()
-                .filter(|input| !self.state.bindings.contains_key(*input))
-                .cloned()
+                .filter_map(|input| {
+                    let effective = step_inputs.and_then(|map| map.get(input)).unwrap_or(input);
+                    (!self.state.bindings.contains_key(effective)).then(|| effective.clone())
+                })
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 self.state.awaiting = Awaiting::Bindings {

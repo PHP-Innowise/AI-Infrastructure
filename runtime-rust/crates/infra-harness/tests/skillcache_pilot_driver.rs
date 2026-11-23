@@ -202,7 +202,7 @@ impl HarnessStand {
             ],
             "examples": {
                 "bindings": {"input_dir": "invoices/"},
-                "steps": {"0": {"result": {"rows_file": "out/rows.txt"}}}
+                "steps": {"0": {"result": {"rows_file": "observed/rows.txt"}}}
             }
         });
 

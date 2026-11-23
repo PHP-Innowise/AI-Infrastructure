@@ -379,14 +379,28 @@ pub(super) fn gate3(
     expected: Option<&ObservedResult>,
     cancel: &Arc<AtomicBool>,
 ) -> Value {
-    let Some(expected) = expected else {
+    gate3_with_options(engine, round, candidate, copy, expected, false, cancel)
+}
+
+/// Gate 3 with optional template dry-run qualification when no prior
+/// `observed-result.json` exists yet on the target project.
+pub(super) fn gate3_with_options(
+    engine: &Engine,
+    round: &Round,
+    candidate: &Candidate,
+    copy: &dyn Fn(&Path) -> Result<Value>,
+    expected: Option<&ObservedResult>,
+    allow_dry_run: bool,
+    cancel: &Arc<AtomicBool>,
+) -> Value {
+    if expected.is_none() && !allow_dry_run {
         return json!({
             "gate": "gate3",
             "passed": false,
             "result_comparison": {"status": "unavailable"},
             "violations": [result_unavailable("Observe a new turn with a capturable workspace result.")],
         });
-    };
+    }
     let package = round.package();
     let top = round.workspace("gate3");
     let attempt = (|| {
@@ -502,14 +516,20 @@ pub(super) fn gate3(
                     )?;
                     Ok(replay_result::diff(&before, &after))
                 }) {
-                    Ok(actual) => compare_results(
-                        expected,
-                        &actual,
-                        &replay,
-                        &candidate.capsule,
-                        candidate.examples.as_ref(),
-                        &mut violations,
-                    ),
+                    Ok(actual) => {
+                        if let Some(expected) = expected {
+                            compare_results(
+                                expected,
+                                &actual,
+                                &replay,
+                                &candidate.capsule,
+                                candidate.examples.as_ref(),
+                                &mut violations,
+                            )
+                        } else {
+                            validate_dry_run(&actual, &replay, &candidate.capsule, &mut violations)
+                        }
+                    }
                     Err(_) => {
                         violations.push(result_unavailable(
                             "The replay workspace could not be captured within the comparison limits.",
@@ -545,6 +565,40 @@ fn result_unavailable(message: &str) -> Value {
     json!({"code": "replay_result_unavailable", "at": "", "message": message})
 }
 
+pub(super) fn validate_dry_run(
+    actual: &ObservedResult,
+    replay: &Value,
+    capsule: &SkillCapsule,
+    violations: &mut Vec<Value>,
+) -> Value {
+    let all_read_only = capsule.programs.iter().all(|program| program.read_only);
+    if all_read_only && !actual.changes.is_empty() {
+        violations.push(json!({
+            "code": "read_only_violation",
+            "at": "",
+            "message": format!(
+                "A read-only template wrote {} file(s) during Gate 3 dry-run.",
+                actual.changes.len()
+            ),
+        }));
+        return json!({"status": "mismatch", "changed_files": actual.changes.len()});
+    }
+    let completed = replay["completed"].as_array().map_or(0, Vec::len);
+    if completed == 0 {
+        violations.push(json!({
+            "code": "dry_run_empty",
+            "at": "",
+            "message": "Dry-run qualification completed zero plan steps.",
+        }));
+        return json!({"status": "mismatch", "completed": 0});
+    }
+    json!({
+        "status": "dry_run_passed",
+        "completed": completed,
+        "changed_files": actual.changes.len(),
+    })
+}
+
 fn format_path_sample(paths: &[String]) -> String {
     const LIMIT: usize = 5;
     if paths.is_empty() {
@@ -578,16 +632,17 @@ fn json_matches_observed(expected: &Value, actual: &Value) -> bool {
                 })
         }
         (Value::Array(exp), Value::Array(act)) => {
-            if exp.is_empty() {
-                act.is_empty()
-            } else {
-                !act.is_empty()
-                    && (replay_result::values_structurally_equal(expected, actual)
-                        || exp
-                            .iter()
-                            .zip(act.iter())
-                            .all(|(e, a)| json_matches_observed(e, a)))
+            if exp.len() != act.len() {
+                return false;
             }
+            if exp.is_empty() {
+                return true;
+            }
+            replay_result::values_structurally_equal(expected, actual)
+                || exp
+                    .iter()
+                    .zip(act.iter())
+                    .all(|(e, a)| json_matches_observed(e, a))
         }
         _ => replay_result::values_structurally_equal(expected, actual),
     }
@@ -605,7 +660,13 @@ fn step_outputs_match_observed_json(
             || val
                 .as_str()
                 .and_then(|s| {
-                    infra_core::strict_json::parse(s.trim().as_bytes(), 16 * 1024, 32, 10_000).ok()
+                    infra_core::strict_json::parse(
+                        s.trim().as_bytes(),
+                        replay_result::OBSERVED_JSON_BYTES,
+                        64,
+                        100_000,
+                    )
+                    .ok()
                 })
                 .is_some_and(|parsed| json_matches_observed(observed_json, &parsed))
     })
@@ -631,6 +692,57 @@ fn collect_leaf_strings(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+fn contains_token_boundary(haystack: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let is_token_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '/' | '.');
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(token) {
+        let idx = start + pos;
+        let end = idx + token.len();
+        let left_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_token_char(c));
+        let right_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_token_char(c));
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + haystack[idx..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+fn is_prose_stopword(word: &str) -> bool {
+    matches!(
+        word,
+        "that"
+            | "this"
+            | "with"
+            | "from"
+            | "were"
+            | "have"
+            | "been"
+            | "will"
+            | "into"
+            | "your"
+            | "step"
+            | "none"
+            | "true"
+            | "false"
+            | "null"
+            | "there"
+            | "their"
+            | "which"
+            | "when"
+            | "what"
+    )
+}
+
 fn step_maps_match_observed_text(
     step_maps: &[&serde_json::Map<String, Value>],
     observed_text: &str,
@@ -652,18 +764,26 @@ fn step_maps_match_observed_text(
     }) {
         return true;
     }
-    let combined = leaves.join("\n").to_ascii_lowercase();
+    let normalized_obs = replay_result::normalize_volatile_tokens(observed_text);
+    let combined =
+        replay_result::normalize_volatile_tokens(&leaves.join("\n")).to_ascii_lowercase();
     let mut salient: Vec<String> = Vec::new();
-    for raw_tok in observed_text.split(|c: char| c.is_whitespace() || ",;()[]{}<>\"'`".contains(c))
+    for raw_tok in normalized_obs.split(|c: char| c.is_whitespace() || ",;()[]{}<>\"'`".contains(c))
     {
+        if raw_tok.contains("<TIMESTAMP>") || raw_tok.contains("<UUID>") {
+            continue;
+        }
         let tok = raw_tok.trim_matches(|c: char| !c.is_alphanumeric() && !"/._-".contains(c));
+        let tok = tok.trim_end_matches('.');
+        if tok.is_empty() {
+            continue;
+        }
         let is_number = tok.chars().all(|c| c.is_ascii_digit() || c == '.')
-            && tok.chars().filter(char::is_ascii_digit).count() >= 1
-            && (tok.len() >= 2 || tok.chars().all(|c| c.is_ascii_digit()));
+            && tok.chars().any(|c| c.is_ascii_digit());
         let is_path = tok.len() >= 3 && (tok.contains('/') || tok.contains('.'));
-        if (is_number || is_path) && !salient.iter().any(|seen| seen == tok) {
+        if (is_number || is_path) && !salient.iter().any(|seen| seen.eq_ignore_ascii_case(tok)) {
             salient.push(tok.to_ascii_lowercase());
-            if salient.len() >= 8 {
+            if salient.len() >= 64 {
                 break;
             }
         }
@@ -671,25 +791,33 @@ fn step_maps_match_observed_text(
     if !salient.is_empty() {
         let hits = salient
             .iter()
-            .filter(|tok| combined.contains(tok.as_str()))
+            .filter(|tok| contains_token_boundary(&combined, tok))
             .count();
-        return hits * 2 >= salient.len();
+        return hits == salient.len();
     }
-    let words: Vec<String> = observed_text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 4)
-        .map(str::to_ascii_lowercase)
-        .take(8)
-        .collect();
+    let mut words: Vec<String> = Vec::new();
+    for raw in normalized_obs.split(|c: char| !c.is_alphanumeric()) {
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() >= 4 && !is_prose_stopword(&lower) && !words.contains(&lower) {
+            words.push(lower);
+            if words.len() >= 32 {
+                break;
+            }
+        }
+    }
     if words.is_empty() {
-        let trimmed = observed_text.trim().to_ascii_lowercase();
-        return !trimmed.is_empty() && combined.contains(&trimmed);
+        let trimmed = normalized_obs.trim().to_ascii_lowercase();
+        return !trimmed.is_empty() && contains_token_boundary(&combined, &trimmed);
     }
     let hits = words
         .iter()
-        .filter(|w| combined.contains(w.as_str()))
+        .filter(|w| contains_token_boundary(&combined, w))
         .count();
-    hits * 2 >= words.len()
+    if words.len() <= 4 {
+        hits == words.len()
+    } else {
+        hits * 5 >= words.len() * 4
+    }
 }
 
 fn verify_zero_file_outputs(
@@ -1099,5 +1227,39 @@ mod tests {
             )["status"],
             "no_file_changes"
         );
+    }
+
+    #[test]
+    fn json_and_text_comparison_reject_partial_arrays_and_half_token_overlap() {
+        assert!(!json_matches_observed(&json!([1, 2]), &json!([1])));
+        assert!(!json_matches_observed(&json!([1]), &json!([1, 2])));
+        assert!(json_matches_observed(&json!([1, 2]), &json!([2, 1])));
+        assert!(json_matches_observed(
+            &json!({"id": "550e8400-e29b-41d4-a716-446655440000", "at": "2026-01-01T00:00:00Z", "ok": true}),
+            &json!({"id": "123e4567-e89b-12d3-a456-426614174000", "at": "2026-11-23T12:00:00Z", "ok": true})
+        ));
+
+        let half_map: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"summary": "Found 20 invoices in src/a.rs"})).unwrap();
+        assert!(!step_maps_match_observed_text(
+            &[&half_map],
+            "Found 20 invoices in src/a.rs and 99 errors in src/b.rs"
+        ));
+
+        let prose_half: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"summary": "checked database schema"})).unwrap();
+        assert!(!step_maps_match_observed_text(
+            &[&prose_half],
+            "checked database schema migration failure missing column"
+        ));
+
+        let full_with_volatile: serde_json::Map<String, Value> = serde_json::from_value(json!({
+            "summary": "run 123e4567-e89b-12d3-a456-426614174000 at 2026-11-23T14:00:00Z: 20 invoices in src/a.rs, 99 errors in src/b.rs"
+        }))
+        .unwrap();
+        assert!(step_maps_match_observed_text(
+            &[&full_with_volatile],
+            "run 550e8400-e29b-41d4-a716-446655440000 at 2026-01-01T00:00:00Z: 20 invoices in src/a.rs, 99 errors in src/b.rs"
+        ));
     }
 }
