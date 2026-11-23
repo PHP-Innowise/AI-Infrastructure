@@ -33,13 +33,315 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
     time::Instant,
 };
 
+#[derive(Default)]
+struct CodeGraphOverlay {
+    ir_edges: Vec<Value>,
+    ir_semantic_edges: Vec<Value>,
+    architecture_violations: Vec<Value>,
+    blast_markers: Vec<Value>,
+}
+
+const MAX_OVERLAY_IR_EDGES: usize = 250;
+const MAX_OVERLAY_SEMANTIC_EDGES: usize = 250;
+const MAX_OVERLAY_VIOLATIONS: usize = 200;
+const MAX_OVERLAY_BLAST_FILES: usize = 32;
+
+fn matches_optional_query(qf: Option<&str>, fields: &[&str]) -> bool {
+    let Some(q) = qf else {
+        return true;
+    };
+    fields
+        .iter()
+        .any(|f| !f.is_empty() && f.to_ascii_lowercase().contains(q))
+}
+
+fn is_semantic_relation(rel: &str) -> bool {
+    rel.starts_with("sem:")
+        || matches!(
+            rel,
+            "exposes_route"
+                | "calls_route"
+                | "publishes_event"
+                | "handles_event"
+                | "reads_table"
+                | "writes_table"
+                | "di_binds"
+                | "di_binding"
+        )
+}
+
+fn collect_code_graph_overlay(
+    state_dir: &Path,
+    project_id: &str,
+    project_root: Option<&Path>,
+    kept_files: &BTreeSet<String>,
+    q_filter: Option<&str>,
+) -> CodeGraphOverlay {
+    let mut overlay = CodeGraphOverlay::default();
+    let ir_opt = crate::graph_ir::GraphIrStore::open_readonly_cached(state_dir, project_id)
+        .ok()
+        .flatten();
+
+    let mut ir_nodes_links = None;
+    if let Some(ref ir) = ir_opt {
+        if let Ok((_, sem_rows)) = ir.semantic_edges_for_system() {
+            let mut prioritized = Vec::new();
+            let mut secondary = Vec::new();
+            for (idx, (file_path, kind, target, src_sym, line, evidence)) in
+                sem_rows.into_iter().enumerate()
+            {
+                let src_sym_str = src_sym.as_deref().unwrap_or("");
+                if !matches_optional_query(
+                    q_filter,
+                    &[&file_path, &kind, &target, src_sym_str, &evidence],
+                ) {
+                    continue;
+                }
+                let entry = json!({
+                    "id": format!("sem:{file_path}:{kind}:{target}:{line}:{idx}"),
+                    "file_path": file_path,
+                    "source": file_path,
+                    "source_file": file_path,
+                    "source_symbol": src_sym,
+                    "target": target,
+                    "kind": kind,
+                    "relation": kind,
+                    "line": line,
+                    "evidence": evidence,
+                });
+                if kept_files.contains(&file_path) {
+                    prioritized.push(entry);
+                } else {
+                    secondary.push(entry);
+                }
+            }
+            overlay.ir_semantic_edges = prioritized
+                .into_iter()
+                .chain(secondary)
+                .take(MAX_OVERLAY_SEMANTIC_EDGES)
+                .collect();
+        }
+
+        if let Ok((nodes, links, _, _)) = ir.export_ir_graph_elements() {
+            let node_by_id: HashMap<&str, &crate::graph_ir::IrNodeSpec> =
+                nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+            let mut prioritized = Vec::new();
+            let mut secondary = Vec::new();
+            let mut seen_edges = BTreeSet::new();
+            for link in &links {
+                let rel = link.relation.as_deref().unwrap_or("depends_on");
+                if is_semantic_relation(rel) {
+                    continue;
+                }
+                let src_node = node_by_id.get(link.source.as_str()).copied();
+                let dst_node = node_by_id.get(link.target.as_str()).copied();
+                let src_file = src_node
+                    .map(|n| n.source_file.as_str())
+                    .or(link.source_file.as_deref())
+                    .unwrap_or("");
+                let dst_file = dst_node.map(|n| n.source_file.as_str()).unwrap_or("");
+                let src_label = src_node
+                    .map(|n| n.label.as_str())
+                    .unwrap_or(link.source.as_str());
+                let dst_label = dst_node
+                    .map(|n| n.label.as_str())
+                    .unwrap_or(link.target.as_str());
+                if !matches_optional_query(
+                    q_filter,
+                    &[src_file, dst_file, src_label, dst_label, rel],
+                ) {
+                    continue;
+                }
+                if !seen_edges.insert((link.source.clone(), link.target.clone(), rel.to_owned())) {
+                    continue;
+                }
+                let intra_file = !src_file.is_empty() && src_file == dst_file;
+                let entry = json!({
+                    "id": format!("ir:{}->{}:{}", link.source, link.target, rel),
+                    "source": link.source,
+                    "target": link.target,
+                    "from": link.source,
+                    "to": link.target,
+                    "source_file": src_file,
+                    "target_file": dst_file,
+                    "source_label": src_label,
+                    "target_label": dst_label,
+                    "kind": rel,
+                    "relation": rel,
+                    "confidence": link.confidence,
+                    "intra_file": intra_file,
+                });
+                if (!src_file.is_empty() && kept_files.contains(src_file))
+                    || (!dst_file.is_empty() && kept_files.contains(dst_file))
+                {
+                    prioritized.push(entry);
+                } else {
+                    secondary.push(entry);
+                }
+            }
+            overlay.ir_edges = prioritized
+                .into_iter()
+                .chain(secondary)
+                .take(MAX_OVERLAY_IR_EDGES)
+                .collect();
+            ir_nodes_links = Some((nodes, links));
+        }
+    }
+
+    let Some(root) = project_root else {
+        return overlay;
+    };
+    let idx_opt = if let (Some(ir), Some((nodes, links))) = (ir_opt.as_ref(), ir_nodes_links) {
+        crate::graph_map::Index::from_ir_parts(
+            root,
+            Some(ir.db_path().to_path_buf()),
+            Some("ir".to_owned()),
+            nodes,
+            links,
+        )
+        .ok()
+    } else {
+        let live_path = state_dir
+            .join("graphs")
+            .join(project_id)
+            .join("live")
+            .join("graph.json");
+        std::fs::File::open(live_path)
+            .ok()
+            .and_then(|file| crate::graph_map::Index::read(file, root).ok())
+    };
+
+    let Some(idx) = idx_opt else {
+        return overlay;
+    };
+
+    let mut viol_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let idx_file_set: BTreeSet<&str> = idx.files().iter().map(String::as_str).collect();
+    let cycle_files: BTreeSet<String> = idx
+        .scc_groups(true)
+        .into_iter()
+        .flatten()
+        .filter(|p| idx_file_set.contains(p.as_str()))
+        .collect();
+    let mut violation_files: BTreeSet<String> = BTreeSet::new();
+    if let Ok(Some(rules)) = crate::graph_map::layer_rules::Rules::read(root) {
+        for v in idx.architecture_violations("", true, &rules) {
+            if !v.from.is_empty() && idx_file_set.contains(v.from.as_str()) {
+                *viol_counts.entry(v.from.clone()).or_insert(0) += 1;
+                violation_files.insert(v.from.clone());
+            }
+            if matches!(v.kind.as_str(), "layer" | "package")
+                && !v.to.is_empty()
+                && v.to != v.from
+                && idx_file_set.contains(v.to.as_str())
+            {
+                *viol_counts.entry(v.to.clone()).or_insert(0) += 1;
+                violation_files.insert(v.to.clone());
+            }
+            let rule_id_str = v.rule_id.as_deref().unwrap_or("");
+            if matches_optional_query(
+                q_filter,
+                &[&v.kind, rule_id_str, &v.from, &v.to, &v.message],
+            ) && overlay.architecture_violations.len() < MAX_OVERLAY_VIOLATIONS
+                && let Ok(val) = serde_json::to_value(&v)
+            {
+                overlay.architecture_violations.push(val);
+            }
+        }
+    }
+
+    let mut blast_targets: Vec<String> = Vec::new();
+    let mut seen_targets: BTreeSet<String> = BTreeSet::new();
+    for p in kept_files
+        .iter()
+        .chain(violation_files.iter())
+        .chain(cycle_files.iter())
+    {
+        if matches_optional_query(q_filter, &[p]) && seen_targets.insert(p.clone()) {
+            blast_targets.push(p.clone());
+        }
+    }
+    if blast_targets.len() < MAX_OVERLAY_BLAST_FILES {
+        for p in idx.files() {
+            if blast_targets.len() >= MAX_OVERLAY_BLAST_FILES {
+                break;
+            }
+            if !crate::graph_map::is_test_path(p)
+                && matches_optional_query(q_filter, &[p])
+                && seen_targets.insert(p.clone())
+            {
+                blast_targets.push(p.clone());
+            }
+        }
+    }
+    for path in blast_targets.into_iter().take(MAX_OVERLAY_BLAST_FILES) {
+        let v_count = viol_counts.get(&path).copied().unwrap_or(0);
+        let in_cycle = cycle_files.contains(&path);
+        let blast_val = idx.blast(&path, true);
+        let blast_files = blast_val
+            .as_ref()
+            .and_then(|b| b["files"].as_u64())
+            .unwrap_or(0);
+        let blast_tests = blast_val
+            .as_ref()
+            .and_then(|b| b["tests"].as_u64())
+            .unwrap_or(0);
+        if blast_files == 0 && v_count == 0 && !in_cycle {
+            continue;
+        }
+        let risk = if v_count > 0 || in_cycle || blast_files >= 8 {
+            "high"
+        } else if blast_files >= 3 {
+            "medium"
+        } else {
+            "low"
+        };
+        let marked = blast_val
+            .as_ref()
+            .map(|b| b["marked"].clone())
+            .unwrap_or(Value::Null);
+        overlay.blast_markers.push(json!({
+            "path": path,
+            "blast_files": blast_files,
+            "blast_tests": blast_tests,
+            "violation_count": v_count,
+            "in_cycle": in_cycle,
+            "risk": risk,
+            "marked": marked,
+        }));
+    }
+
+    overlay
+}
+
 impl OmnigraphManager {
+    async fn build_code_graph_overlay_async(
+        &self,
+        project_id: &str,
+        project_root: Option<PathBuf>,
+        kept_files: BTreeSet<String>,
+        q_filter: Option<String>,
+    ) -> CodeGraphOverlay {
+        let state_dir = self.state_dir.clone();
+        let pid = project_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            collect_code_graph_overlay(
+                &state_dir,
+                &pid,
+                project_root.as_deref(),
+                &kept_files,
+                q_filter.as_deref(),
+            )
+        })
+        .await
+        .unwrap_or_default()
+    }
     async fn enrich_canonical_symbol_ids_async(
         &self,
         project_id: &str,
@@ -689,6 +991,21 @@ impl OmnigraphManager {
         );
         edges.extend(symbol_edges.iter().cloned());
 
+        let mut overlay_files: BTreeSet<String> = kept_file_paths.clone();
+        for f in &files {
+            if let Some(p) = str_field(f, "path") {
+                overlay_files.insert(p);
+            }
+        }
+        let store_root = self
+            .store
+            .as_ref()
+            .and_then(|s| s.project(project_id).ok())
+            .and_then(|v| v["path"].as_str().map(PathBuf::from));
+        let overlay = self
+            .build_code_graph_overlay_async(project_id, store_root, overlay_files, q_filter.clone())
+            .await;
+
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let telemetry = json!({
             "elapsed_ms": elapsed_ms,
@@ -699,6 +1016,10 @@ impl OmnigraphManager {
             "symbol_count": symbols.len(),
             "edge_count": edges.len(),
             "symbol_edge_count": symbol_edges.len(),
+            "ir_edge_count": overlay.ir_edges.len(),
+            "ir_semantic_edge_count": overlay.ir_semantic_edges.len(),
+            "violation_count": overlay.architecture_violations.len(),
+            "blast_count": overlay.blast_markers.len(),
             "commit_count": commits_json.len(),
             "truncated": truncated,
             "has_more": has_more,
@@ -718,6 +1039,10 @@ impl OmnigraphManager {
             "symbols": symbols,
             "edges": edges,
             "symbol_edges": symbol_edges,
+            "ir_edges": overlay.ir_edges,
+            "ir_semantic_edges": overlay.ir_semantic_edges,
+            "architecture_violations": overlay.architecture_violations,
+            "blast_markers": overlay.blast_markers,
             "total_atoms": total_atoms,
             "limit": effective_limit,
             "offset": page_start,
@@ -1830,6 +2155,10 @@ fn empty_graph_view(
         "symbols": [],
         "edges": [],
         "symbol_edges": [],
+        "ir_edges": [],
+        "ir_semantic_edges": [],
+        "architecture_violations": [],
+        "blast_markers": [],
         "total_atoms": 0,
         "limit": limit,
         "offset": offset,
@@ -1845,6 +2174,10 @@ fn empty_graph_view(
             "symbol_count": 0,
             "edge_count": 0,
             "symbol_edge_count": 0,
+            "ir_edge_count": 0,
+            "ir_semantic_edge_count": 0,
+            "violation_count": 0,
+            "blast_count": 0,
             "commit_count": 0,
             "truncated": false,
             "has_more": false,

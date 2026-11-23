@@ -818,6 +818,32 @@ impl ServiceSemanticSignals {
         }
     }
 
+    fn ingest_ir_store_ref(
+        &mut self,
+        store: &crate::graph_ir::GraphIrStore,
+        certain: bool,
+    ) -> Option<Vec<String>> {
+        let (files, edges) = store.semantic_edges_for_system().ok()?;
+        if files.is_empty() && edges.is_empty() {
+            return None;
+        }
+        for (file_path, kind, target, _source_symbol, _line, evidence) in &edges {
+            let guessed = evidence.eq_ignore_ascii_case("AMBIGUOUS")
+                || evidence.eq_ignore_ascii_case("INFERRED");
+            if certain && guessed {
+                continue;
+            }
+            if kind == "di_binds" && evidence.to_ascii_lowercase().contains("inject") {
+                let raw = target.strip_prefix("service:").unwrap_or(target);
+                self.add_di_binding(raw, "injects", file_path);
+            } else {
+                self.ingest_semantic_relation(kind, target, file_path);
+            }
+        }
+        Some(files)
+    }
+
+    #[allow(dead_code)]
     fn ingest_ir_store(
         &mut self,
         graphs: Option<&Graphs>,
@@ -833,19 +859,7 @@ impl ServiceSemanticSignals {
                     .flatten()
                     .map(Arc::new)
             })?;
-        let (files, edges) = store.semantic_edges_for_system().ok()?;
-        if files.is_empty() && edges.is_empty() {
-            return None;
-        }
-        for (file_path, kind, target, _source_symbol, _line, evidence) in &edges {
-            let guessed = evidence.eq_ignore_ascii_case("AMBIGUOUS")
-                || evidence.eq_ignore_ascii_case("INFERRED");
-            if certain && guessed {
-                continue;
-            }
-            self.ingest_semantic_relation(kind, target, file_path);
-        }
-        Some(files)
+        self.ingest_ir_store_ref(&store, certain)
     }
 
     fn ingest_index(&mut self, index: &Index, certain: bool) {
@@ -924,6 +938,107 @@ fn collect_service_semantics_with(
     )
 }
 
+fn extract_probe_subtokens(raw: &str) -> Vec<String> {
+    raw.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+        .map(|s| s.trim().trim_start_matches('$').to_ascii_lowercase())
+        .filter(|s| s.len() >= 2)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Queries SQLite `ir_symbol_refs` and `ir_semantic_edges` for files matching any probe string.
+pub(super) fn find_ir_probe_matches(
+    ir: &crate::graph_ir::GraphIrStore,
+    probes: &[String],
+) -> Vec<(String, String)> {
+    if probes.is_empty() || !ir.has_symbol_refs_index().unwrap_or(false) {
+        return Vec::new();
+    }
+    let probe_tokens: Vec<(String, Vec<String>)> = probes
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| (p.clone(), extract_probe_subtokens(p)))
+        .filter(|(_, toks)| !toks.is_empty())
+        .collect();
+    if probe_tokens.is_empty() {
+        return Vec::new();
+    }
+    let all_tok_set: BTreeSet<String> = probe_tokens
+        .iter()
+        .flat_map(|(_, toks)| toks.iter().cloned())
+        .collect();
+    let tok_refs: Vec<&str> = all_tok_set.iter().map(String::as_str).collect();
+    let Ok(ref_hits) = ir.find_probe_matching_files(&tok_refs) else {
+        return Vec::new();
+    };
+    let mut matches = Vec::new();
+    for (file_path, file_toks) in ref_hits {
+        let tok_set: BTreeSet<&str> = file_toks.iter().map(String::as_str).collect();
+        for (probe, required) in &probe_tokens {
+            if required.iter().all(|req| tok_set.contains(req.as_str())) {
+                matches.push((file_path.clone(), probe.clone()));
+            }
+        }
+    }
+    if let Ok((_, sem_edges)) = ir.semantic_edges_for_system() {
+        for (file_path, _kind, target, _src_sym, _line, _ev) in sem_edges {
+            let t_lower = target.to_ascii_lowercase();
+            for (probe, required) in &probe_tokens {
+                let p_lower = probe.to_ascii_lowercase();
+                if t_lower == p_lower || required.iter().all(|req| t_lower.contains(req.as_str())) {
+                    matches.push((file_path.clone(), probe.clone()));
+                }
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+pub(super) fn ensure_ir_store_for_system(
+    graphs: Option<&Graphs>,
+    state_dir: Option<&Path>,
+    target: Option<&ResolvedServiceTarget>,
+) -> Option<Arc<crate::graph_ir::GraphIrStore>> {
+    let (state, tgt) = state_dir.zip(target)?;
+    if let Some(existing) = graphs
+        .and_then(|g| g.get_ir_store_readonly(&tgt.graph_id))
+        .or_else(|| {
+            crate::graph_ir::GraphIrStore::open_readonly(state, &tgt.graph_id)
+                .ok()
+                .flatten()
+                .map(Arc::new)
+        })
+        && existing
+            .summary_counts()
+            .ok()
+            .flatten()
+            .is_some_and(|s| s.files > 0)
+    {
+        return Some(existing);
+    }
+    if !tgt.root.is_dir() {
+        return None;
+    }
+    if tgt.graph_id.is_empty()
+        || tgt.graph_id == "."
+        || tgt.graph_id == ".."
+        || tgt.graph_id.contains(['/', '\\', '\0'])
+    {
+        return None;
+    }
+    // Keep system-level incremental IR cache isolated from `state/graphs/<id>` so services with
+    // disabled code graphs do not falsely flip `provider["graph"]` / `GraphIrStore::exists`.
+    let sys_ir_dir = state.join("system-ir");
+    let db_path = sys_ir_dir.join(format!("{}.sqlite", tgt.graph_id));
+    let store = Arc::new(crate::graph_ir::GraphIrStore::open_at(&db_path).ok()?);
+    // Incremental workspace sync checks mtime/size/hash per file so new/edited/deleted files update fast.
+    let _ = store.sync_workspace(&tgt.root);
+    Some(store)
+}
+
 fn collect_service_semantics_with_graphs(
     graphs: Option<&Graphs>,
     state_dir: Option<&Path>,
@@ -934,11 +1049,12 @@ fn collect_service_semantics_with_graphs(
     mut on_file: impl FnMut(&str, &str),
 ) -> (ServiceSemanticSignals, usize, bool) {
     let mut signals = ServiceSemanticSignals::default();
-    let ir_files = state_dir.zip(target).and_then(|(state, target)| {
-        signals.ingest_ir_store(graphs, state, &target.graph_id, certain)
-    });
+    let ir_store_opt = ensure_ir_store_for_system(graphs, state_dir, target);
+    let ir_files = ir_store_opt
+        .as_ref()
+        .and_then(|store| signals.ingest_ir_store_ref(store, certain));
     let ir_loaded = ir_files.is_some();
-    if !ir_loaded && let Some(idx) = index {
+    if let Some(idx) = index {
         signals.ingest_index(idx, certain);
     }
     let Some(target) = target else {
@@ -1345,15 +1461,41 @@ pub(super) fn bridge_view(
         .collect::<Vec<_>>();
     let provider_state_dir = (!provider_is_snapshot).then(|| graphs.state_dir());
     let consumer_state_dir = (!consumer_is_snapshot).then(|| graphs.state_dir());
+    let provider_ir = ensure_ir_store_for_system(Some(graphs), provider_state_dir, provider_target);
+    let ir_handles_probes = provider_ir
+        .as_ref()
+        .is_some_and(|ir| ir.has_symbol_refs_index().unwrap_or(false));
+    if !probes.is_empty()
+        && ir_handles_probes
+        && let Some(ref ir) = provider_ir
+    {
+        let flat_probes: Vec<String> = probes
+            .iter()
+            .flat_map(|(_, ps)| ps.iter().cloned())
+            .collect();
+        let hits = find_ir_probe_matches(ir, &flat_probes);
+        for (rel_path, matched_probe) in hits {
+            for (id, contract_ps) in &probes {
+                if contract_ps.iter().any(|p| p == &matched_probe) {
+                    let entry = provider.entry(rel_path.clone()).or_insert_with(|| {
+                        (BTreeSet::new(), json!({"declared": false, "found": true}))
+                    });
+                    entry.0.insert(id.clone());
+                    entry.1["found"] = json!(true);
+                }
+            }
+        }
+    }
+    let need_disk_probes = !probes.is_empty() && !ir_handles_probes;
     let (provider_semantics, files_read, raw_cut) = collect_service_semantics_with_graphs(
         Some(graphs),
         provider_state_dir,
         provider_target,
         provider_index.as_ref(),
         certain,
-        !probes.is_empty(),
+        need_disk_probes,
         |rel_path, content| {
-            if !probes.is_empty() {
+            if need_disk_probes {
                 for (id, probes) in &probes {
                     if probes.iter().any(|probe| content.contains(probe.as_str())) {
                         let entry = provider.entry(rel_path.to_owned()).or_insert_with(|| {
@@ -1366,8 +1508,8 @@ pub(super) fn bridge_view(
             }
         },
     );
-    let scanned = if probes.is_empty() { 0 } else { files_read };
-    let cut = !probes.is_empty() && raw_cut;
+    let scanned = if need_disk_probes { files_read } else { 0 };
+    let cut = need_disk_probes && raw_cut;
     let (consumer_semantics, _, _) = collect_service_semantics_with_graphs(
         Some(graphs),
         consumer_state_dir,
@@ -1653,7 +1795,7 @@ export class CheckoutConsumer {
 
         let sem = &view["semantic_bridges"];
         assert_eq!(sem["summary"]["routes"], 1, "{sem}");
-        assert_eq!(sem["routes"][0]["route"], "/api/v1/orders/{id}");
+        assert_eq!(sem["routes"][0]["route"], "/api/v1/orders/{param}");
         assert_eq!(sem["routes"][0]["method"], "GET");
         assert_eq!(sem["routes"][0]["direction"], "from->to");
         assert_eq!(

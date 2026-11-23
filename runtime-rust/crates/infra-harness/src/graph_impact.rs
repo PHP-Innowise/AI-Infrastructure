@@ -60,14 +60,14 @@ enum BlobRead {
 
 enum IrStoreHandle<'a> {
     Borrowed(&'a GraphIrStore),
-    Owned(GraphIrStore),
+    Owned(Box<GraphIrStore>),
 }
 
 impl IrStoreHandle<'_> {
     fn as_store(&self) -> &GraphIrStore {
         match self {
             Self::Borrowed(store) => store,
-            Self::Owned(store) => store,
+            Self::Owned(store) => store.as_ref(),
         }
     }
 }
@@ -224,10 +224,10 @@ pub(crate) fn changed_catalog_with_ir(
                 path,
                 entry.previous_path.as_deref(),
                 false,
-                MAX_CALLER_SCAN,
+                MAX_WALK_FILES,
             );
             for ir_caller in ctx.ir_callers_for(path, entry.previous_path.as_deref()) {
-                if !list.contains(&ir_caller) && list.len() < MAX_CALLER_SCAN {
+                if !list.contains(&ir_caller) && list.len() < MAX_WALK_FILES {
                     list.push(ir_caller);
                 }
             }
@@ -432,7 +432,7 @@ pub(crate) fn changed_catalog_with_ir(
                 path,
                 entry.previous_path.as_deref(),
                 false,
-                MAX_CALLER_SCAN,
+                MAX_WALK_FILES,
             ) {
                 if caller != *path {
                     del_callers.insert(caller);
@@ -693,10 +693,10 @@ pub(crate) fn file_impact_with_ir(
         &rel_path,
         previous_path.as_deref(),
         certain,
-        MAX_CALLER_SCAN,
+        MAX_WALK_FILES,
     );
     for ir_caller in ctx.ir_callers_for(&rel_path, previous_path.as_deref()) {
-        if !known_callers.contains(&ir_caller) && known_callers.len() < MAX_CALLER_SCAN {
+        if !known_callers.contains(&ir_caller) && known_callers.len() < MAX_WALK_FILES {
             known_callers.push(ir_caller);
         }
     }
@@ -850,6 +850,7 @@ impl<'a> TargetContext<'a> {
                 index
                     .and_then(Index::ir_db_path)
                     .and_then(|db_path| GraphIrStore::open_at_readonly(db_path).ok().flatten())
+                    .map(Box::new)
                     .map(IrStoreHandle::Owned)
             }
         } else {
@@ -889,7 +890,12 @@ impl<'a> TargetContext<'a> {
                                     dirty_or_unindexed.insert(p);
                                 }
                             }
-                            if dirty_or_unindexed.len() <= MAX_CALLER_SCAN {
+                            let dirty_cap = if store.has_symbol_refs_index().unwrap_or(false) {
+                                MAX_WALK_FILES
+                            } else {
+                                MAX_CALLER_SCAN
+                            };
+                            if dirty_or_unindexed.len() <= dirty_cap {
                                 ir_fresh = true;
                             } else {
                                 dirty_or_unindexed.clear();
@@ -909,7 +915,12 @@ impl<'a> TargetContext<'a> {
                             }
                         }
                         non_git_disk_files = Some(current_disk);
-                        if dirty_or_unindexed.len() <= MAX_CALLER_SCAN {
+                        let dirty_cap = if store.has_symbol_refs_index().unwrap_or(false) {
+                            MAX_WALK_FILES
+                        } else {
+                            MAX_CALLER_SCAN
+                        };
+                        if dirty_or_unindexed.len() <= dirty_cap {
                             ir_fresh = true;
                         } else {
                             dirty_or_unindexed.clear();
@@ -3863,14 +3874,23 @@ impl CallerScanIndex {
                     }
                 }
             }
-            for caller in known_callers {
-                push_path(caller, false);
-            }
+            let has_indexed_refs = ctx.revision.is_none()
+                && ctx
+                    .ir()
+                    .is_some_and(|ir| ir.has_symbol_refs_index().unwrap_or(false));
             if ctx.ir_fresh {
+                if !has_indexed_refs {
+                    for caller in known_callers {
+                        push_path(caller, false);
+                    }
+                }
                 for dirty in &ctx.dirty_or_unindexed {
                     push_path(dirty, true);
                 }
             } else {
+                for caller in known_callers {
+                    push_path(caller, false);
+                }
                 if let Some(idx) = index {
                     for path in idx.files() {
                         push_path(path, false);
@@ -4001,7 +4021,6 @@ impl CallerScanIndex {
             push_unique(p, &mut seen, &mut out);
         }
         if let Some(idx) = index {
-            let mut idx_added = 0usize;
             for fid in [
                 idx.file_id(rel_path),
                 previous_path.and_then(|old| idx.file_id(old)),
@@ -4014,32 +4033,14 @@ impl CallerScanIndex {
                         if certain && *guessed {
                             continue;
                         }
-                        if idx_added >= MAX_CALLER_SCAN {
-                            break;
-                        }
                         let caller_path = &idx.files()[*from_fid as usize];
-                        if push_unique(caller_path, &mut seen, &mut out) {
-                            idx_added += 1;
-                        }
+                        push_unique(caller_path, &mut seen, &mut out);
                     }
                 }
             }
         }
-        let mut ir_added = 0usize;
         for ir_caller in ctx.ir_callers_for(rel_path, previous_path) {
-            if ir_added >= MAX_CALLER_SCAN {
-                break;
-            }
-            if push_unique(&ir_caller, &mut seen, &mut out) {
-                ir_added += 1;
-            }
-        }
-
-        if self.scanned_files.len() <= MAX_CALLER_SCAN {
-            for p in &self.scanned_files {
-                push_unique(p, &mut seen, &mut out);
-            }
-            return out;
+            push_unique(&ir_caller, &mut seen, &mut out);
         }
 
         let mut query_tokens: BTreeSet<String> = BTreeSet::new();
@@ -4061,6 +4062,28 @@ impl CallerScanIndex {
                     query_tokens.insert(tok);
                 }
             }
+        }
+
+        if ctx.revision.is_none()
+            && let Some(ir) = ctx.ir()
+            && ir.has_symbol_refs_index().unwrap_or(false)
+            && !query_tokens.is_empty()
+        {
+            let token_refs: Vec<&str> = query_tokens.iter().map(String::as_str).collect();
+            if let Ok(indexed_callers) = ir.lookup_symbol_ref_callers(&token_refs) {
+                for caller_path in indexed_callers {
+                    if is_scannable_code(&caller_path) {
+                        push_unique(&caller_path, &mut seen, &mut out);
+                    }
+                }
+            }
+        }
+
+        if self.scanned_files.len() <= MAX_CALLER_SCAN {
+            for p in &self.scanned_files {
+                push_unique(p, &mut seen, &mut out);
+            }
+            return out;
         }
 
         let mut scores: HashMap<usize, usize> = HashMap::new();
@@ -4135,6 +4158,7 @@ impl CallerScanIndex {
 
     fn with_caller_ir<R>(
         &self,
+        ctx: &TargetContext<'_>,
         path: &str,
         src: &str,
         f: impl FnOnce(Option<&AstFileExtraction>) -> R,
@@ -4145,7 +4169,15 @@ impl CallerScanIndex {
                 return f(cached.as_ref());
             }
         }
-        let parsed = parse_file_ir(path, src);
+        let parsed = if ctx.revision.is_none()
+            && !ctx.dirty_or_unindexed.contains(path)
+            && let Some(ir) = ctx.ir()
+            && let Ok(Some(persisted)) = ir.load_file_extraction_if_fresh(ctx.root, path)
+        {
+            Some(persisted)
+        } else {
+            parse_file_ir(path, src)
+        };
         let res = f(parsed.as_ref());
         self.ir_cache.borrow_mut().insert(path.to_owned(), parsed);
         res
@@ -4241,7 +4273,7 @@ fn evaluate_callers_for_file(
                             || previous_path.is_some_and(|old| d.target == old))
                 })
                 .collect();
-            let matched_refs = scan_index.with_caller_ir(caller_path, caller_src, |ir_opt| {
+            let matched_refs = scan_index.with_caller_ir(ctx, caller_path, caller_src, |ir_opt| {
                 if let Some(caller_ir) = ir_opt {
                     ctx.matching_references_from_ir(
                         caller_path,
@@ -4333,7 +4365,7 @@ fn evaluate_callers_for_file(
         if let Some(src) = &acc.source_after
             && !changed_entity_names.is_empty()
         {
-            let matched_changed = scan_index.with_caller_ir(&caller_path, src, |ir_opt| {
+            let matched_changed = scan_index.with_caller_ir(ctx, &caller_path, src, |ir_opt| {
                 if let Some(caller_ir) = ir_opt {
                     ctx.matching_references_from_ir(
                         &caller_path,
@@ -4373,7 +4405,7 @@ fn evaluate_callers_for_file(
             Some(&ctx.crate_map),
         );
         let mut used_members = match acc.source_after.as_deref() {
-            Some(src) => scan_index.with_caller_ir(&caller_path, src, |ir_opt| {
+            Some(src) => scan_index.with_caller_ir(ctx, &caller_path, src, |ir_opt| {
                 if let Some(caller_ir) = ir_opt {
                     ctx.matching_member_references_from_ir(
                         &caller_path,
@@ -7691,6 +7723,49 @@ mod tests {
                 "src/pre_existing.rs".to_owned(),
                 "src/web.rs".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn indexed_ir_caller_lookup_discovers_callers_past_300_without_disk_tokenization() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/callers")).unwrap();
+        std::fs::write(
+            root.join("src/core.ts"),
+            "export function sharedCore(v: number): number { return v + 1; }\n",
+        )
+        .unwrap();
+        let caller_count = MAX_CALLER_SCAN + 35;
+        for i in 0..caller_count {
+            std::fs::write(
+                root.join(format!("src/callers/caller_{i:03}.ts")),
+                "import { sharedCore } from '../core';\nexport function run(): number { return sharedCore(1); }\n",
+            )
+            .unwrap();
+        }
+
+        let ir = GraphIrStore::open(&state, "impact-indexed-wide").unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let impact =
+            file_impact_with_ir(&root, None, Some(&ir), None, None, "src/core.ts", false).unwrap();
+        let used_by = impact["used_by"].as_array().unwrap();
+        assert_eq!(
+            used_by.len(),
+            caller_count,
+            "all {caller_count} indexed callers (> MAX_CALLER_SCAN) must be returned"
+        );
+
+        let ctx = TargetContext::build(&root, None, Some(&ir), None, None, &[]);
+        assert!(ctx.ir_fresh);
+        let scan_index = CallerScanIndex::build(&ctx, None, &BTreeMap::new(), None, &[]);
+        assert!(
+            scan_index.scanned_files.is_empty() && scan_index.postings.is_empty(),
+            "fresh indexed repo must skip 64 MiB disk read/tokenization: scanned={}, postings={}",
+            scan_index.scanned_files.len(),
+            scan_index.postings.len()
         );
     }
 }
