@@ -5,7 +5,7 @@ use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
 };
 const ENRICH_BYTES: usize = 1024 * 1024;
 const ENRICH_EVENTS: usize = 4000;
@@ -257,6 +257,125 @@ pub fn relative(path: &str, root: &str, alias: Option<&str>) -> (Option<String>,
         true,
     )
 }
+const MAX_STRIP_ROOT_REGEX_CACHE: usize = 128;
+
+type StripRootRegexKey = (String, String, bool);
+type CompiledStripRoot = Option<Arc<Vec<(Regex, String)>>>;
+
+#[derive(Default)]
+struct StripRootRegexCache {
+    entries: BTreeMap<StripRootRegexKey, CompiledStripRoot>,
+    order: VecDeque<StripRootRegexKey>,
+}
+
+#[cfg(test)]
+fn strip_root_regex_compile_counts() -> &'static Mutex<BTreeMap<String, usize>> {
+    static COUNTS: OnceLock<Mutex<BTreeMap<String, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn strip_root_regex_cache() -> &'static Mutex<StripRootRegexCache> {
+    static CACHE: OnceLock<Mutex<StripRootRegexCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(StripRootRegexCache::default()))
+}
+
+fn compile_strip_root_patterns(variant: &str, name: &str, win: bool) -> CompiledStripRoot {
+    let escaped = regex::escape(variant);
+    let mut compiled = Vec::with_capacity(6);
+    for (start, inner) in [
+        (
+            r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<=file://))",
+            format!("{name}/"),
+        ),
+        (
+            r"(?<![\w./\\-])",
+            if name == "." {
+                String::new()
+            } else {
+                format!("{name}/")
+            },
+        ),
+    ] {
+        let start = format!("{}{start}{escaped}", if win { "(?i)" } else { "" });
+        for (pattern, replacement) in [
+            (format!(r#"{start}[\\/]+(?=[^\s"'`;|&<>()])"#), inner),
+            (format!(r"{start}[\\/]+"), format!("{name}/")),
+            (format!(r"{start}(?![\w./\\-])"), name.into()),
+        ] {
+            #[cfg(test)]
+            if let Ok(mut counts) = strip_root_regex_compile_counts().lock() {
+                *counts.entry(variant.to_owned()).or_insert(0) += 1;
+            }
+            let regex = Regex::new(&pattern).ok()?;
+            compiled.push((regex, replacement));
+        }
+    }
+    Some(Arc::new(compiled))
+}
+
+fn cached_strip_root_patterns(variant: &str, name: &str, win: bool) -> CompiledStripRoot {
+    let key = (variant.to_owned(), name.to_owned(), win);
+    if let Ok(mut guard) = strip_root_regex_cache().lock()
+        && let Some(found) = guard.entries.get(&key).cloned()
+    {
+        if let Some(pos) = guard.order.iter().position(|k| k == &key) {
+            guard.order.remove(pos);
+        }
+        guard.order.push_back(key);
+        return found;
+    }
+    let built = compile_strip_root_patterns(variant, name, win);
+    if let Ok(mut guard) = strip_root_regex_cache().lock() {
+        if let Some(pos) = guard.order.iter().position(|k| k == &key) {
+            guard.order.remove(pos);
+        } else if guard.entries.len() >= MAX_STRIP_ROOT_REGEX_CACHE
+            && let Some(evict) = guard.order.pop_front()
+        {
+            guard.entries.remove(&evict);
+        }
+        guard.order.push_back(key.clone());
+        guard.entries.insert(key, built.clone());
+    }
+    built
+}
+
+/// Normalizes a shell command into a canonical signature so trivial output paging/redirection
+/// tweaks (`2>&1`, `| head -n 20`, extra whitespace) map to the same telemetry signature.
+pub fn normalize_command_signature(command: &str) -> String {
+    let mut trimmed = command.trim();
+    loop {
+        let next = trimmed.trim_end();
+        let stripped = if let Some(idx) = next.rfind('|') {
+            let tail = next[idx + 1..].trim_start();
+            let head_word = tail.split_whitespace().next().unwrap_or("");
+            if [
+                "head", "tail", "cat", "less", "more", "wc", "grep", "rg", "tee",
+            ]
+            .contains(&head_word)
+            {
+                &next[..idx]
+            } else {
+                next
+            }
+        } else {
+            next
+        };
+        let without_redir = stripped
+            .trim_end()
+            .strip_suffix("2>&1")
+            .or_else(|| stripped.trim_end().strip_suffix("1>/dev/null"))
+            .or_else(|| stripped.trim_end().strip_suffix("2>/dev/null"))
+            .or_else(|| stripped.trim_end().strip_suffix(">/dev/null"))
+            .map(str::trim_end);
+        match without_redir {
+            Some(shorter) if shorter.len() < next.len() => trimmed = shorter,
+            _ if stripped.len() < next.len() => trimmed = stripped,
+            _ => break,
+        }
+    }
+    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn strip_root(value: &str, roots: &[String], home: Option<&str>) -> String {
     let mut result = value.to_string();
     for (root, name) in roots
@@ -286,38 +405,14 @@ pub fn strip_root(value: &str, roots: &[String], home: Option<&str>) -> String {
             }) {
                 continue;
             }
-            let escaped = regex::escape(&variant);
-            for (start, inner) in [
-                (
-                    r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<=file://))",
-                    format!("{name}/"),
-                ),
-                (
-                    r"(?<![\w./\\-])",
-                    if name == "." {
-                        String::new()
-                    } else {
-                        format!("{name}/")
-                    },
-                ),
-            ] {
-                let start = format!("{}{start}{escaped}", if win { "(?i)" } else { "" });
-                for (pattern, replacement) in [
-                    (
-                        format!(r#"{start}[\\/]+(?=[^\s"'`;|&<>()])"#),
-                        inner.clone(),
-                    ),
-                    (format!(r"{start}[\\/]+"), format!("{name}/")),
-                    (format!(r"{start}(?![\w./\\-])"), name.into()),
-                ] {
-                    let Ok(pattern) = Regex::new(&pattern) else {
-                        return "[redacted]".into();
-                    };
-                    let Some(clean) = replace(&pattern, &result, 0, Some(&replacement)) else {
-                        return "[redacted]".into();
-                    };
-                    result = clean;
-                }
+            let Some(patterns) = cached_strip_root_patterns(&variant, name, win) else {
+                return "[redacted]".into();
+            };
+            for (pattern, replacement) in patterns.iter() {
+                let Some(clean) = replace(pattern, &result, 0, Some(replacement)) else {
+                    return "[redacted]".into();
+                };
+                result = clean;
             }
         }
     }
@@ -402,6 +497,8 @@ pub struct RunLedger {
     uncalled: BTreeMap<String, VecDeque<Entry>>,
     last_commands: VecDeque<(u64, Value)>,
     command_id: u64,
+    command_signature_counts: BTreeMap<String, u64>,
+    command_signature_failures: BTreeMap<String, u64>,
     watch: Option<BTreeMap<String, String>>,
     watch_outside: bool,
     watched: BTreeSet<String>,
@@ -433,6 +530,8 @@ impl RunLedger {
             uncalled: BTreeMap::new(),
             last_commands: VecDeque::new(),
             command_id: 0,
+            command_signature_counts: BTreeMap::new(),
+            command_signature_failures: BTreeMap::new(),
             watch,
             watch_outside: outside,
             watched: BTreeSet::new(),
@@ -566,12 +665,38 @@ impl RunLedger {
             }
         } else if command(&kind) {
             self.commands += 1;
-            if crate::graph::asked(fields["detail"].as_str().unwrap_or("")) {
+            let raw_command = fields["detail"].as_str().unwrap_or("");
+            if crate::graph::asked(raw_command) {
                 self.graph += 1;
             }
             self.command_id += 1;
             entry.command = Some(self.command_id);
-            self.last_commands.push_back((self.command_id,object!({"command":fields["detail"].as_str().unwrap_or(""),"ok":null,"outcome":null,"exit_code":null})));
+            let signature = normalize_command_signature(raw_command);
+            let repeats = if signature.is_empty() {
+                0
+            } else if self.command_signature_counts.len() < 512
+                || self.command_signature_counts.contains_key(&signature)
+            {
+                let count = self
+                    .command_signature_counts
+                    .entry(signature.clone())
+                    .or_insert(0);
+                *count = count.saturating_add(1);
+                *count
+            } else {
+                1
+            };
+            self.last_commands.push_back((
+                self.command_id,
+                object!({
+                    "command": raw_command,
+                    "signature": signature,
+                    "repeats": repeats,
+                    "ok": null,
+                    "outcome": null,
+                    "exit_code": null
+                }),
+            ));
             while self.last_commands.len() > 12 {
                 self.last_commands.pop_front();
             }
@@ -595,10 +720,24 @@ impl RunLedger {
         let ok = fields["ok"] != false;
         let not_run = fields["outcome"] == "not_run";
         if let Some(id) = entry.command {
+            let mut failed_sig = None;
             if let Some((_, command)) = self.last_commands.iter_mut().find(|(key, _)| *key == id) {
                 command["ok"] = ok.into();
                 command["outcome"] = fields["outcome"].clone();
                 command["exit_code"] = fields["exit_code"].clone();
+                if !ok && !not_run {
+                    failed_sig = command["signature"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                }
+            }
+            if let Some(sig) = failed_sig
+                && (self.command_signature_failures.len() < 512
+                    || self.command_signature_failures.contains_key(&sig))
+            {
+                let count = self.command_signature_failures.entry(sig).or_insert(0);
+                *count = count.saturating_add(1);
             }
             if !ok {
                 self.not_run += u64::from(not_run);
@@ -729,7 +868,34 @@ impl RunLedger {
                 .take(40)
                 .collect::<Vec<_>>()
         };
-        let mut receipt = object!({"steps":self.steps,"opened":self.opened.len(),"opened_paths":listed(&self.opened),"edited":self.edited.len(),"edited_paths":listed(&self.edited),"created":self.created.len(),"deleted":self.deleted.len(),"searched":self.searched,"patterns":self.patterns.iter().take(12).collect::<Vec<_>>(),"commands":self.commands,"graph":self.graph,"failed":self.failed,"not_run":self.not_run,"failed_steps":self.failed_steps,"last_commands":self.last_commands.iter().map(|(_,value)|value.clone()).collect::<Vec<_>>(),"plan":self.plan,"helpers":self.helpers,"limited":self.limited});
+        let mut command_loops: Vec<(u64, u64, &str)> = self
+            .command_signature_counts
+            .iter()
+            .filter(|(_, count)| **count >= 2)
+            .map(|(sig, count)| {
+                let failed = self
+                    .command_signature_failures
+                    .get(sig)
+                    .copied()
+                    .unwrap_or(0);
+                (*count, failed, sig.as_str())
+            })
+            .collect();
+        command_loops.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(b.2)));
+        let loop_rows: Vec<Value> = command_loops
+            .into_iter()
+            .take(12)
+            .map(|(count, failed, sig)| {
+                object!({"signature": sig, "count": count, "failed": failed})
+            })
+            .collect();
+        let max_command_repeats = self
+            .command_signature_counts
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let mut receipt = object!({"steps":self.steps,"opened":self.opened.len(),"opened_paths":listed(&self.opened),"edited":self.edited.len(),"edited_paths":listed(&self.edited),"created":self.created.len(),"deleted":self.deleted.len(),"searched":self.searched,"patterns":self.patterns.iter().take(12).collect::<Vec<_>>(),"commands":self.commands,"graph":self.graph,"failed":self.failed,"not_run":self.not_run,"failed_steps":self.failed_steps,"last_commands":self.last_commands.iter().map(|(_,value)|value.clone()).collect::<Vec<_>>(),"max_command_repeats":max_command_repeats,"command_loops":loop_rows,"plan":self.plan,"helpers":self.helpers,"limited":self.limited});
         if let Some(memory) = self.memory() {
             receipt["memory"] = memory;
         }
@@ -1219,5 +1385,94 @@ mod tests {
             Some(4)
         );
         assert!(!receipt.to_string().contains("secret-body"));
+    }
+
+    #[test]
+    fn strip_root_caches_compiled_regexes_and_ledger_normalizes_last_commands() {
+        let dir = TempDir::new().expect("temp dir");
+        let root_str = dir.path().to_string_lossy().into_owned();
+        let unique_root = format!("{root_str}/unique-strip-root-cache-case");
+        let compiles_for = |key: &str| -> usize {
+            strip_root_regex_compile_counts()
+                .lock()
+                .unwrap()
+                .get(key)
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!(compiles_for(&unique_root), 0);
+
+        let enricher_a = Enricher::new("claude", &unique_root, None, &[], None, None, false);
+        let first = enricher_a
+            .text(&format!("cat {unique_root}/src/main.rs"), 200)
+            .unwrap();
+        assert_eq!(first, "cat src/main.rs");
+        assert_eq!(compiles_for(&unique_root), 6);
+
+        let second = enricher_a
+            .text(&format!("grep foo {unique_root}/src/lib.rs"), 200)
+            .unwrap();
+        assert_eq!(second, "grep foo src/lib.rs");
+        let enricher_b = Enricher::new("codex", &unique_root, None, &[], None, None, false);
+        let third = enricher_b
+            .text(&format!("ls {unique_root}/tests"), 200)
+            .unwrap();
+        assert_eq!(third, "ls tests");
+        assert_eq!(
+            compiles_for(&unique_root),
+            6,
+            "strip_root regexes must be cached across Enricher::text calls and instances"
+        );
+
+        assert_eq!(
+            normalize_command_signature("  cargo test   -p infra-harness 2>&1 | tail -n 20 "),
+            "cargo test -p infra-harness"
+        );
+        assert_eq!(
+            normalize_command_signature("cargo test -p infra-harness | head -n 5 >/dev/null"),
+            "cargo test -p infra-harness"
+        );
+
+        let mut ledger = RunLedger::new("claude", None, false);
+        for (idx, cmd, ok, code) in [
+            (
+                "c1",
+                "cargo test -p infra-harness 2>&1 | tail -n 20",
+                false,
+                101,
+            ),
+            (
+                "c2",
+                "cargo test   -p infra-harness | head -n 5",
+                false,
+                101,
+            ),
+            ("c3", "cargo test -p infra-harness >/dev/null", true, 0),
+        ] {
+            let start = object!({"tool": "Bash", "state": "started", "call": idx, "detail": cmd});
+            ledger.observe(&object!({}), Some(&start));
+            let done = object!({
+                "tool": "Bash",
+                "state": "completed",
+                "call": idx,
+                "ok": ok,
+                "exit_code": code,
+            });
+            ledger.observe(&object!({}), Some(&done));
+        }
+        let receipt = ledger.receipt();
+        let last = receipt["last_commands"].as_array().unwrap();
+        assert_eq!(last.len(), 3);
+        assert_eq!(last[0]["signature"], "cargo test -p infra-harness");
+        assert_eq!(last[1]["signature"], "cargo test -p infra-harness");
+        assert_eq!(last[2]["signature"], "cargo test -p infra-harness");
+        assert_eq!(last[0]["repeats"], 1);
+        assert_eq!(last[1]["repeats"], 2);
+        assert_eq!(last[2]["repeats"], 3);
+        assert_eq!(receipt["max_command_repeats"], 3);
+        assert_eq!(
+            receipt["command_loops"],
+            object!([{"signature": "cargo test -p infra-harness", "count": 3, "failed": 2}])
+        );
     }
 }

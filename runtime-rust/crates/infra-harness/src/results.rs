@@ -11,17 +11,18 @@ use infra_core::{
 };
 use infra_host::process::{self, Limits};
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc, Mutex, RwLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 pub const OUTPUT_LIMIT: usize = 512 * 1024;
 pub type CheckReply<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
@@ -51,7 +52,7 @@ pub trait CheckWorkflow: Send + Sync {
 pub trait TargetCheckWorkflow: Send + Sync {
     fn run_target<'a>(&'a self, check: &'a mut Value, cancel: Arc<AtomicBool>) -> TargetReply<'a>;
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Capture {
     pub output: String,
     pub exit_code: Option<i32>,
@@ -179,17 +180,254 @@ fn capture_error(error: HarnessError, cancelled: bool) -> Result<&'static str> {
 }
 
 const MAX_CHECK_CACHE_ENTRIES: usize = 256;
+const MAX_PERSISTED_CHECK_RECEIPTS: usize = 2048;
+const COMMAND_ANALYZER_CACHE_CAP: usize = 64;
+const COMMAND_ANALYZER_RACY_NS: i128 = 2_000_000_000;
+const CHECK_CACHE_KEY_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+static CHECK_CACHE_MONOTONIC: AtomicU64 = AtomicU64::new(0);
+
+fn next_check_cache_seq() -> i64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX / 2))
+        .unwrap_or(0);
+    let mut current = CHECK_CACHE_MONOTONIC.load(Ordering::Relaxed);
+    loop {
+        let candidate = current.max(nanos).saturating_add(1);
+        match CHECK_CACHE_MONOTONIC.compare_exchange_weak(
+            current,
+            candidate,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return i64::try_from(candidate & (i64::MAX as u64)).unwrap_or(i64::MAX),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestFileStamp {
+    exists: bool,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl ManifestFileStamp {
+    fn capture(path: &Path) -> Self {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Self {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+            };
+        };
+        if !meta.is_file() {
+            return Self {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+            };
+        }
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())
+            .unwrap_or(0);
+        Self {
+            exists: true,
+            len: meta.len(),
+            mtime_ns,
+        }
+    }
+
+    fn content_sha(&self, path: &Path) -> Option<String> {
+        if !self.exists {
+            return None;
+        }
+        std::fs::read(path).ok().map(|bytes| sha(&bytes))
+    }
+
+    fn is_racy(&self, now_ns: i128) -> bool {
+        self.exists
+            && (self.mtime_ns == 0 || (now_ns - self.mtime_ns).abs() < COMMAND_ANALYZER_RACY_NS)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkspaceManifestPair {
+    composer: ManifestFileStamp,
+    package: ManifestFileStamp,
+}
+
+struct CachedAnalyzerEntry {
+    analyzer: Arc<infra_generator::commands::CommandAnalyzer>,
+    stamps: WorkspaceManifestPair,
+    composer_hash: Option<String>,
+    package_hash: Option<String>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct CommandAnalyzerCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedAnalyzerEntry>,
+}
+
+fn command_analyzer_cache() -> &'static Mutex<CommandAnalyzerCache> {
+    static CACHE: OnceLock<Mutex<CommandAnalyzerCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CommandAnalyzerCache::default()))
+}
+
+#[cfg(test)]
+fn command_analyzer_build_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn current_unix_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+fn cached_command_analyzer(
+    check_root: &Path,
+) -> std::result::Result<Arc<infra_generator::commands::CommandAnalyzer>, String> {
+    let ws_canon =
+        infra_core::fs::canonicalize(check_root).unwrap_or_else(|_| check_root.to_path_buf());
+    let composer_path = ws_canon.join("composer.json");
+    let package_path = ws_canon.join("package.json");
+    let current = WorkspaceManifestPair {
+        composer: ManifestFileStamp::capture(&composer_path),
+        package: ManifestFileStamp::capture(&package_path),
+    };
+    let now_ns = current_unix_ns();
+    {
+        let mut cache = command_analyzer_cache()
+            .lock()
+            .map_err(|_| "CommandAnalyzer cache lock failed".to_owned())?;
+        cache.seq = cache.seq.saturating_add(1);
+        let use_seq = cache.seq;
+        if let Some(entry) = cache.entries.get_mut(&ws_canon)
+            && entry.stamps == current
+        {
+            let racy_match = (!current.composer.is_racy(now_ns)
+                || entry.composer_hash == current.composer.content_sha(&composer_path))
+                && (!current.package.is_racy(now_ns)
+                    || entry.package_hash == current.package.content_sha(&package_path));
+            if racy_match {
+                entry.last_used = use_seq;
+                return Ok(Arc::clone(&entry.analyzer));
+            }
+        }
+    }
+
+    let built = Arc::new(
+        infra_generator::commands::CommandAnalyzer::new(&ws_canon)
+            .map_err(|err| err.to_string())?,
+    );
+    #[cfg(test)]
+    if let Ok(mut counts) = command_analyzer_build_counts().lock() {
+        *counts.entry(ws_canon.clone()).or_insert(0) += 1;
+    }
+    let after = WorkspaceManifestPair {
+        composer: ManifestFileStamp::capture(&composer_path),
+        package: ManifestFileStamp::capture(&package_path),
+    };
+    let composer_hash = after.composer.content_sha(&composer_path);
+    let package_hash = after.package.content_sha(&package_path);
+    let mut cache = command_analyzer_cache()
+        .lock()
+        .map_err(|_| "CommandAnalyzer cache lock failed".to_owned())?;
+    cache.seq = cache.seq.saturating_add(1);
+    let use_seq = cache.seq;
+    if cache.entries.len() >= COMMAND_ANALYZER_CACHE_CAP
+        && !cache.entries.contains_key(&ws_canon)
+        && let Some(evict_key) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, v)| v.last_used)
+            .map(|(k, _)| k.clone())
+    {
+        cache.entries.remove(&evict_key);
+    }
+    cache.entries.insert(
+        ws_canon,
+        CachedAnalyzerEntry {
+            analyzer: Arc::clone(&built),
+            stamps: after,
+            composer_hash,
+            package_hash,
+            last_used: use_seq,
+        },
+    );
+    Ok(built)
+}
+
+fn is_verification_safe_cached(check_root: &Path, command: &str) -> bool {
+    cached_command_analyzer(check_root)
+        .and_then(|analyzer| {
+            analyzer
+                .analyze(command, true, None)
+                .map_err(|err| err.to_string())
+        })
+        .map(|analysis| analysis.verification_safe)
+        .unwrap_or(false)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct CheckCacheKey {
     canon_argv: Vec<String>,
     env_fingerprint: String,
     snapshot_id: String,
 }
 
+impl CheckCacheKey {
+    fn digest(&self) -> Result<String> {
+        Ok(sha(&serde_json::to_vec(&json!({
+            "v": CHECK_CACHE_KEY_VERSION,
+            "canon_argv": self.canon_argv,
+            "env_fingerprint": self.env_fingerprint,
+            "snapshot_id": self.snapshot_id,
+        }))?))
+    }
+}
+
 #[derive(Default)]
 struct CheckReceiptCache {
-    entries: BTreeMap<CheckCacheKey, Capture>,
+    seq: u64,
+    entries: BTreeMap<CheckCacheKey, (Capture, u64)>,
+}
+
+impl CheckReceiptCache {
+    fn get(&mut self, key: &CheckCacheKey) -> Option<Capture> {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        let entry = self.entries.get_mut(key)?;
+        entry.1 = use_seq;
+        Some(entry.0.clone())
+    }
+
+    fn insert(&mut self, key: CheckCacheKey, capture: Capture) {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        if self.entries.len() >= MAX_CHECK_CACHE_ENTRIES
+            && !self.entries.contains_key(&key)
+            && let Some(evict_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&evict_key);
+        }
+        self.entries.insert(key, (capture, use_seq));
+    }
 }
 
 fn check_cache_disabled_by_env() -> bool {
@@ -263,7 +501,7 @@ impl Results {
     pub fn new(store: SessionStore, backend: Arc<dyn ResultsBackend>) -> Result<Self> {
         let checks = {
             let db = store.connection()?;
-            db.execute_batch("CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,settings TEXT NOT NULL,usage TEXT,context TEXT,receipt TEXT);CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);CREATE TABLE IF NOT EXISTS checks(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL);")?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,settings TEXT NOT NULL,usage TEXT,context TEXT,receipt TEXT);CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);CREATE TABLE IF NOT EXISTS checks(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE IF NOT EXISTS check_receipt_cache(cache_key TEXT PRIMARY KEY,canon_argv TEXT NOT NULL,env_fingerprint TEXT NOT NULL,snapshot_id TEXT NOT NULL,output TEXT NOT NULL,exit_code INTEGER,reason TEXT,seconds REAL NOT NULL,updated_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS check_receipt_cache_lru ON check_receipt_cache(last_used_at ASC);")?;
             let columns = {
                 let mut s = db.prepare("PRAGMA table_info(launches)")?;
                 s.query_map([], |r| r.get::<_, String>(1))?
@@ -371,15 +609,76 @@ impl Results {
         {
             return Ok(None);
         }
-        if !infra_generator::commands::is_verification_safe(check_root, command).unwrap_or(false) {
+        if !is_verification_safe_cached(check_root, command) {
             return Ok(None);
         }
         let key = Self::check_cache_key(argv, env_extra, snapshot_id)?;
-        let guard = self
-            .check_cache
-            .lock()
-            .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
-        Ok(guard.entries.get(&key).cloned())
+        {
+            let mut guard = self
+                .check_cache
+                .lock()
+                .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
+            if let Some(hit) = guard.get(&key) {
+                return Ok(Some(hit));
+            }
+        }
+        let digest = key.digest()?;
+        let loaded = {
+            let db = self.store.connection()?;
+            let mut stmt = db.prepare(
+                "SELECT canon_argv, env_fingerprint, snapshot_id, output, exit_code, reason, seconds
+                 FROM check_receipt_cache
+                 WHERE cache_key = ?1",
+            )?;
+            let row = stmt
+                .query_row([&digest], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<i32>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, f64>(6)?,
+                    ))
+                })
+                .optional()?;
+            drop(stmt);
+            match row {
+                Some((raw_argv, fp, snap, output, exit_code, reason, seconds)) => {
+                    let stored_argv: Vec<String> =
+                        serde_json::from_str(&raw_argv).unwrap_or_default();
+                    if stored_argv == key.canon_argv
+                        && fp == key.env_fingerprint
+                        && snap == key.snapshot_id
+                        && reason.is_none()
+                    {
+                        let _ = db.execute(
+                            "UPDATE check_receipt_cache SET last_used_at = ?2 WHERE cache_key = ?1",
+                            params![&digest, next_check_cache_seq()],
+                        );
+                        Some(Capture {
+                            output,
+                            exit_code,
+                            reason,
+                            seconds,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+        if let Some(capture) = loaded {
+            let mut guard = self
+                .check_cache
+                .lock()
+                .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
+            guard.insert(key, capture.clone());
+            return Ok(Some(capture));
+        }
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -401,18 +700,54 @@ impl Results {
         {
             return Ok(());
         }
-        if !infra_generator::commands::is_verification_safe(check_root, command).unwrap_or(false) {
+        if !is_verification_safe_cached(check_root, command) {
             return Ok(());
         }
         let key = Self::check_cache_key(argv, env_extra, snapshot_id)?;
-        let mut guard = self
-            .check_cache
-            .lock()
-            .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
-        if guard.entries.len() >= MAX_CHECK_CACHE_ENTRIES && !guard.entries.contains_key(&key) {
-            guard.entries.clear();
+        let digest = key.digest()?;
+        let raw_argv = serde_json::to_string(&key.canon_argv)?;
+        let seq = next_check_cache_seq();
+        {
+            let mut guard = self
+                .check_cache
+                .lock()
+                .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
+            guard.insert(key.clone(), capture.clone());
         }
-        guard.entries.insert(key, capture.clone());
+        let db = self.store.connection()?;
+        db.execute(
+            "INSERT INTO check_receipt_cache(
+                 cache_key, canon_argv, env_fingerprint, snapshot_id,
+                 output, exit_code, reason, seconds, updated_at, last_used_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                 output = excluded.output,
+                 exit_code = excluded.exit_code,
+                 reason = excluded.reason,
+                 seconds = excluded.seconds,
+                 updated_at = excluded.updated_at,
+                 last_used_at = excluded.last_used_at",
+            params![
+                digest,
+                raw_argv,
+                key.env_fingerprint,
+                key.snapshot_id,
+                capture.output,
+                capture.exit_code,
+                capture.reason,
+                capture.seconds,
+                seq,
+            ],
+        )?;
+        db.execute(
+            "DELETE FROM check_receipt_cache
+             WHERE cache_key IN (
+                 SELECT cache_key FROM check_receipt_cache
+                 ORDER BY last_used_at DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![i64::try_from(MAX_PERSISTED_CHECK_RECEIPTS).unwrap_or(2048)],
+        )?;
         Ok(())
     }
 
@@ -2373,6 +2708,138 @@ mod cleanup_error_tests {
                 .cached_check(&unsafe_argv, &env, "snap-1", &ws, "rm -rf tmp", false)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn command_analyzer_cache_reuses_and_invalidates_and_receipts_persist_across_restart() {
+        use super::{RuntimeContext, Value};
+        use crate::store::SessionStore;
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        struct LocalBackend(PathBuf);
+        impl super::ResultsBackend for LocalBackend {
+            fn workspace(&self, _: &Value) -> super::Result<PathBuf> {
+                Ok(self.0.clone())
+            }
+            fn idle(&self) -> super::Result<()> {
+                Ok(())
+            }
+            fn enqueue_check(&self, _: &str, _: &str, _: &str) -> super::Result<String> {
+                Ok("chk".into())
+            }
+            fn operation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+                Arc::new(tokio::sync::Mutex::new(()))
+            }
+            fn history_session_ids(&self, _: &Value) -> super::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn shutdown_cancel(&self) -> Arc<AtomicBool> {
+                Arc::new(AtomicBool::new(false))
+            }
+            fn result_context(&self, _: &Value) -> super::Result<RuntimeContext> {
+                Ok(RuntimeContext::new(
+                    infra_core::Roots::installed(&self.0)?,
+                    "local",
+                    "governed",
+                )?)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let ws = infra_core::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("ws-analyzer");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("composer.json"),
+            r#"{"scripts":{"lint":"php -l index.php"}}"#,
+        )
+        .unwrap();
+
+        let count_for_ws = || {
+            super::command_analyzer_build_counts()
+                .lock()
+                .unwrap()
+                .get(&ws)
+                .copied()
+                .unwrap_or(0)
+        };
+        let baseline = count_for_ws();
+        let argv = vec!["composer".into(), "lint".into()];
+        let cap = super::Capture {
+            output: "No syntax errors".into(),
+            exit_code: Some(0),
+            reason: None,
+            seconds: 0.02,
+        };
+        let env = BTreeMap::new();
+        let backend: Arc<dyn super::ResultsBackend> = Arc::new(LocalBackend(ws.clone()));
+
+        {
+            let store = SessionStore::open(&state_dir).unwrap();
+            let results = super::Results::new(store, backend.clone()).unwrap();
+            results
+                .store_cached_check(
+                    &argv,
+                    &env,
+                    "snap-persist-1",
+                    &ws,
+                    "composer lint",
+                    false,
+                    &cap,
+                )
+                .unwrap();
+            let hit = results
+                .cached_check(&argv, &env, "snap-persist-1", &ws, "composer lint", false)
+                .unwrap()
+                .expect("cached receipt should hit in memory");
+            assert_eq!(hit.exit_code, Some(0));
+            assert_eq!(
+                count_for_ws() - baseline,
+                1,
+                "CommandAnalyzer should be built once for repeated checks on unchanged workspace"
+            );
+        }
+
+        // Recreate Results over the same SessionStore directory to clear L1 memory cache.
+        let reopened_store = SessionStore::open(&state_dir).unwrap();
+        let reopened_results = super::Results::new(reopened_store, backend).unwrap();
+        let persisted_hit = reopened_results
+            .cached_check(&argv, &env, "snap-persist-1", &ws, "composer lint", false)
+            .unwrap()
+            .expect("SQLite receipt cache must survive Results restart");
+        assert_eq!(persisted_hit.output, "No syntax errors");
+        assert_eq!(persisted_hit.exit_code, Some(0));
+        assert_eq!(
+            count_for_ws() - baseline,
+            1,
+            "Analyzer cache stays warm across Results restart when composer.json is unchanged"
+        );
+
+        // Changing composer.json within the racy mtime window must invalidate CommandAnalyzer.
+        std::fs::write(
+            ws.join("composer.json"),
+            r#"{"scripts":{"lint":"rm -rf build"}}"#,
+        )
+        .unwrap();
+        assert!(
+            !super::is_verification_safe_cached(&ws, "composer lint"),
+            "invalidated composer.json unsafe script must not pass"
+        );
+        assert!(
+            reopened_results
+                .cached_check(&argv, &env, "snap-persist-1", &ws, "composer lint", false)
+                .unwrap()
+                .is_none(),
+            "unsafe script update must reject cached hit"
+        );
+        assert!(
+            count_for_ws() - baseline >= 2,
+            "updating composer.json must rebuild cached CommandAnalyzer"
         );
     }
 }

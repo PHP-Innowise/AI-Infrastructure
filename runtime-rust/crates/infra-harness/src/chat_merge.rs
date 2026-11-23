@@ -5,8 +5,13 @@ use crate::{
 };
 use infra_core::{self as core, bank::publication::PublicationFiles};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value as V, json};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 use uuid::Uuid;
 pub const MAX_SOURCES: usize = 8;
 pub const MAX_SOURCE_BYTES: usize = 512 * 1024;
@@ -58,7 +63,12 @@ impl ChatMerge {
         let project = self.store.project(required(&destination, "project_id")?)?;
         let bundle = {
             let db = self.store.connection()?;
-            prepare(&db, &data["source_ids"], required(&project, "id")?)?
+            prepare_in_store(
+                &db,
+                Some(&self.store.state),
+                &data["source_ids"],
+                required(&project, "id")?,
+            )?
         };
         let prompt = required(&destination, "prompt")?;
         let memory = memory_text(&bundle, prompt);
@@ -382,7 +392,27 @@ impl ChatMerge {
     }
 }
 fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS session_merges(session_id TEXT PRIMARY KEY,request_id TEXT UNIQUE NOT NULL,request_hash TEXT NOT NULL,bundle TEXT NOT NULL,summary TEXT NOT NULL,context TEXT NOT NULL);").map_err(db_error)
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_merges(
+            session_id TEXT PRIMARY KEY,
+            request_id TEXT UNIQUE NOT NULL,
+            request_hash TEXT NOT NULL,
+            bundle TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            context TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS session_merge_source_cache(
+            session_id TEXT PRIMARY KEY,
+            event_watermark INTEGER NOT NULL,
+            event_count INTEGER NOT NULL,
+            messages_json TEXT NOT NULL,
+            seen_json TEXT NOT NULL,
+            total_bytes INTEGER NOT NULL,
+            capsule_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )
+    .map_err(db_error)
 }
 pub fn identity(value: &str) -> bool {
     value.len() == 36
@@ -516,7 +546,327 @@ fn truthy(value: &V) -> bool {
         V::Number(v) => v.as_f64() != Some(0.),
     }
 }
-fn prepare(db: &Connection, source_ids: &V, project: &str) -> Result<V> {
+const MAX_CAPSULE_DECISIONS: usize = 8;
+const MAX_CAPSULE_FILES: usize = 24;
+const MAX_CAPSULE_SYMBOLS: usize = 12;
+const MAX_CAPSULE_CHECKS: usize = 6;
+const MAX_CAPSULE_FAILURES: usize = 6;
+const MAX_LINE_ITEM_CHARS: usize = 200;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CapsuleExtract {
+    goal: String,
+    latest_outcome: String,
+    decisions: Vec<String>,
+    touched_files: Vec<String>,
+    mentioned_symbols: Vec<String>,
+    open_checks: Vec<String>,
+    failures: Vec<String>,
+}
+
+fn memory_draft_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?s)```memory-draft[^\S\n]*\n(.*?)\n[^\S\n]*```")
+            .expect("valid static memory-draft regex")
+    })
+}
+
+fn path_mention_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:^|[\s`"'(])((?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+(?:\.[A-Za-z0-9_]+)?(?::\d+)?|Cargo\.toml|composer\.json|package\.json|AGENTS\.md)"#,
+        )
+        .expect("valid static path mention regex")
+    })
+}
+
+fn symbol_mention_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+|[A-Z][A-Za-z0-9]{2,}[a-z][A-Za-z0-9_]*)`",
+        )
+        .expect("valid static symbol mention regex")
+    })
+}
+
+fn push_unique_capped(dest: &mut Vec<String>, item: String, max_len: usize) {
+    if item.is_empty() || dest.contains(&item) || dest.len() >= max_len {
+        return;
+    }
+    dest.push(item);
+}
+
+fn normalize_candidate_path(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c| matches!(c, '`' | '\'' | '"' | ',' | ';' | ')' | ']' | '>'));
+    if trimmed.is_empty() || trimmed.contains("://") || trimmed.starts_with('/') {
+        return None;
+    }
+    let without_line = trimmed
+        .rsplit_once(':')
+        .filter(|(_, tail)| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
+        .map(|(head, _)| head)
+        .unwrap_or(trimmed);
+    let clean = without_line.strip_prefix("./").unwrap_or(without_line);
+    if clean.is_empty()
+        || clean.len() > 240
+        || clean.contains('\\')
+        || clean.contains("..")
+        || clean.starts_with("http")
+        || clean
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return None;
+    }
+    if !clean.contains('/')
+        && !matches!(
+            clean,
+            "Cargo.toml" | "composer.json" | "package.json" | "AGENTS.md"
+        )
+    {
+        return None;
+    }
+    Some(clean.to_owned())
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn absorb_message_into_extract(extract: &mut CapsuleExtract, role: &str, text: &str) {
+    let collapsed_msg = collapsed(text);
+    if collapsed_msg.is_empty() {
+        return;
+    }
+    if role == "user" && extract.goal.is_empty() {
+        extract.goal = truncate_chars(&collapsed_msg, 280);
+    } else if role == "assistant" {
+        extract.latest_outcome = truncate_chars(&collapsed_msg, 360);
+    }
+
+    for cap in path_mention_regex().captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            let prefix_end = m.start();
+            if prefix_end >= 2 && text[..prefix_end].ends_with(":/") {
+                continue;
+            }
+            if let Some(clean) = normalize_candidate_path(m.as_str()) {
+                push_unique_capped(&mut extract.touched_files, clean, MAX_CAPSULE_FILES);
+            }
+        }
+    }
+    for cap in symbol_mention_regex().captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            let sym = m.as_str().trim();
+            if !sym.contains('/') && sym.len() <= 120 {
+                push_unique_capped(
+                    &mut extract.mentioned_symbols,
+                    sym.to_owned(),
+                    MAX_CAPSULE_SYMBOLS,
+                );
+            }
+        }
+    }
+    if role == "assistant" {
+        for raw_line in text.lines() {
+            let line = raw_line.trim().trim_start_matches(['-', '*', '•']).trim();
+            if line.len() < 8 {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            let concise = truncate_chars(&collapsed(line), MAX_LINE_ITEM_CHARS);
+            if [
+                "decided",
+                "decision",
+                "chose",
+                "chosen",
+                "adopted",
+                "switched to",
+                "will use",
+                "agreed",
+                "constraint",
+                "must ",
+                "never ",
+                "kept ",
+            ]
+            .iter()
+            .any(|kw| lower.contains(kw))
+            {
+                push_unique_capped(
+                    &mut extract.decisions,
+                    concise.clone(),
+                    MAX_CAPSULE_DECISIONS,
+                );
+            }
+            if [
+                "error[",
+                "failed",
+                "failing",
+                "panic",
+                "exception",
+                "regression",
+                "rejected",
+                "broken",
+                "denied",
+                "conflict",
+                "timed out",
+            ]
+            .iter()
+            .any(|kw| lower.contains(kw))
+            {
+                push_unique_capped(&mut extract.failures, concise.clone(), MAX_CAPSULE_FAILURES);
+            }
+            if [
+                "todo",
+                "remaining",
+                "next step",
+                "pending",
+                "follow-up",
+                "unverified",
+                "needs ",
+                "verify ",
+                "cargo test",
+                "cargo clippy",
+                "phpunit",
+                "phpstan",
+                "blocked",
+            ]
+            .iter()
+            .any(|kw| lower.contains(kw))
+            {
+                push_unique_capped(&mut extract.open_checks, concise, MAX_CAPSULE_CHECKS);
+            }
+        }
+    }
+}
+
+fn compile_capsule_json(extract: &CapsuleExtract, ir: Option<&crate::graph_ir::GraphIrStore>) -> V {
+    let ir_revision = ir.map(|store| store.current_write_epoch());
+    let touched_files: Vec<V> = extract
+        .touched_files
+        .iter()
+        .map(|path| {
+            let verified = ir
+                .and_then(|store| store.verify_path_or_symbol(Some(path), None).ok())
+                .map(|res| res.path_exists);
+            json!({
+                "path": path,
+                "ir_verified": verified,
+            })
+        })
+        .collect();
+    let verified_symbols: Vec<V> = if let Some(store) = ir {
+        extract
+            .mentioned_symbols
+            .iter()
+            .filter_map(|sym| {
+                let res = store.verify_path_or_symbol(None, Some(sym)).ok()?;
+                Some(json!({
+                    "symbol": sym,
+                    "ir_verified": res.symbol_exists,
+                    "files": res.matched_files.into_iter().take(3).collect::<Vec<_>>(),
+                }))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    json!({
+        "goal": extract.goal,
+        "decisions": extract.decisions,
+        "touched_files": touched_files,
+        "verified_symbols": verified_symbols,
+        "open_checks": extract.open_checks,
+        "failures": extract.failures,
+        "latest_outcome": extract.latest_outcome,
+        "ir_revision": ir_revision,
+    })
+}
+
+fn synthesize_capsule_from_messages(source: &V) -> V {
+    let mut extract = CapsuleExtract::default();
+    for msg in source["messages"].as_array().into_iter().flatten() {
+        let role = msg["role"].as_str().unwrap_or("assistant");
+        let text = msg["text"].as_str().unwrap_or("");
+        absorb_message_into_extract(&mut extract, role, text);
+    }
+    compile_capsule_json(&extract, None)
+}
+
+fn aggregate_bundle_capsule(frozen: &[V], ir_revision: Option<u64>) -> V {
+    let mut decisions = Vec::new();
+    let mut touched_files = Vec::new();
+    let mut seen_paths = BTreeSet::new();
+    let mut open_checks = Vec::new();
+    let mut failures = Vec::new();
+    let mut goals = Vec::new();
+    for src in frozen {
+        let cap = &src["capsule"];
+        if let Some(goal) = cap["goal"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            push_unique_capped(&mut goals, goal.to_owned(), MAX_SOURCES);
+        }
+        for d in cap["decisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(V::as_str)
+        {
+            push_unique_capped(&mut decisions, d.to_owned(), MAX_CAPSULE_DECISIONS * 2);
+        }
+        for c in cap["open_checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(V::as_str)
+        {
+            push_unique_capped(&mut open_checks, c.to_owned(), MAX_CAPSULE_CHECKS * 2);
+        }
+        for f in cap["failures"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(V::as_str)
+        {
+            push_unique_capped(&mut failures, f.to_owned(), MAX_CAPSULE_FAILURES * 2);
+        }
+        for entry in cap["touched_files"].as_array().into_iter().flatten() {
+            if let Some(p) = entry["path"].as_str()
+                && seen_paths.insert(p.to_owned())
+                && touched_files.len() < MAX_CAPSULE_FILES * 2
+            {
+                touched_files.push(entry.clone());
+            }
+        }
+    }
+    json!({
+        "version": 1,
+        "source_count": frozen.len(),
+        "ir_revision": ir_revision,
+        "subjects": subjects(&json!(frozen), 0),
+        "goals": goals,
+        "decisions": decisions,
+        "touched_files": touched_files,
+        "open_checks": open_checks,
+        "failures": failures,
+    })
+}
+
+fn prepare_in_store(
+    db: &Connection,
+    state_dir: Option<&Path>,
+    source_ids: &V,
+    project: &str,
+) -> Result<V> {
+    schema(db)?;
     let sources = source_ids
         .as_array()
         .filter(|s| (2..=MAX_SOURCES).contains(&s.len()))
@@ -533,8 +883,10 @@ fn prepare(db: &Connection, source_ids: &V, project: &str) -> Result<V> {
             ));
         }
     }
-    let block = regex::Regex::new(r"(?s)```memory-draft[^\S\n]*\n(.*?)\n[^\S\n]*```")
-        .map_err(|_| HarnessError::invalid("Invalid internal memory-draft expression."))?;
+    let block = memory_draft_regex();
+    let ir = state_dir
+        .and_then(|state| crate::graph_ir::GraphIrStore::open_readonly_cached(state, project).ok())
+        .flatten();
     let mut frozen = vec![];
     for source in sources {
         let sid = source.as_str().unwrap_or("");
@@ -568,70 +920,176 @@ fn prepare(db: &Connection, source_ids: &V, project: &str) -> Result<V> {
                 "“{title}” is a Creator, Fleet, Clash or System Orchestration run; merge ordinary chats only."
             )));
         }
-        let mut q = db
-            .prepare("SELECT id,data FROM events WHERE session_id=? ORDER BY id LIMIT ?")
+
+        let (row_count_i64, max_id_i64): (i64, i64) = db
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events WHERE session_id=?",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .map_err(db_error)?;
-        let rows = q
-            .query_map(params![sid, (MAX_EVENTS + 1) as u64], |r| {
-                Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(db_error)?;
-        let mut messages = vec![];
-        let mut seen = BTreeSet::new();
-        let mut total = 0usize;
-        let mut watermark = 0u64;
-        for (number, row) in rows.enumerate() {
-            if number == MAX_EVENTS {
-                return Err(HarnessError::invalid(
-                    "A source has too many events to merge safely.",
-                ));
-            }
-            let (id, text) = row.map_err(db_error)?;
-            watermark = id;
-            let event = decode(&text)?;
-            let kind = event["kind"].as_str().unwrap_or("");
-            if !["user", "text", "result"].contains(&kind) || truthy(&event["memory_recovery"]) {
-                continue;
-            }
-            let Some(text) = event["text"].as_str() else {
-                continue;
-            };
-            let text = if kind == "user" {
-                text.to_owned()
-            } else {
-                block
-                    .replace_all(text, "[Memory draft for project memory omitted.]")
-                    .trim()
-                    .to_owned()
-            };
-            if text.trim().is_empty() {
-                continue;
-            }
-            if kind == "user" {
-                seen.clear();
-            }
-            if kind == "result" && (event["ok"] != true || seen.contains(&text)) {
-                continue;
-            }
-            if kind != "user" {
-                seen.insert(text.clone());
-            }
-            let message =
-                json!({"event_id":id,"role":if kind=="user"{"user"}else{"assistant"},"text":text});
-            total += encoded(&message)?.len();
-            if total > MAX_SOURCE_BYTES {
-                return Err(HarnessError::invalid(
-                    "A source exceeds the 512 KiB visible-history limit.",
-                ));
-            }
-            messages.push(message);
+        let row_count = usize::try_from(row_count_i64.max(0)).unwrap_or(usize::MAX);
+        let max_id = u64::try_from(max_id_i64.max(0)).unwrap_or(0);
+        if row_count > MAX_EVENTS {
+            return Err(HarnessError::invalid(
+                "A source has too many events to merge safely.",
+            ));
         }
+
+        let cached_row = db
+            .query_row(
+                "SELECT event_watermark, event_count, messages_json, seen_json, total_bytes, capsule_json
+                 FROM session_merge_source_cache
+                 WHERE session_id=?",
+                [sid],
+                |r| {
+                    Ok((
+                        r.get::<_, u64>(0)?,
+                        r.get::<_, usize>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, usize>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_error)?;
+
+        let mut messages: Vec<V> = vec![];
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut total: usize = 0;
+        let mut watermark: u64 = 0;
+        let mut extract = CapsuleExtract::default();
+        let mut used_cache_prefix = false;
+        let mut cache_hit_watermark = 0u64;
+        let mut cache_hit_count = 0usize;
+
+        if let Some((c_wm, c_count, c_msgs, c_seen, c_total, c_cap)) = cached_row
+            && c_count > 0
+            && row_count >= c_count
+            && max_id >= c_wm
+            && !(row_count == c_count && max_id != c_wm)
+            && let (Ok(parsed_msgs), Ok(parsed_seen), Ok(parsed_cap)) = (
+                serde_json::from_str::<Vec<V>>(&c_msgs),
+                serde_json::from_str::<BTreeSet<String>>(&c_seen),
+                serde_json::from_str::<CapsuleExtract>(&c_cap),
+            )
+        {
+            messages = parsed_msgs;
+            seen = parsed_seen;
+            total = c_total;
+            watermark = c_wm;
+            extract = parsed_cap;
+            used_cache_prefix = true;
+            cache_hit_watermark = c_wm;
+            cache_hit_count = c_count;
+        }
+
+        let need_scan =
+            !used_cache_prefix || max_id > watermark || (row_count > 0 && messages.is_empty());
+        if need_scan {
+            let after_id = if used_cache_prefix && !messages.is_empty() {
+                watermark
+            } else {
+                0
+            };
+            let mut q = db
+                .prepare(
+                    "SELECT id,data FROM events WHERE session_id=? AND id>? ORDER BY id LIMIT ?",
+                )
+                .map_err(db_error)?;
+            let rows = q
+                .query_map(params![sid, after_id, (MAX_EVENTS + 1) as u64], |r| {
+                    Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(db_error)?;
+            for row in rows {
+                let (id, text) = row.map_err(db_error)?;
+                watermark = id;
+                let event = decode(&text)?;
+                let kind = event["kind"].as_str().unwrap_or("");
+                if !["user", "text", "result"].contains(&kind) || truthy(&event["memory_recovery"])
+                {
+                    continue;
+                }
+                let Some(text) = event["text"].as_str() else {
+                    continue;
+                };
+                let text = if kind == "user" {
+                    text.to_owned()
+                } else {
+                    block
+                        .replace_all(text, "[Memory draft for project memory omitted.]")
+                        .trim()
+                        .to_owned()
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if kind == "user" {
+                    seen.clear();
+                }
+                if kind == "result" && (event["ok"] != true || seen.contains(&text)) {
+                    continue;
+                }
+                if kind != "user" {
+                    seen.insert(text.clone());
+                }
+                let role = if kind == "user" { "user" } else { "assistant" };
+                let message = json!({"event_id":id,"role":role,"text":text});
+                total += encoded(&message)?.len();
+                if total > MAX_SOURCE_BYTES {
+                    return Err(HarnessError::invalid(
+                        "A source exceeds the 512 KiB visible-history limit.",
+                    ));
+                }
+                absorb_message_into_extract(&mut extract, role, &text);
+                messages.push(message);
+            }
+        } else {
+            watermark = max_id;
+        }
+
         if messages.is_empty() {
             return Err(HarnessError::invalid(
                 "A selected chat has no captured visible messages.",
             ));
         }
-        let mut item = json!({"event_watermark":watermark,"messages":messages,"history_kind":"Harness-visible messages; native exports, tools and attachments are not included"});
+
+        if !used_cache_prefix || watermark != cache_hit_watermark || row_count != cache_hit_count {
+            let _ = db.execute(
+                "INSERT INTO session_merge_source_cache(
+                     session_id, event_watermark, event_count, messages_json, seen_json, total_bytes, capsule_json, updated_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     event_watermark=excluded.event_watermark,
+                     event_count=excluded.event_count,
+                     messages_json=excluded.messages_json,
+                     seen_json=excluded.seen_json,
+                     total_bytes=excluded.total_bytes,
+                     capsule_json=excluded.capsule_json,
+                     updated_at=excluded.updated_at",
+                params![
+                    sid,
+                    watermark,
+                    row_count,
+                    serde_json::to_string(&messages).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&seen).unwrap_or_else(|_| "[]".into()),
+                    total,
+                    serde_json::to_string(&extract).unwrap_or_else(|_| "{}".into()),
+                    now(),
+                ],
+            );
+        }
+
+        let capsule = compile_capsule_json(&extract, ir.as_deref());
+        let mut item = json!({
+            "event_watermark": watermark,
+            "messages": messages,
+            "capsule": capsule,
+            "history_kind": "Harness-visible messages; native exports, tools and attachments are not included"
+        });
         for key in [
             "id",
             "title",
@@ -677,7 +1135,16 @@ fn prepare(db: &Connection, source_ids: &V, project: &str) -> Result<V> {
         item["sha256"] = json!(core::query::sha256(&encoded(&item)?));
         frozen.push(item);
     }
-    let bundle = json!({"version":1,"captured_at":now(),"project_id":project,"conflicts":"not-evaluated","sources":frozen});
+    let ir_revision = ir.as_deref().map(|store| store.current_write_epoch());
+    let bundle_capsule = aggregate_bundle_capsule(&frozen, ir_revision);
+    let bundle = json!({
+        "version": 1,
+        "captured_at": now(),
+        "project_id": project,
+        "conflicts": "not-evaluated",
+        "capsule": bundle_capsule,
+        "sources": frozen
+    });
     if encoded(&bundle)?.len() > MAX_BUNDLE_BYTES {
         return Err(HarnessError::invalid(
             "The merged archive exceeds 2 MiB. Select fewer or smaller chats.",
@@ -792,13 +1259,30 @@ pub fn context(bundle: &V, archive: &std::path::Path) -> Result<String> {
     let mut cards = vec![];
     for source in sources {
         let mut card = json!({});
-        for key in ["id", "title", "provider", "branch", "sha256"] {
+        for key in [
+            "id",
+            "title",
+            "provider",
+            "branch",
+            "sha256",
+            "event_watermark",
+        ] {
             card[key] = source[key].clone();
         }
-        let text = source["messages"]
+        let mut capsule = if source["capsule"].is_object() {
+            source["capsule"].clone()
+        } else {
+            synthesize_capsule_from_messages(source)
+        };
+        let tail_text = source["messages"]
             .as_array()
             .into_iter()
             .flatten()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .map(|m| {
                 format!(
                     "{}: {}",
@@ -808,25 +1292,71 @@ pub fn context(bundle: &V, archive: &std::path::Path) -> Result<String> {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let mut budget = allowance / 2;
-        loop {
-            card["preview"] = json!(if text.len() <= budget {
-                text.clone()
-            } else {
-                format!(
-                    "{}\n[Preview omitted; read full archive]\n{}",
-                    utf8_head(text.as_bytes(), budget / 3),
-                    utf8_tail(text.as_bytes(), (budget * 2 / 3).max(1))
-                )
-            });
+
+        card["capsule"] = capsule.clone();
+        let mut tail_budget = (allowance / 3).min(tail_text.len());
+        card["recent_tail"] = json!(if tail_text.len() <= tail_budget {
+            tail_text.clone()
+        } else {
+            utf8_tail(tail_text.as_bytes(), tail_budget)
+        });
+        if encoded(&card)?.len() > allowance {
+            loop {
+                tail_budget /= 2;
+                if tail_budget < 24 {
+                    if let Some(obj) = card.as_object_mut() {
+                        obj.remove("recent_tail");
+                    }
+                    break;
+                }
+                card["recent_tail"] = json!(utf8_tail(tail_text.as_bytes(), tail_budget));
+                if encoded(&card)?.len() <= allowance {
+                    break;
+                }
+            }
+        }
+        for limit in [4usize, 2, 1, 0] {
             if encoded(&card)?.len() <= allowance {
                 break;
             }
-            budget /= 2;
-            if budget < 8 {
-                card["preview"] = json!("[Read full archive]");
-                break;
+            if let Some(obj) = capsule.as_object_mut() {
+                for field in [
+                    "verified_symbols",
+                    "touched_files",
+                    "open_checks",
+                    "failures",
+                    "decisions",
+                ] {
+                    if let Some(arr) = obj.get_mut(field).and_then(V::as_array_mut) {
+                        arr.truncate(limit);
+                    }
+                }
             }
+            card["capsule"] = capsule.clone();
+        }
+        if encoded(&card)?.len() > allowance
+            && let Some(obj) = capsule.as_object_mut()
+        {
+            let outcome = obj["latest_outcome"].as_str().unwrap_or("").to_owned();
+            obj["latest_outcome"] = json!(truncate_chars(&outcome, 120));
+            let goal = obj["goal"].as_str().unwrap_or("").to_owned();
+            obj["goal"] = json!(truncate_chars(&goal, 120));
+            card["capsule"] = capsule;
+        }
+        if encoded(&card)?.len() > allowance {
+            let mut minimal = json!({
+                "id": source["id"],
+                "title": source["title"],
+                "sha256": source["sha256"],
+                "preview": utf8_head(b"[Read full archive]", 24),
+            });
+            if encoded(&minimal)?.len() > allowance {
+                minimal = json!({
+                    "id": source["id"],
+                    "preview": "[Read full archive]",
+                });
+            }
+            card = minimal;
         }
         cards.push(
             String::from_utf8(encoded(&card)?)
@@ -844,4 +1374,194 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
         value = rest;
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_chat_session(store: &SessionStore, project_id: &str, title: &str) -> String {
+        let created = store
+            .create(
+                &json!({
+                    "project_id": project_id,
+                    "provider": "codex",
+                    "mode": "plan",
+                    "workspace": "project",
+                }),
+                title,
+                &[],
+            )
+            .unwrap();
+        let sid = created["id"].as_str().unwrap().to_owned();
+        store
+            .patch(&sid, &json!({"status": "completed", "branch": "main"}))
+            .unwrap();
+        sid
+    }
+
+    fn insert_event(db: &Connection, sid: &str, event: &V) -> i64 {
+        db.execute(
+            "INSERT INTO events(session_id, data) VALUES(?1, ?2)",
+            params![sid, event.to_string()],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    }
+
+    #[test]
+    fn merge_capsule_compiles_ir_verified_context_and_caches_event_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let proj_dir = dir.path().join("proj");
+        std::fs::create_dir_all(proj_dir.join("src")).unwrap();
+        std::fs::write(
+            proj_dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(proj_dir.join("src/lib.rs"), "pub mod auth_service;\n").unwrap();
+        std::fs::write(
+            proj_dir.join("src/auth_service.rs"),
+            "pub struct AuthService;\nimpl AuthService {\n    pub fn login() -> bool { true }\n}\n",
+        )
+        .unwrap();
+        let project = store.register(&proj_dir).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+
+        // Build a lightweight GraphIrStore so verify_path_or_symbol resolves src/auth_service.rs and AuthService.
+        let ir = crate::graph_ir::GraphIrStore::open(&store.state, &project_id).unwrap();
+        ir.sync_workspace(&proj_dir).unwrap();
+        drop(ir);
+
+        let sid1 = seed_chat_session(&store, &project_id, "Harden AuthService login flow");
+        let sid2 = seed_chat_session(&store, &project_id, "Clean up billing webhooks");
+        {
+            let db = store.connection().unwrap();
+            schema(&db).unwrap();
+
+            insert_event(
+                &db,
+                &sid1,
+                &json!({
+                    "kind": "text",
+                    "text": "- Decided to use strict token expiry in `src/auth_service.rs` and `AuthService` (`src/missing_ghost.rs`).\n- Error: failed password rotation test in CI.\n- Pending: verify cargo test passes before merge."
+                }),
+            );
+            insert_event(
+                &db,
+                &sid2,
+                &json!({
+                    "kind": "result",
+                    "ok": true,
+                    "text": "- Adopted idempotency keys in `src/billing.rs`.\n- Remaining: confirm webhook replay check."
+                }),
+            );
+        }
+
+        let source_ids = json!([sid1, sid2]);
+        let bundle1 = {
+            let db = store.connection().unwrap();
+            prepare_in_store(&db, Some(&store.state), &source_ids, &project_id).unwrap()
+        };
+        let s1 = &bundle1["sources"][0];
+        let wm1 = s1["event_watermark"].as_u64().unwrap();
+        let cap1 = &s1["capsule"];
+        assert_eq!(cap1["goal"], "Harden AuthService login flow");
+        assert!(
+            cap1["decisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d.as_str().unwrap_or("").contains("strict token expiry"))
+        );
+        assert!(cap1["failures"].as_array().unwrap().iter().any(|f| {
+            f.as_str()
+                .unwrap_or("")
+                .contains("failed password rotation")
+        }));
+        assert!(
+            cap1["open_checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().unwrap_or("").contains("verify cargo test"))
+        );
+        let touched = cap1["touched_files"].as_array().unwrap();
+        assert!(
+            touched
+                .iter()
+                .any(|f| f["path"] == "src/auth_service.rs" && f["ir_verified"] == true),
+            "{touched:?}"
+        );
+        assert!(
+            touched
+                .iter()
+                .any(|f| f["path"] == "src/missing_ghost.rs" && f["ir_verified"] == false),
+            "{touched:?}"
+        );
+        let syms = cap1["verified_symbols"].as_array().unwrap();
+        assert!(
+            syms.iter()
+                .any(|s| s["symbol"] == "AuthService" && s["ir_verified"] == true),
+            "{syms:?}"
+        );
+
+        let rendered = context(&bundle1, &dir.path().join("archive.json")).unwrap();
+        assert!(rendered.len() <= PREVIEW_BYTES + 512);
+        assert!(rendered.contains("AuthService"));
+        assert!(rendered.contains("strict token expiry"));
+
+        // Append one more event to sid1 -> incremental watermark resume only appends new event and updates watermark!
+        {
+            let db = store.connection().unwrap();
+            insert_event(
+                &db,
+                &sid1,
+                &json!({
+                    "kind": "text",
+                    "text": "- Next step: verify phpstan clean pass."
+                }),
+            );
+        }
+        let bundle2 = {
+            let db = store.connection().unwrap();
+            prepare_in_store(&db, Some(&store.state), &source_ids, &project_id).unwrap()
+        };
+        let s1_v2 = &bundle2["sources"][0];
+        assert!(s1_v2["event_watermark"].as_u64().unwrap() > wm1);
+        assert_eq!(s1_v2["messages"].as_array().unwrap().len(), 3);
+        assert!(
+            s1_v2["capsule"]["open_checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().unwrap_or("").contains("phpstan clean pass")),
+            "{}",
+            s1_v2["capsule"]
+        );
+
+        // Warm cache repeat read must reuse cache WITHOUT overwriting updated_at.
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "UPDATE session_merge_source_cache SET updated_at='1999-01-01T00:00:00Z' WHERE session_id=?1",
+                [&sid1],
+            )
+            .unwrap();
+            let _bundle3 =
+                prepare_in_store(&db, Some(&store.state), &source_ids, &project_id).unwrap();
+            let marker: String = db
+                .query_row(
+                    "SELECT updated_at FROM session_merge_source_cache WHERE session_id=?1",
+                    [&sid1],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                marker, "1999-01-01T00:00:00Z",
+                "warm cache hit must not perform redundant SQLite cache rewrites"
+            );
+        }
+    }
 }

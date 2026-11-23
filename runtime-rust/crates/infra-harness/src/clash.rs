@@ -7,6 +7,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -944,13 +945,29 @@ impl Cycle {
         if let Some(message) = budget.pre_turn_violation(&protagonist_provider) {
             return self.incomplete(state, message);
         }
+        let challenger_provider = self.turn_provider(&state, "challenger")?;
+        let pre_warnings = apply_prelaunch_health_policy(
+            &self.store,
+            &mut state,
+            &protagonist_provider,
+            &challenger_provider,
+        );
+        if !pre_warnings.is_empty() {
+            let _ = emit(json!({
+                "kind": "clash_health",
+                "rounds": state["rounds"],
+                "warnings": pre_warnings,
+            }));
+        }
         let mut header = format!(
             "Two-provider Clash, cycle {}. No additional agents. One human-reviewed cycle only. Task: {}\nFollow-up: {}\n",
             state["cycle"],
             state["task"].as_str().unwrap_or(""),
             state["followup"].as_str().unwrap_or("")
         );
-        if let Some((pre_summary, pre_record)) = run_clash_precheck(&self.session).await {
+        if let Some((pre_summary, pre_record)) =
+            run_clash_precheck(&self.store, &self.session).await
+        {
             state["deterministic_precheck"] = pre_record;
             self.persist(&state)?;
             if !pre_summary.is_empty() {
@@ -1030,9 +1047,7 @@ impl Cycle {
                         &protagonist_provider,
                         self.session["model"].as_str(),
                     );
-                    if !warnings.is_empty() {
-                        state["health_warnings"] = json!(warnings);
-                    }
+                    merge_health_warnings(&mut state, &warnings);
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -1042,7 +1057,6 @@ impl Cycle {
             };
             apply_review(&mut state, "reviewer", &payload, 0);
         }
-        let challenger_provider = self.turn_provider(&state, "challenger")?;
         for round in 1..=state["rounds"].as_u64().unwrap_or(2) {
             if let Some(message) = budget.pre_turn_violation(&challenger_provider) {
                 return self.incomplete(state, message);
@@ -1109,9 +1123,7 @@ impl Cycle {
                         &challenger_provider,
                         self.session["model"].as_str(),
                     );
-                    if !warnings.is_empty() {
-                        state["health_warnings"] = json!(warnings);
-                    }
+                    merge_health_warnings(&mut state, &warnings);
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -1191,9 +1203,7 @@ impl Cycle {
                         &protagonist_provider,
                         self.session["model"].as_str(),
                     );
-                    if !warnings.is_empty() {
-                        state["health_warnings"] = json!(warnings);
-                    }
+                    merge_health_warnings(&mut state, &warnings);
                     self.persist(&state)?;
                     return self.incomplete(
                         state,
@@ -1567,19 +1577,39 @@ fn precheck_workspace(session: &Value) -> &std::path::Path {
     std::path::Path::new(workspace)
 }
 
-async fn run_clash_precheck(session: &Value) -> Option<(String, Value)> {
+async fn run_clash_precheck(store: &SessionStore, session: &Value) -> Option<(String, Value)> {
     let precheck = session
         .get("clash")
         .and_then(|c| c.get("precheck"))
         .filter(|p| !p.is_null())?;
     let cwd = precheck_workspace(session);
-    let record = run_precheck_sandboxed(cwd, precheck).await?;
+    let record = run_precheck_sandboxed_in_store(store, cwd, precheck).await?;
     let summary = record["summary"].as_str().unwrap_or("").to_owned();
     Some((summary, record))
 }
 
 /// Nanosecond stat racy-window threshold matching `infra_skillcache::fingerprint::RACY_NS`.
 pub(crate) const PRECHECK_RACY_NS: i128 = 2_000_000_000;
+const HEALTH_WINDOW_LIMIT: usize = 50;
+const HEALTH_DECAY: f64 = 0.82;
+const HEALTH_PRIOR_ALPHA: f64 = 0.25;
+const HEALTH_PRIOR_WEIGHT: f64 = 1.5;
+const MAX_PRECHECK_L1_ENTRIES: usize = 128;
+const MAX_PRECHECK_PERSISTED_ROWS: usize = 2048;
+
+static PRECHECK_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_precheck_seq() -> i64 {
+    let nanos = u64::try_from(now_unix_ns().max(0)).unwrap_or(u64::MAX / 2);
+    let mut cur = PRECHECK_SEQ.load(Ordering::Relaxed);
+    loop {
+        let next = cur.max(nanos).saturating_add(1);
+        match PRECHECK_SEQ.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::Relaxed) {
+            Ok(_) => return i64::try_from(next & (i64::MAX as u64)).unwrap_or(i64::MAX),
+            Err(observed) => cur = observed,
+        }
+    }
+}
 
 pub(crate) fn ensure_health_table(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
@@ -1653,6 +1683,99 @@ pub(crate) struct WorkflowHealthSummary {
     pub warnings: Vec<String>,
 }
 
+impl WorkflowHealthSummary {
+    /// Pre-launch Clash round budget recommendation based on smoothed health.
+    pub fn recommended_clash_rounds(&self, requested_rounds: u64) -> u64 {
+        let requested = requested_rounds.clamp(1, 3);
+        if self.total_runs < 3 {
+            return requested;
+        }
+        if self.schema_error_rate > 0.45 || self.deopt_rate > 0.50 {
+            requested.min(1)
+        } else if self.schema_error_rate > 0.25 || self.deopt_rate > 0.30 {
+            requested.min(2)
+        } else {
+            requested
+        }
+    }
+
+    /// Pre-launch Fleet worker concurrency recommendation based on smoothed health.
+    pub fn recommended_fleet_concurrency(&self, requested: usize) -> usize {
+        let req = requested.max(1);
+        if self.total_runs < 3 || req <= 1 {
+            return req;
+        }
+        if self.schema_error_rate > 0.45 || self.deopt_rate > 0.50 {
+            1
+        } else if self.schema_error_rate > 0.25 || self.deopt_rate > 0.30 {
+            (req / 2).max(1)
+        } else {
+            req
+        }
+    }
+}
+
+pub(crate) fn merge_health_warnings(state: &mut Value, extra: &[String]) {
+    if extra.is_empty() {
+        return;
+    }
+    let mut existing: Vec<String> = state["health_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    for w in extra {
+        if !existing.contains(w) {
+            existing.push(w.clone());
+        }
+    }
+    state["health_warnings"] = json!(existing);
+}
+
+fn apply_prelaunch_health_policy(
+    store: &SessionStore,
+    state: &mut Value,
+    protagonist_provider: &str,
+    challenger_provider: &str,
+) -> Vec<String> {
+    let pro_health = summarize_workflow_health(
+        store,
+        "clash",
+        protagonist_provider,
+        state["protagonist"]["model"].as_str(),
+    );
+    let chal_health = summarize_workflow_health(
+        store,
+        "clash",
+        challenger_provider,
+        state["challenger"]["model"].as_str(),
+    );
+    let requested = state["rounds"].as_u64().unwrap_or(2).clamp(1, 3);
+    let clamped = pro_health
+        .recommended_clash_rounds(requested)
+        .min(chal_health.recommended_clash_rounds(requested));
+    let mut warnings = Vec::new();
+    for w in pro_health
+        .warnings
+        .iter()
+        .chain(chal_health.warnings.iter())
+    {
+        if !warnings.contains(w) {
+            warnings.push(w.clone());
+        }
+    }
+    if clamped < requested {
+        state["rounds"] = json!(clamped);
+        warnings.push(format!(
+            "Clamped Clash rounds pre-launch from {requested} to {clamped} based on smoothed workflow health."
+        ));
+    }
+    merge_health_warnings(state, &warnings);
+    warnings
+}
+
 pub(crate) fn summarize_workflow_health(
     store: &SessionStore,
     workflow: &str,
@@ -1671,39 +1794,57 @@ pub(crate) fn summarize_workflow_health(
         "SELECT schema_error, deopt, cost_usd
          FROM workflow_health_runs
          WHERE workflow=?1 AND provider=?2 AND model=?3
-         ORDER BY id DESC LIMIT 20",
+         ORDER BY id DESC LIMIT ?4",
     ) else {
         return summary;
     };
-    let Ok(rows) = stmt.query_map(rusqlite::params![workflow, provider, model_key], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, f64>(2)?,
-        ))
-    }) else {
+    let Ok(rows) = stmt.query_map(
+        rusqlite::params![
+            workflow,
+            provider,
+            model_key,
+            i64::try_from(HEALTH_WINDOW_LIMIT).unwrap_or(50)
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        },
+    ) else {
         return summary;
     };
+    let mut weight = 1.0_f64;
+    let mut weight_sum = 0.0_f64;
+    let mut weighted_schema = 0.0_f64;
+    let mut weighted_deopt = 0.0_f64;
     for row in rows.flatten() {
         summary.total_runs += 1;
         if row.0 != 0 {
             summary.schema_error_runs += 1;
+            weighted_schema += weight;
         }
         if row.1 != 0 {
             summary.deopt_runs += 1;
+            weighted_deopt += weight;
         }
         if row.2.is_finite() && row.2 > 0.0 {
             summary.total_cost_usd += row.2;
         }
+        weight_sum += weight;
+        weight *= HEALTH_DECAY;
     }
-    if summary.total_runs > 0 {
-        summary.schema_error_rate = summary.schema_error_runs as f64 / summary.total_runs as f64;
-        summary.deopt_rate = summary.deopt_runs as f64 / summary.total_runs as f64;
+    if summary.total_runs > 0 && weight_sum > 0.0 {
+        summary.schema_error_rate =
+            (weighted_schema + HEALTH_PRIOR_ALPHA) / (weight_sum + HEALTH_PRIOR_WEIGHT);
+        summary.deopt_rate =
+            (weighted_deopt + HEALTH_PRIOR_ALPHA) / (weight_sum + HEALTH_PRIOR_WEIGHT);
     }
     if summary.total_runs >= 3 {
         if summary.schema_error_rate > 0.25 {
             summary.warnings.push(format!(
-                "High schema error rate for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
+                "High smoothed schema error rate for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
                 summary.schema_error_rate * 100.0,
                 summary.schema_error_runs,
                 summary.total_runs
@@ -1711,7 +1852,7 @@ pub(crate) fn summarize_workflow_health(
         }
         if summary.deopt_rate > 0.30 {
             summary.warnings.push(format!(
-                "Degraded ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% deopted ({}/{})",
+                "Degraded smoothed ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
                 summary.deopt_rate * 100.0,
                 summary.deopt_runs,
                 summary.total_runs
@@ -1743,16 +1884,315 @@ fn now_unix_ns() -> i128 {
     time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
 }
 
-fn precheck_workspace_stamp(root: &std::path::Path) -> Option<(String, i128)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrecheckStampStrategy {
+    ScopedFiles,
+    IrAndGit,
+    IrIndexed,
+    BoundedWalk,
+}
+
+fn is_single_file_linter_argv(argv: &[String]) -> Option<Vec<String>> {
+    if argv.len() < 2 {
+        return None;
+    }
+    let bin = std::path::Path::new(&argv[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_single_target_cmd = (bin == "php" && argv.iter().any(|a| a == "-l"))
+        || (matches!(bin.as_str(), "node" | "nodejs")
+            && argv.iter().any(|a| a == "-c" || a == "--check"))
+        || (matches!(bin.as_str(), "eslint" | "oxlint" | "prettier"));
+    if !is_single_target_cmd {
+        return None;
+    }
+    let files: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .filter(|arg| {
+            let trimmed = arg.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.contains('\0')
+                && (trimmed.contains('/')
+                    || trimmed.contains('.')
+                    || trimmed == "src"
+                    || trimmed == "tests")
+        })
+        .cloned()
+        .collect();
+    if files.is_empty() { None } else { Some(files) }
+}
+
+fn stat_rel_path(
+    root: &Path,
+    rel: &str,
+    stamps: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> bool {
+    let clean = rel.replace('\\', "/");
+    if clean.starts_with('/')
+        || clean
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return false;
+    }
+    let path = root.join(&clean);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        stamps.push(format!("missing:{clean}"));
+        return true;
+    };
+    if meta.file_type().is_symlink() {
+        return false;
+    }
+    if meta.is_file() {
+        let Some(mtime) = meta.modified().ok().and_then(time_to_unix_ns) else {
+            return false;
+        };
+        *max_mtime_ns = (*max_mtime_ns).max(mtime);
+        stamps.push(format!("file:{clean}:{}:{mtime}", meta.len()));
+    } else if meta.is_dir() {
+        let Some(mtime) = meta.modified().ok().and_then(time_to_unix_ns) else {
+            return false;
+        };
+        *max_mtime_ns = (*max_mtime_ns).max(mtime);
+        stamps.push(format!("dir:{clean}:{mtime}"));
+    }
+    true
+}
+
+fn collect_root_manifests(root: &Path, stamps: &mut Vec<String>, max_mtime_ns: &mut i128) {
+    const MANIFESTS: &[&str] = &[
+        "composer.json",
+        "composer.lock",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.toml",
+        "Cargo.lock",
+        "phpunit.xml",
+        "phpunit.xml.dist",
+        "phpstan.neon",
+        "phpstan.neon.dist",
+        "eslint.config.js",
+        "eslint.config.mjs",
+        "oxlint.json",
+        "biome.json",
+    ];
+    for name in MANIFESTS {
+        let p = root.join(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&p)
+            && !meta.file_type().is_symlink()
+            && meta.is_file()
+            && let Some(mtime) = meta.modified().ok().and_then(time_to_unix_ns)
+        {
+            *max_mtime_ns = (*max_mtime_ns).max(mtime);
+            stamps.push(format!("manifest:{name}:{}:{mtime}", meta.len()));
+        }
+    }
+}
+
+fn resolve_graph_ir_for_workspace(
+    store: Option<&SessionStore>,
+    root_canon: &Path,
+) -> Option<Arc<crate::graph_ir::GraphIrStore>> {
+    let store = store?;
+    let root_str = root_canon.to_str()?;
+    let identity = if cfg!(windows) {
+        root_str.replace('/', "\\").to_lowercase()
+    } else {
+        root_str.to_owned()
+    };
+    let candidate_id = crate::store::sha(identity.as_bytes())[..16].to_owned();
+    if let Ok(Some(ir)) =
+        crate::graph_ir::GraphIrStore::open_readonly_cached(&store.state, &candidate_id)
+    {
+        return Some(ir);
+    }
+    if let Ok(projects) = store.projects() {
+        for proj in projects {
+            if let (Some(pid), Some(path)) = (proj["id"].as_str(), proj["path"].as_str())
+                && infra_core::fs::canonicalize(Path::new(path))
+                    .ok()
+                    .as_deref()
+                    == Some(root_canon)
+                && let Ok(Some(ir)) =
+                    crate::graph_ir::GraphIrStore::open_readonly_cached(&store.state, pid)
+            {
+                return Some(ir);
+            }
+        }
+    }
+    None
+}
+
+fn precheck_git_overlay_stamp(
+    root: &Path,
+    stamps: &mut Vec<String>,
+    max_mtime_ns: &mut i128,
+) -> bool {
+    if !root.join(".git").exists() {
+        return false;
+    }
+    let head = crate::graph_ir::current_git_head(root).unwrap_or_default();
+    stamps.push(format!("git_head:{head}"));
+    let Ok(out) = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all", "-z"])
+        .current_dir(root)
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let mut entries = out.stdout.split(|b| *b == 0);
+    while let Some(raw_entry) = entries.next() {
+        if raw_entry.len() < 4 {
+            continue;
+        }
+        let status = String::from_utf8_lossy(&raw_entry[..2]).into_owned();
+        let path_part = String::from_utf8_lossy(&raw_entry[3..]).into_owned();
+        if status.starts_with('R') || status.starts_with('C') {
+            let _ = entries.next();
+        }
+        stamps.push(format!("git_dirty:{status}:{path_part}"));
+        if !stat_rel_path(root, &path_part, stamps, max_mtime_ns) {
+            return false;
+        }
+    }
+    true
+}
+
+fn precheck_workspace_stamp_scoped(
+    root: &std::path::Path,
+    argv: &[String],
+    store: Option<&SessionStore>,
+) -> Option<(String, i128, PrecheckStampStrategy)> {
     const MAX_ENTRIES: usize = 2000;
-    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
-    let mut stamps = Vec::new();
     let mut max_mtime_ns = root
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(time_to_unix_ns)
         .unwrap_or(0);
+
+    // Tier 1: Single-file syntax/linter commands stamp only their target path(s) + manifests.
+    if let Some(target_args) = is_single_file_linter_argv(argv) {
+        let mut stamps = Vec::new();
+        collect_root_manifests(root, &mut stamps, &mut max_mtime_ns);
+        let mut valid = true;
+        for arg in &target_args {
+            let candidate = root.join(arg);
+            if candidate.is_dir() {
+                let mut sub_queue = std::collections::VecDeque::from([candidate]);
+                while let Some(dir) = sub_queue.pop_front() {
+                    let Ok(entries) = std::fs::read_dir(&dir) else {
+                        valid = false;
+                        break;
+                    };
+                    let mut children: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                    children.sort_by_key(|e| e.file_name());
+                    for entry in children {
+                        let p = entry.path();
+                        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                            valid = false;
+                            break;
+                        };
+                        if meta.file_type().is_symlink() {
+                            valid = false;
+                            break;
+                        }
+                        if meta.is_dir() {
+                            sub_queue.push_back(p);
+                        } else if meta.is_file() {
+                            let Some(rel) = p.strip_prefix(root).ok().and_then(|r| r.to_str())
+                            else {
+                                valid = false;
+                                break;
+                            };
+                            if !stat_rel_path(root, rel, &mut stamps, &mut max_mtime_ns) {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if stamps.len() >= MAX_ENTRIES {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if !valid {
+                        break;
+                    }
+                }
+            } else if !stat_rel_path(root, arg, &mut stamps, &mut max_mtime_ns) {
+                valid = false;
+                break;
+            }
+        }
+        if valid {
+            let digest = crate::store::sha(stamps.join("\n").as_bytes());
+            return Some((digest, max_mtime_ns, PrecheckStampStrategy::ScopedFiles));
+        }
+    }
+
+    // Tier 2: GraphIrStore revision + Git dirty/untracked overlay (or indexed file/dir stats).
+    if let Some(ir) = resolve_graph_ir_for_workspace(store, root)
+        && let Ok((indexed_stamps, _, _)) = ir.file_stamps_and_meta()
+    {
+        let mut stamps = vec![
+            format!("ir_epoch:{}", ir.current_write_epoch()),
+            format!(
+                "root_manifest:{}",
+                crate::graph_ir::compute_root_manifest_stamp(root)
+            ),
+        ];
+        collect_root_manifests(root, &mut stamps, &mut max_mtime_ns);
+        if precheck_git_overlay_stamp(root, &mut stamps, &mut max_mtime_ns) {
+            for (mtime, _len) in indexed_stamps.values() {
+                max_mtime_ns = max_mtime_ns.max(i128::from(*mtime));
+            }
+            let digest = crate::store::sha(stamps.join("\n").as_bytes());
+            return Some((digest, max_mtime_ns, PrecheckStampStrategy::IrAndGit));
+        }
+        let mut parent_dirs = BTreeSet::new();
+        parent_dirs.insert(root.to_path_buf());
+        let mut ok = !indexed_stamps.is_empty();
+        for rel in indexed_stamps.keys() {
+            if !stat_rel_path(root, rel, &mut stamps, &mut max_mtime_ns) {
+                ok = false;
+                break;
+            }
+            if let Some(parent) = root.join(rel).parent() {
+                parent_dirs.insert(parent.to_path_buf());
+            }
+        }
+        if ok {
+            for dir in parent_dirs {
+                if let Ok(meta) = std::fs::symlink_metadata(&dir)
+                    && let Some(mtime) = meta.modified().ok().and_then(time_to_unix_ns)
+                {
+                    max_mtime_ns = max_mtime_ns.max(mtime);
+                    let rel_dir = dir
+                        .strip_prefix(root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_default();
+                    stamps.push(format!("pdir:{rel_dir}:{mtime}"));
+                }
+            }
+            let digest = crate::store::sha(stamps.join("\n").as_bytes());
+            return Some((digest, max_mtime_ns, PrecheckStampStrategy::IrIndexed));
+        }
+    }
+
+    // Tier 3: Bounded filesystem walk fallback.
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut stamps = Vec::new();
     while let Some(dir) = queue.pop_front() {
         let entries = std::fs::read_dir(&dir).ok()?;
         let mut children: Vec<_> = entries.filter_map(|e| e.ok()).collect();
@@ -1791,11 +2231,108 @@ fn precheck_workspace_stamp(root: &std::path::Path) -> Option<(String, i128)> {
         }
     }
     let digest = crate::store::sha(stamps.join("\n").as_bytes());
-    Some((digest, max_mtime_ns))
+    Some((digest, max_mtime_ns, PrecheckStampStrategy::BoundedWalk))
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+fn precheck_workspace_stamp(root: &std::path::Path) -> Option<(String, i128)> {
+    precheck_workspace_stamp_scoped(root, &[], None).map(|(digest, mtime, _)| (digest, mtime))
 }
 
 fn precheck_cache_settled(max_mtime_ns: i128, now_ns: i128) -> bool {
     max_mtime_ns > 0 && now_ns > PRECHECK_RACY_NS && max_mtime_ns <= now_ns - PRECHECK_RACY_NS
+}
+
+#[derive(Default)]
+struct PrecheckL1Cache {
+    seq: u64,
+    entries: BTreeMap<String, (Value, u64)>,
+}
+
+impl PrecheckL1Cache {
+    fn get(&mut self, key: &str) -> Option<Value> {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        let entry = self.entries.get_mut(key)?;
+        entry.1 = use_seq;
+        Some(entry.0.clone())
+    }
+
+    fn insert(&mut self, key: String, record: Value) {
+        self.seq = self.seq.saturating_add(1);
+        let use_seq = self.seq;
+        if self.entries.len() >= MAX_PRECHECK_L1_ENTRIES
+            && !self.entries.contains_key(&key)
+            && let Some(evict_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&evict_key);
+        }
+        self.entries.insert(key, (record, use_seq));
+    }
+}
+
+fn ensure_precheck_cache_table(db: &rusqlite::Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS precheck_receipt_cache(
+            cache_key TEXT PRIMARY KEY,
+            record_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_used_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS precheck_receipt_cache_lru
+            ON precheck_receipt_cache(last_used_at ASC);",
+    )?;
+    Ok(())
+}
+
+fn load_persisted_precheck(store: &SessionStore, key: &str) -> Option<Value> {
+    let db = store.connection().ok()?;
+    ensure_precheck_cache_table(&db).ok()?;
+    let raw: String = db
+        .query_row(
+            "SELECT record_json FROM precheck_receipt_cache WHERE cache_key = ?1",
+            [key],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let _ = db.execute(
+        "UPDATE precheck_receipt_cache SET last_used_at = ?2 WHERE cache_key = ?1",
+        rusqlite::params![key, next_precheck_seq()],
+    );
+    Some(parsed)
+}
+
+fn save_persisted_precheck(store: &SessionStore, key: &str, record: &Value) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    if ensure_precheck_cache_table(&db).is_err() {
+        return;
+    }
+    let seq = next_precheck_seq();
+    let _ = db.execute(
+        "INSERT INTO precheck_receipt_cache(cache_key, record_json, updated_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(cache_key) DO UPDATE SET
+             record_json = excluded.record_json,
+             updated_at = excluded.updated_at,
+             last_used_at = excluded.last_used_at",
+        rusqlite::params![key, record.to_string(), seq],
+    );
+    let _ = db.execute(
+        "DELETE FROM precheck_receipt_cache
+         WHERE cache_key IN (
+             SELECT cache_key FROM precheck_receipt_cache
+             ORDER BY last_used_at DESC
+             LIMIT -1 OFFSET ?1
+         )",
+        rusqlite::params![i64::try_from(MAX_PRECHECK_PERSISTED_ROWS).unwrap_or(2048)],
+    );
 }
 
 type PrecheckExec<'a> = &'a (
@@ -1807,16 +2344,17 @@ type PrecheckExec<'a> = &'a (
             + Sync
     );
 
-/// Runs a configured deterministic precheck command inside a network-off `Profile::Gate`
-/// sandbox with scrubbed env, `PRECHECK_RACY_NS`-keyed receipt reuse, and zero-token attribution.
-pub(crate) async fn run_precheck_sandboxed(
+/// Runs a deterministic precheck with durable SQLite receipt persistence in `store`.
+pub(crate) async fn run_precheck_sandboxed_in_store(
+    store: &SessionStore,
     workspace: &std::path::Path,
     precheck: &Value,
 ) -> Option<Value> {
-    run_precheck_sandboxed_at(workspace, precheck, now_unix_ns(), None).await
+    run_precheck_sandboxed_at(Some(store), workspace, precheck, now_unix_ns(), None).await
 }
 
 async fn run_precheck_sandboxed_at(
+    store: Option<&SessionStore>,
     workspace: &std::path::Path,
     precheck: &Value,
     now_ns: i128,
@@ -1844,20 +2382,20 @@ async fn run_precheck_sandboxed_at(
         .clamp(1, 120);
     let cache_enabled = precheck.get("no_cache").and_then(Value::as_bool) != Some(true)
         && std::env::var("HARNESS_DISABLE_CHECK_CACHE").as_deref() != Ok("1");
-    static PRECHECK_CACHE: std::sync::OnceLock<Mutex<BTreeMap<String, Value>>> =
-        std::sync::OnceLock::new();
-    let cache = PRECHECK_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    static PRECHECK_CACHE: std::sync::OnceLock<Mutex<PrecheckL1Cache>> = std::sync::OnceLock::new();
+    let cache = PRECHECK_CACHE.get_or_init(|| Mutex::new(PrecheckL1Cache::default()));
     let stamp = if cache_enabled {
-        precheck_workspace_stamp(&cwd_canon)
+        precheck_workspace_stamp_scoped(&cwd_canon, &argv, store)
     } else {
         None
     };
-    let cache_key = stamp.as_ref().and_then(|(tree_digest, max_mtime)| {
+    let cache_key = stamp.as_ref().and_then(|(tree_digest, max_mtime, _)| {
         precheck_cache_settled(*max_mtime, now_ns).then(|| {
             let env_digest =
                 crate::store::sha(serde_json::to_vec(&env).unwrap_or_default().as_slice());
             crate::store::sha(
                 json!({
+                    "v": 2,
                     "cwd": cwd_canon.to_string_lossy(),
                     "argv": argv,
                     "timeout": timeout,
@@ -1869,12 +2407,21 @@ async fn run_precheck_sandboxed_at(
             )
         })
     });
-    if let Some(key) = &cache_key
-        && let Ok(guard) = cache.lock()
-        && let Some(mut hit) = guard.get(key).cloned()
-    {
-        hit["cached"] = json!(true);
-        return Some(hit);
+    if let Some(key) = &cache_key {
+        let mut hit = cache.lock().ok().and_then(|mut guard| guard.get(key));
+        if hit.is_none()
+            && let Some(s) = store
+            && let Some(persisted) = load_persisted_precheck(s, key)
+        {
+            if let Ok(mut guard) = cache.lock() {
+                guard.insert(key.clone(), persisted.clone());
+            }
+            hit = Some(persisted);
+        }
+        if let Some(mut hit) = hit {
+            hit["cached"] = json!(true);
+            return Some(hit);
+        }
     }
 
     let path_env = std::env::var("PATH").ok();
@@ -1965,14 +2512,16 @@ async fn run_precheck_sandboxed_at(
             "source": "deterministic"
         }
     });
-    if ok
-        && let Some(key) = cache_key
-        && let Ok(mut guard) = cache.lock()
-    {
-        if guard.len() >= 128 {
-            guard.clear();
+    // Cache deterministic passes AND deterministic non-zero exits (`code.is_some()`, excluding
+    // transient infrastructure/timeout/spawn errors where `code` is `None`).
+    let deterministic = ok || (code.is_some() && err_msg.is_none());
+    if deterministic && let Some(key) = cache_key {
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(key.clone(), record.clone());
         }
-        guard.insert(key, record.clone());
+        if let Some(s) = store {
+            save_persisted_precheck(s, &key, &record);
+        }
     }
     Some(record)
 }
@@ -2141,6 +2690,7 @@ mod tests {
     #[tokio::test]
     async fn run_clash_precheck_reads_project_path_and_falls_back_to_workspace_path() {
         let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
         let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
         let missing = ws.join("does-not-exist");
 
@@ -2154,7 +2704,7 @@ mod tests {
             }
         });
         assert_eq!(precheck_workspace(&persisted_session), ws.as_path());
-        let (_summary, record) = run_clash_precheck(&persisted_session).await.expect(
+        let (_summary, record) = run_clash_precheck(&store, &persisted_session).await.expect(
             "precheck should resolve persisted project_path even when _workspace_path is missing",
         );
         assert_eq!(record["deterministic"], true);
@@ -2171,7 +2721,7 @@ mod tests {
             }
         });
         assert_eq!(precheck_workspace(&transient_session), ws.as_path());
-        let (_fallback_summary, fallback_record) = run_clash_precheck(&transient_session)
+        let (_fallback_summary, fallback_record) = run_clash_precheck(&store, &transient_session)
             .await
             .expect("precheck should fall back to _workspace_path");
         assert_eq!(fallback_record["deterministic"], true);
@@ -2184,7 +2734,7 @@ mod tests {
                 "precheck": {"argv": echo_argv("unreachable"), "timeout_seconds": 10}
             }
         });
-        assert!(run_clash_precheck(&missing_session).await.is_none());
+        assert!(run_clash_precheck(&store, &missing_session).await.is_none());
     }
 
     #[test]
@@ -2209,7 +2759,11 @@ mod tests {
         assert_eq!(summary.total_runs, 4);
         assert_eq!(summary.schema_error_runs, 2);
         assert_eq!(summary.deopt_runs, 2);
-        assert!((summary.schema_error_rate - 0.5).abs() < 1e-6);
+        assert!(
+            summary.schema_error_rate > 0.25 && summary.schema_error_rate < 0.45,
+            "smoothed recency rate after 2 old failures + 2 passes should be moderated: {}",
+            summary.schema_error_rate
+        );
         assert!(
             summary
                 .warnings
@@ -2217,6 +2771,51 @@ mod tests {
                 .any(|w| w.contains("schema error rate"))
         );
         assert!(summary.warnings.iter().any(|w| w.contains("ROI/deopt")));
+
+        // Compare against recent failures (2 old passes then 2 recent failures) -> strictly higher!
+        for i in 0..4 {
+            record_workflow_health(
+                &store,
+                "fleet",
+                "claude",
+                Some("sonnet"),
+                &format!("run-recent-{i}"),
+                if i >= 2 { "schema_error" } else { "completed" },
+                i >= 2,
+                i >= 2,
+                Some(0.05),
+                1.2,
+            );
+        }
+        let recent_fail = summarize_workflow_health(&store, "fleet", "claude", Some("sonnet"));
+        assert!(
+            recent_fail.schema_error_rate > summary.schema_error_rate + 0.08,
+            "recent failures ({}) must weigh more heavily than stale failures ({})",
+            recent_fail.schema_error_rate,
+            summary.schema_error_rate
+        );
+        assert_eq!(recent_fail.recommended_clash_rounds(3), 1);
+        assert_eq!(recent_fail.recommended_fleet_concurrency(4), 1);
+
+        // Recovery streak clears warnings and restores full rounds & concurrency.
+        for i in 0..10 {
+            record_workflow_health(
+                &store,
+                "fleet",
+                "claude",
+                Some("sonnet"),
+                &format!("run-recover-{i}"),
+                "completed",
+                false,
+                false,
+                Some(0.02),
+                0.9,
+            );
+        }
+        let recovered = summarize_workflow_health(&store, "fleet", "claude", Some("sonnet"));
+        assert!(recovered.warnings.is_empty(), "{:?}", recovered.warnings);
+        assert_eq!(recovered.recommended_clash_rounds(3), 3);
+        assert_eq!(recovered.recommended_fleet_concurrency(4), 4);
     }
 
     #[tokio::test]
@@ -2257,6 +2856,7 @@ mod tests {
 
         // Inside 2s RACY_NS window: never hits or populates cache.
         let racy_rec = run_precheck_sandboxed_at(
+            None,
             &ws,
             &precheck,
             max_mtime + PRECHECK_RACY_NS - 1,
@@ -2270,15 +2870,16 @@ mod tests {
 
         // Outside RACY_NS window: first run computes and caches, second hits cache.
         let settled_now = max_mtime + PRECHECK_RACY_NS + 100;
-        let first = run_precheck_sandboxed_at(&ws, &precheck, settled_now, Some(&run_local))
+        let first = run_precheck_sandboxed_at(None, &ws, &precheck, settled_now, Some(&run_local))
             .await
             .unwrap();
         assert_eq!(first["ok"], true);
         assert_eq!(first["cached"], false);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let second = run_precheck_sandboxed_at(&ws, &precheck, settled_now + 50, Some(&run_local))
-            .await
-            .unwrap();
+        let second =
+            run_precheck_sandboxed_at(None, &ws, &precheck, settled_now + 50, Some(&run_local))
+                .await
+                .unwrap();
         assert_eq!(second["cached"], true);
         assert_eq!(second["summary"], first["summary"]);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -2288,6 +2889,7 @@ mod tests {
         let (_, new_mtime) =
             precheck_workspace_stamp(&infra_core::fs::canonicalize(&ws).unwrap()).unwrap();
         let after_edit = run_precheck_sandboxed_at(
+            None,
             &ws,
             &precheck,
             new_mtime + PRECHECK_RACY_NS + 100,
@@ -2298,5 +2900,154 @@ mod tests {
         assert_eq!(after_edit["ok"], true);
         assert_eq!(after_edit["cached"], false);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn precheck_persists_deterministic_failures_in_sqlite_and_scopes_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let ws = dir.path().join("ws-scoped");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let target = ws.join("src/target.php");
+        let unrelated = ws.join("src/unrelated.php");
+        std::fs::write(&target, "<?php broken(").unwrap();
+        std::fs::write(&unrelated, "<?php echo 1;").unwrap();
+
+        let argv = vec!["php".into(), "-l".into(), "src/target.php".into()];
+        let ws_canon = infra_core::fs::canonicalize(&ws).unwrap();
+        let (digest_before, max_mtime, strategy) =
+            precheck_workspace_stamp_scoped(&ws_canon, &argv, Some(&store)).unwrap();
+        assert_eq!(strategy, PrecheckStampStrategy::ScopedFiles);
+
+        // Editing an unrelated sibling file must NOT perturb the scoped stamp for `php -l src/target.php`.
+        std::fs::write(&unrelated, "<?php echo 2;").unwrap();
+        let (digest_after_unrelated, _, _) =
+            precheck_workspace_stamp_scoped(&ws_canon, &argv, Some(&store)).unwrap();
+        assert_eq!(digest_before, digest_after_unrelated);
+
+        // Editing the target file DOES invalidate the scoped stamp.
+        std::fs::write(&target, "<?php still broken(").unwrap();
+        let (digest_after_target, max_mtime2, _) =
+            precheck_workspace_stamp_scoped(&ws_canon, &argv, Some(&store)).unwrap();
+        assert_ne!(digest_before, digest_after_target);
+
+        let fail_argv = json!({
+            "argv": ["php", "-l", "src/target.php"],
+            "timeout_seconds": 10
+        });
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let fail_det =
+            move |_cmd: &[String],
+                  _cwd: &std::path::Path,
+                  _env: &std::collections::BTreeMap<String, String>| {
+                calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((255, "Parse error: syntax error in src/target.php".into()))
+            };
+        let settled = max_mtime.max(max_mtime2) + PRECHECK_RACY_NS + 500;
+        let first_fail =
+            run_precheck_sandboxed_at(Some(&store), &ws, &fail_argv, settled, Some(&fail_det))
+                .await
+                .unwrap();
+        assert_eq!(first_fail["ok"], false);
+        assert_eq!(first_fail["exit_code"], 255);
+        assert_eq!(first_fail["cached"], false);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call (including after L1 eviction) hits deterministic failure cache in SQLite!
+        let second_fail = run_precheck_sandboxed_at(
+            Some(&store),
+            &ws,
+            &fail_argv,
+            settled + 100,
+            Some(&fail_det),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_fail["ok"], false);
+        assert_eq!(second_fail["exit_code"], 255);
+        assert_eq!(second_fail["cached"], true);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Transient infrastructure error (`Err(...)`, `code: None`) is NEVER cached.
+        let calls_err = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_err_ref = calls_err.clone();
+        let transient_err =
+            move |_cmd: &[String],
+                  _cwd: &std::path::Path,
+                  _env: &std::collections::BTreeMap<String, String>| {
+                calls_err_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("sandbox timed out".to_owned())
+            };
+        let transient_pre = json!({
+            "argv": ["php", "-l", "src/unrelated.php"],
+            "timeout_seconds": 10
+        });
+        let r1 = run_precheck_sandboxed_at(
+            Some(&store),
+            &ws,
+            &transient_pre,
+            settled,
+            Some(&transient_err),
+        )
+        .await
+        .unwrap();
+        let r2 = run_precheck_sandboxed_at(
+            Some(&store),
+            &ws,
+            &transient_pre,
+            settled + 10,
+            Some(&transient_err),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1["ok"], false);
+        assert!(r1["exit_code"].is_null());
+        assert_eq!(r2["cached"], false);
+        assert_eq!(calls_err.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn clash_prelaunch_health_clamps_excessive_rounds_and_emits_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        for i in 0..4 {
+            record_workflow_health(
+                &store,
+                "clash",
+                "codex",
+                None,
+                &format!("c-{i}"),
+                "schema_error",
+                true,
+                true,
+                None,
+                1.0,
+            );
+        }
+        let session = json!({
+            "id": "s-1",
+            "provider": "codex",
+            "model": null,
+            "thinking_effort": null,
+            "clash": {
+                "challenger": "claude",
+                "rounds": 3,
+                "challenger_model": null,
+                "challenger_thinking_effort": null
+            }
+        });
+        let mut state = new_state(&session, "review", None);
+        assert_eq!(state["rounds"], 3);
+        let warnings = apply_prelaunch_health_policy(&store, &mut state, "codex", "claude");
+        assert_eq!(state["rounds"], 1);
+        assert!(
+            warnings.iter().any(|w| w.contains("Clamped Clash rounds")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("schema error rate")),
+            "{warnings:?}"
+        );
     }
 }
