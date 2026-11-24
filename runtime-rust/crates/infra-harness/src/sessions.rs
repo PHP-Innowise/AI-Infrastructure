@@ -3060,6 +3060,11 @@ impl Sessions {
         } else {
             crate::skillcache::trace::ObservationStrategy::None
         };
+        let _inflight_snapshot = (!matches!(
+            obs_strategy,
+            crate::skillcache::trace::ObservationStrategy::None
+        ))
+        .then(|| crate::skillcache::snapshot::pin_inflight(&self.store.state, &job.generation));
         let pre_turn_obs = match obs_strategy {
             crate::skillcache::trace::ObservationStrategy::Full => {
                 // A capsule compiled from this turn is replayed on the workspace
@@ -3580,11 +3585,9 @@ impl Sessions {
         // A snapshot lives exactly as long as the trace it belongs to.
         let mut auto_queued = None;
         if event["phase"] == "observed" {
-            let kept = self
-                .store
-                .connection()
-                .and_then(|db| crate::skillcache::db::trace_generations(&db));
-            if let Ok(kept) = kept {
+            if let Ok(db) = self.store.connection()
+                && let Ok(kept) = crate::skillcache::db::trace_generations(&db)
+            {
                 crate::skillcache::snapshot::collect(&self.store.state, &kept);
             }
             auto_queued = crate::skillcache::maybe_enqueue_after_observe(

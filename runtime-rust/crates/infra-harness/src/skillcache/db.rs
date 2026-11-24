@@ -751,11 +751,34 @@ pub(crate) fn save_trace(db: &Connection, row: &TraceRow<'_>) -> Result<String> 
     Ok(digest)
 }
 
-/// The launches whose traces are stored: what keeps a snapshot alive.
+/// The launches whose traces are stored or currently in-flight: what keeps a snapshot alive.
 pub(crate) fn trace_generations(db: &Connection) -> Result<Vec<String>> {
     let mut query = db.prepare("SELECT generation FROM skillcache_traces")?;
     let rows = query.query_map([], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    let mut generations: BTreeSet<String> =
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    let has_active_launch_tables: bool = db
+        .query_row(
+            "SELECT COUNT(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('launches','sessions')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_active_launch_tables {
+        let mut active = db.prepare(
+            "SELECT l.id FROM launches l
+             JOIN sessions s ON s.id = l.session_id
+             WHERE l.status IN ('queued','running')
+               AND s.status IN ('queued','running')",
+        )?;
+        for generation in active
+            .query_map([], |row| row.get::<_, String>(0))?
+            .flatten()
+        {
+            generations.insert(generation);
+        }
+    }
+    Ok(generations.into_iter().collect())
 }
 
 fn trace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {

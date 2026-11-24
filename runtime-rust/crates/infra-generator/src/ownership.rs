@@ -621,6 +621,35 @@ const DEFAULT_PACKAGE_MANIFESTS: &[&str] = &[
     "Cargo.toml",
 ];
 
+fn watched_glob_matches_or_prefixes(glob: &str, rel: &str) -> Result<bool> {
+    if crate::coverage::matches(glob, "file", rel)? || crate::coverage::matches(glob, "tree", rel)?
+    {
+        return Ok(true);
+    }
+    let trimmed = glob.trim().trim_end_matches('/');
+    let g_parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+    let r_parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if r_parts.is_empty() || g_parts.is_empty() {
+        return Ok(false);
+    }
+    if g_parts[0] == "**" {
+        return Ok(true);
+    }
+    if r_parts.len() > g_parts.len() {
+        return Ok(false);
+    }
+    for (idx, r_seg) in r_parts.iter().enumerate() {
+        let g_seg = g_parts[idx];
+        if g_seg == "**" {
+            return Ok(true);
+        }
+        if !crate::coverage::matches(g_seg, "file", r_seg)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn walk_watched_target_files(
     target: &Path,
     watched_globs: &[String],
@@ -637,28 +666,31 @@ fn walk_watched_target_files(
         for entry in entries {
             let path = entry.path();
             let meta = std::fs::symlink_metadata(&path)?;
-            if fs::linked(&meta) {
-                if meta.is_file() || meta.is_dir() {
-                    let rel = relative(target, &path)?;
-                    if watched_globs
-                        .iter()
-                        .any(|g| crate::coverage::matches(g, "file", &rel).unwrap_or(false))
-                    {
-                        return Err(RuntimeError::policy(format!(
-                            "watched dependency path contains symlink: {rel}"
-                        )));
-                    }
-                }
-                continue;
-            }
             let rel = relative(target, &path)?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
+            let ignored_dir_name = matches!(
+                name_str.as_ref(),
+                ".git" | "vendor" | "node_modules" | "target"
+            );
+            if fs::linked(&meta) || fs::linked_at(&path, &meta)? {
+                let explicitly_watched = !ignored_dir_name
+                    || watched_globs
+                        .iter()
+                        .any(|g| g.trim_start_matches('/').starts_with(name_str.as_ref()));
+                if explicitly_watched
+                    && watched_globs
+                        .iter()
+                        .any(|g| watched_glob_matches_or_prefixes(g, &rel).unwrap_or(true))
+                {
+                    return Err(RuntimeError::policy(format!(
+                        "watched dependency path contains symlink: {rel}"
+                    )));
+                }
+                continue;
+            }
             if meta.is_dir() {
-                if matches!(
-                    name_str.as_ref(),
-                    ".git" | "vendor" | "node_modules" | "target"
-                ) {
+                if ignored_dir_name {
                     continue;
                 }
                 pending.push(path);
@@ -689,15 +721,25 @@ fn hash_dependency_surface(
     for mf in &dep.manifest_files {
         let rel = normalize(mf)?;
         let path = confined(&target, &rel)?;
-        if path.is_file() {
-            let bytes = fs::read_regular(&path)?;
-            hashes.insert(rel, sha(&bytes));
-        } else if path.exists() {
-            return Err(RuntimeError::policy(format!(
-                "manifest dependency is not a regular file: {rel}"
-            )));
-        } else {
-            hashes.insert(rel, "__absent__".into());
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if fs::linked(&meta) || fs::linked_at(&path, &meta)? {
+                    return Err(RuntimeError::policy(format!(
+                        "manifest dependency path contains symlink: {rel}"
+                    )));
+                }
+                if !meta.is_file() {
+                    return Err(RuntimeError::policy(format!(
+                        "manifest dependency is not a regular file: {rel}"
+                    )));
+                }
+                let bytes = fs::read_regular(&path)?;
+                hashes.insert(rel, sha(&bytes));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                hashes.insert(rel, "__absent__".into());
+            }
+            Err(err) => return Err(err.into()),
         }
     }
     Ok(hashes)
@@ -1173,6 +1215,69 @@ mod manifest_stamp_tests {
         assert_eq!(
             post_staging["pending_slices"],
             object!([".codex/skills/orders/SKILL.md"])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_manifests_fail_closed_on_watched_symlinks_and_dangling_manifests() {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-dep-symlinks-{}",
+            infra_core::domain::uuid4()
+        ));
+        let target = dir.join("target");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(target.join(".codex/skills/orders")).unwrap();
+        std::fs::create_dir_all(target.join("src/Orders")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(target.join("src/Orders/Order.php"), "<?php\n").unwrap();
+        std::fs::write(outside.join("Secret.php"), "<?php\n").unwrap();
+        let orders_skill = b"# Orders skill\n";
+        std::fs::write(target.join(".codex/skills/orders/SKILL.md"), orders_skill).unwrap();
+
+        // 1. Symlinked file inside watched_globs fails closed.
+        std::os::unix::fs::symlink(
+            outside.join("Secret.php"),
+            target.join("src/Orders/Link.php"),
+        )
+        .unwrap();
+        let dep_file_link = ArtifactDependencyManifest {
+            skill_paths: vec![".codex/skills/orders/SKILL.md".into()],
+            watched_globs: vec!["src/Orders/**".into()],
+            manifest_files: vec![],
+            path_hashes: BTreeMap::new(),
+        };
+        let err = hash_dependency_surface(&target, &dep_file_link).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+        std::fs::remove_file(target.join("src/Orders/Link.php")).unwrap();
+
+        // 2. Symlinked directory shadowing watched_globs prefix fails closed.
+        std::fs::remove_dir_all(target.join("src/Orders")).unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("src/Orders")).unwrap();
+        let err_dir = hash_dependency_surface(&target, &dep_file_link).unwrap_err();
+        assert!(err_dir.to_string().contains("symlink"), "got: {err_dir}");
+        std::fs::remove_file(target.join("src/Orders")).unwrap();
+        std::fs::create_dir_all(target.join("src/Orders")).unwrap();
+        std::fs::write(target.join("src/Orders/Order.php"), "<?php\n").unwrap();
+
+        // 3. Dangling symlink at manifest_files fails closed instead of recording "__absent__".
+        std::os::unix::fs::symlink(
+            outside.join("missing-composer.json"),
+            target.join("composer.json"),
+        )
+        .unwrap();
+        let dep_manifest_link = ArtifactDependencyManifest {
+            skill_paths: vec![".codex/skills/orders/SKILL.md".into()],
+            watched_globs: vec!["src/Orders/**".into()],
+            manifest_files: vec!["composer.json".into()],
+            path_hashes: BTreeMap::new(),
+        };
+        let err_mf = hash_dependency_surface(&target, &dep_manifest_link).unwrap_err();
+        assert!(
+            err_mf.to_string().contains("symlink") || err_mf.to_string().contains("Linked"),
+            "got: {err_mf}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

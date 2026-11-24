@@ -621,24 +621,72 @@ pub fn runtime_profile(
         network: true,
     })
 }
-/// Hashes the normalized sandbox profile and discovery launch identity so any boundary,
-/// account, runtime, protected root, or selected service change triggers a fail-closed full rescan.
+fn normalize_boundary_path(path: &Path, workspace: &Path, run_dir: Option<&Path>) -> String {
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        let rel = rel.display().to_string();
+        return if rel.is_empty() {
+            "$workspace".into()
+        } else {
+            format!("$workspace/{rel}")
+        };
+    }
+    if let Some(run_dir) = run_dir
+        && let Ok(rel) = path.strip_prefix(run_dir)
+    {
+        let rel = rel.display().to_string();
+        return if rel.is_empty() {
+            "$run_dir".into()
+        } else {
+            format!("$run_dir/{rel}")
+        };
+    }
+    format!("abs:{}", path.display())
+}
+
+fn discovery_state_scope(workspace: &Path) -> Option<PathBuf> {
+    for ancestor in workspace.ancestors() {
+        if ancestor.file_name().and_then(|s| s.to_str()) == Some("system-discovery") {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Hashes the normalized structural sandbox profile and discovery launch identity so any boundary,
+/// account, runtime, protected root, or selected service change triggers a fail-closed full rescan,
+/// without encoding the ephemeral per-run `<rid>` directory name.
 pub(crate) fn sandbox_boundary_sha256(
     spec: &infra_host::sandbox::Spec,
     provider: &str,
     executable: &Path,
     ids: &[String],
 ) -> Result<String> {
+    let run_dir = (spec.workspace.file_name().and_then(|s| s.to_str()) == Some("agent"))
+        .then(|| spec.workspace.parent())
+        .flatten();
+    let readable: Vec<String> = spec
+        .readable
+        .iter()
+        .map(|p| normalize_boundary_path(p, &spec.workspace, run_dir))
+        .collect();
+    let evidence = spec
+        .evidence
+        .as_ref()
+        .map(|p| normalize_boundary_path(p, &spec.workspace, run_dir));
+    let target = (spec.target != spec.workspace)
+        .then(|| normalize_boundary_path(&spec.target, &spec.workspace, run_dir));
     let canonical = infra_core::domain::json::canonical(&object!({
         "provider": provider,
         "executable": executable,
-        "workspace": spec.workspace,
+        "discovery_state_scope": discovery_state_scope(&spec.workspace),
+        "target_matches_workspace": spec.target == spec.workspace,
+        "target": target,
         "protected": spec.protected,
-        "readable": spec.readable,
+        "readable": readable,
         "accounts": spec.accounts,
         "runtime": spec.runtime,
         "codex": spec.codex,
-        "evidence": spec.evidence,
+        "evidence": evidence,
         "network": spec.network,
         "ids": ids,
     }))?;
@@ -1497,6 +1545,26 @@ mod tests {
         assert_eq!(proposal["editor"]["name"], "Shop");
         assert!(run1_dir.join("proposal.json").is_file());
 
+        let spec2 = infra_host::sandbox::Spec {
+            workspace: run2_dir.join("agent"),
+            target: run2_dir.join("agent"),
+            protected: vec![sys_root.clone(), svc_a.clone()],
+            readable: vec![],
+            accounts: vec![base.join(".codex")],
+            runtime: vec![base.join("bin")],
+            codex: None,
+            evidence: Some(run2_dir.join("agent/evidence")),
+            network: true,
+        };
+        let b_run2 = sandbox_boundary_sha256(
+            &spec2,
+            "codex",
+            Path::new("/usr/bin/codex"),
+            &["svc-a".into()],
+        )
+        .unwrap();
+        assert_eq!(b1, b_run2);
+
         let ids = vec!["svc-a".to_string()];
         let future_now = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1510,7 +1578,7 @@ mod tests {
             &ids,
             &index,
             "codex",
-            &b1,
+            &b_run2,
             future_now,
         )
         .unwrap();
@@ -1525,7 +1593,7 @@ mod tests {
             &cached,
             &index,
             "codex",
-            &b1,
+            &b_run2,
         )
         .unwrap();
         assert!(run2_dir.join("proposal.json").is_file());

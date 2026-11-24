@@ -13,7 +13,8 @@ use crate::{
     HarnessError, Result,
     commands::ResolvedCommand,
     skillcache::{
-        compile::Runtime, db, settings, staleness_for_warm_candidate, staleness_in_state, trace,
+        compile::Runtime, db, settings, staleness_for_warm_candidate_in_project,
+        staleness_in_project, trace,
     },
     store::SessionStore,
 };
@@ -802,7 +803,13 @@ fn decide_toolchain_candidate(
             let cap_tree = capsule["tool_chain_tree_sha"].as_str().unwrap_or("");
             !cap_tree.is_empty()
                 && now_tree_sha.as_deref() == Some(cap_tree)
-                && staleness_in_state(Some(&runtime.store.state), capsule, workspace).is_none()
+                && staleness_in_project(
+                    Some(&runtime.store.state),
+                    Some(project_id),
+                    capsule,
+                    workspace,
+                )
+                .is_none()
         })
         .collect();
     let hint = settings::skill_hint(session);
@@ -849,7 +856,13 @@ fn decide_toolchain_candidate(
     let fresh: Vec<Value> = eligible
         .iter()
         .filter(|capsule| {
-            staleness_in_state(Some(&runtime.store.state), capsule, workspace).is_none()
+            staleness_in_project(
+                Some(&runtime.store.state),
+                Some(project_id),
+                capsule,
+                workspace,
+            )
+            .is_none()
         })
         .cloned()
         .collect();
@@ -1352,8 +1365,9 @@ fn decide_for_inner(
                 .into_iter()
                 .filter(|cap| {
                     cap["project_id"] == project_id
-                        || staleness_for_warm_candidate(
+                        || staleness_for_warm_candidate_in_project(
                             Some(&runtime.store.state),
+                            Some(project_id),
                             cap,
                             workspace,
                             Some(&skill_path),
@@ -1416,13 +1430,29 @@ fn decide_for_inner(
         } else {
             eligible
         };
-        let local_eligible: Vec<Value> = eligible
+        let fresh: Vec<Value> = eligible
+            .iter()
+            .filter(|capsule| {
+                capsule["project_id"] != project_id
+                    || staleness_for_warm_candidate_in_project(
+                        Some(&runtime.store.state),
+                        Some(project_id),
+                        capsule,
+                        workspace,
+                        (!skill_path.is_empty()).then_some(skill_path.as_str()),
+                    )
+                    .is_none()
+            })
+            .cloned()
+            .collect();
+        let base_pool = if fresh.is_empty() { &eligible } else { &fresh };
+        let local_eligible: Vec<Value> = base_pool
             .iter()
             .filter(|capsule| capsule["project_id"] == project_id)
             .cloned()
             .collect();
         let ranked_eligible = if local_eligible.is_empty() {
-            &eligible
+            base_pool
         } else {
             &local_eligible
         };
@@ -1464,8 +1494,9 @@ fn decide_for_inner(
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
     let is_local_capsule = chosen["project_id"].as_str() == Some(project_id);
-    if let Some(reason) = staleness_for_warm_candidate(
+    if let Some(reason) = staleness_for_warm_candidate_in_project(
         Some(&runtime.store.state),
+        Some(project_id),
         &chosen,
         workspace,
         (!skill_path.is_empty()).then_some(skill_path.as_str()),
@@ -5514,6 +5545,27 @@ mod tests {
             ),
         }
 
+        // Remove `.claude` in `wt2` so `wt2` is truly mirror-only (only `.agents/skills/pdf/SKILL.md`),
+        // and verify mirror fallback resolves `.agents` even when `.claude` is absent on disk.
+        std::fs::remove_dir_all(wt2.join(".claude")).unwrap();
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2-mirror-only"),
+            &sk_route,
+            "$pdf extract",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-sk"),
+            other_dec => panic!(
+                "expected mirror-only sibling hit without `.claude`, got {}",
+                reason(&other_dec)
+            ),
+        }
+        // Restore `.claude` in `wt2` before subsequent tree-drift assertions.
+        std::fs::create_dir_all(wt2.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt2.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+
         // 2. Unrelated repo `other` (`pid3`) with different `git_common_dir` MUST stay strictly isolated!
         assert_eq!(
             reason(&decide_for(
@@ -5578,6 +5630,164 @@ mod tests {
                 db::capsule(&db, "cap-wt-sk").unwrap().unwrap()["status"],
                 "active"
             );
+        }
+    }
+
+    #[test]
+    fn stale_local_capsule_does_not_shadow_fresh_sibling_capsule() {
+        let root = tempfile::tempdir().unwrap();
+        let wt1 = root.path().join("wt1");
+        let wt2 = root.path().join("wt2");
+        let skill_md = "---\nname: pdf\ndescription: Extract PDF rows\n---\n# PDF\n";
+        std::fs::create_dir_all(wt1.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt1.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "base"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let skill_tree_sha =
+            infra_skillcache::fingerprint::tree_sha256(&wt1.join(".claude/skills/pdf"))
+                .unwrap()
+                .sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+        let sk_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "pdf", "description": "Extract PDF rows"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}]},
+        })).unwrap();
+        let sib_root = root.path().join("artifacts/sib-fresh");
+        let sib_pkg = infra_skillcache::package::write_warm(
+            &sib_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract.\n"),
+            &Default::default(),
+        )
+        .unwrap();
+        let stale_root = root.path().join("artifacts/local-stale");
+        let _ = infra_skillcache::package::write_warm(
+            &stale_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract.\n"),
+            &Default::default(),
+        )
+        .unwrap();
+        let common = db::canonical_git_common_dir(&wt1);
+        {
+            let db = store.connection().unwrap();
+            let skill_files = json!({"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha, "taken_ns": "0", "files": []}]});
+            db::begin_capsule(
+                &db,
+                "cap-sib-fresh",
+                "cmp-sib",
+                &pid1,
+                "s1",
+                "g1",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-sib-fresh",
+                    mu_name: "pdf",
+                    mu_description: "Extract PDF rows",
+                    form: "textual",
+                    capsule_sha256: "sib",
+                    package_sha256: &sib_pkg,
+                    skill_files: &skill_files,
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: sib_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-sib-fresh", common.as_deref()).unwrap();
+
+            db::begin_capsule(
+                &db,
+                "cap-local-stale",
+                "cmp-loc",
+                &pid2,
+                "s2",
+                "g2",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-local-stale",
+                    mu_name: "pdf",
+                    mu_description: "Extract PDF rows",
+                    form: "textual",
+                    capsule_sha256: "loc",
+                    package_sha256: "stale-package-sha-mismatch",
+                    skill_files: &skill_files,
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: stale_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-local-stale", common.as_deref()).unwrap();
+        }
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let sess = json!({
+            "id": "s-wt2",
+            "project_id": pid2,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "auto",
+            "skillcache": {"mode": "warm_only"},
+        });
+        match decide_for(&rt, &sess, &route, "$pdf extract", &wt2, None) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-sib-fresh"),
+            other => panic!(
+                "expected fresh sibling hit on turn 1, got {}",
+                reason(&other)
+            ),
         }
     }
 }

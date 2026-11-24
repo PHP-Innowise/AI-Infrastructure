@@ -35,6 +35,7 @@ struct InventoryTreeStamp {
     gitattributes: InventoryFileStamp,
     git_index: InventoryFileStamp,
     git_config: InventoryFileStamp,
+    git_common_config: InventoryFileStamp,
     engine: InventoryFileStamp,
     base_dir: InventoryFileStamp,
     sources: Vec<(PathBuf, InventoryFileStamp)>,
@@ -122,7 +123,7 @@ fn stat_settled_entry(
 fn capture_git_admin_stamps(
     base: &Path,
     now_ns: i128,
-) -> Option<(InventoryFileStamp, InventoryFileStamp)> {
+) -> Option<(InventoryFileStamp, InventoryFileStamp, InventoryFileStamp)> {
     let canonical = infra_core::fs::canonicalize(base).ok()?;
     let mut checkout = None;
     for ancestor in canonical.ancestors() {
@@ -153,7 +154,7 @@ fn capture_git_admin_stamps(
             ctime_ns: 0,
             mode: 0,
         };
-        return Some((absent.clone(), absent));
+        return Some((absent.clone(), absent.clone(), absent));
     };
     let frame = infra_core::git::GitFrame::discover(&canonical).ok()??;
     if frame.top != checkout {
@@ -161,7 +162,19 @@ fn capture_git_admin_stamps(
     }
     let idx = stat_settled_entry(&frame.admin.join("index"), now_ns, true, false)?;
     let cfg = stat_settled_entry(&frame.admin.join("config"), now_ns, true, false)?;
-    Some((idx, cfg))
+    let common_dir = frame.common_dir().ok()?;
+    let common_cfg = if common_dir != frame.admin {
+        stat_settled_entry(&common_dir.join("config"), now_ns, true, false)?
+    } else {
+        InventoryFileStamp {
+            exists: false,
+            len: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            mode: 0,
+        }
+    };
+    Some((idx, cfg, common_cfg))
 }
 
 fn verify_cached_inventory_stamp(
@@ -184,10 +197,14 @@ fn verify_cached_inventory_stamp(
     if gitattributes != expected.gitattributes {
         return false;
     }
-    let Some((git_index, git_config)) = capture_git_admin_stamps(base, now_ns) else {
+    let Some((git_index, git_config, git_common_config)) = capture_git_admin_stamps(base, now_ns)
+    else {
         return false;
     };
-    if git_index != expected.git_index || git_config != expected.git_config {
+    if git_index != expected.git_index
+        || git_config != expected.git_config
+        || git_common_config != expected.git_common_config
+    {
         return false;
     }
     let Some(engine) = stat_settled_entry(engine_path, now_ns, false, false) else {
@@ -216,7 +233,7 @@ fn capture_inventory_stamp(
 ) -> Option<InventoryTreeStamp> {
     let inv_json = stat_settled_entry(inv_json_path, now_ns, false, false)?;
     let gitattributes = stat_settled_entry(&base.join(".gitattributes"), now_ns, true, false)?;
-    let (git_index, git_config) = capture_git_admin_stamps(base, now_ns)?;
+    let (git_index, git_config, git_common_config) = capture_git_admin_stamps(base, now_ns)?;
     let engine = stat_settled_entry(engine_path, now_ns, false, false)?;
     let base_dir = stat_settled_entry(base, now_ns, false, true)?;
     let mut seen = BTreeSet::new();
@@ -235,6 +252,7 @@ fn capture_inventory_stamp(
         gitattributes,
         git_index,
         git_config,
+        git_common_config,
         engine,
         base_dir,
         sources,
@@ -2872,8 +2890,16 @@ mod rollback_attention_tests {
         }
     }
 
+    fn inventory_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn installer_inventory_memoizes_by_settled_inventory_and_edition_tree_stamps() {
+        let _guard = inventory_test_lock();
         let dir = crate::temp::Temporary::new("infra-installer-memo").unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("install/inventories")).unwrap();
@@ -2971,6 +2997,117 @@ mod rollback_attention_tests {
         assert_eq!(
             inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
             before + 4
+        );
+    }
+
+    #[test]
+    fn installer_inventory_invalidates_on_linked_worktree_common_config_change() {
+        let _guard = inventory_test_lock();
+        let dir = crate::temp::Temporary::new("infra-installer-wt-cfg").unwrap();
+        let main_repo = dir.path().join("main");
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(main_repo.join("install/inventories")).unwrap();
+        std::fs::create_dir_all(main_repo.join("PHP Core")).unwrap();
+        std::fs::write(main_repo.join("PHP Core/AGENTS.md"), "# Policy\n").unwrap();
+        let inv_json = json!({
+            "schema_version": 2,
+            "edition": "PHP Core",
+            "release": "1.0.0",
+            "excluded_tracked_paths": [],
+            "source_overrides": {},
+            "installed": {
+                "shared": ["AGENTS.md"],
+                "claude": [],
+                "cursor": [],
+                "codex": []
+            }
+        });
+        std::fs::write(
+            main_repo.join("install/inventories/php-core.json"),
+            serde_json::to_vec_pretty(&inv_json).unwrap(),
+        )
+        .unwrap();
+
+        let git = |cwd: &Path, args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&main_repo, &["init", "-q"]);
+        git(&main_repo, &["add", "."]);
+        git(&main_repo, &["commit", "-q", "-m", "init"]);
+        git(
+            &main_repo,
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+        );
+
+        let engine = dir.path().join("infra-engine");
+        std::fs::write(&engine, b"#!/bin/sh\necho engine\n").unwrap();
+        let installer = Installer::new(&worktree)
+            .unwrap()
+            .with_engine(&engine)
+            .unwrap();
+        let tools = vec!["claude".to_string()];
+
+        let (_, _, common_cfg_1) = capture_git_admin_stamps(&worktree, i128::MAX / 2).unwrap();
+        assert!(common_cfg_1.exists);
+        let max_stamp = [
+            stat_settled_entry(
+                &worktree.join("install/inventories/php-core.json"),
+                i128::MAX / 2,
+                false,
+                false,
+            )
+            .unwrap(),
+            stat_settled_entry(
+                &worktree.join("PHP Core/AGENTS.md"),
+                i128::MAX / 2,
+                false,
+                false,
+            )
+            .unwrap(),
+            stat_settled_entry(&engine, i128::MAX / 2, false, false).unwrap(),
+            common_cfg_1.clone(),
+        ]
+        .into_iter()
+        .map(|s| s.mtime_ns.max(s.ctime_ns))
+        .max()
+        .unwrap();
+
+        let settled_now = max_stamp + INVENTORY_RACY_NS + 10;
+        let before = inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed);
+        let _ = installer
+            .inventory_with_now("PHP Core", &tools, settled_now)
+            .unwrap();
+        let _ = installer
+            .inventory_with_now("PHP Core", &tools, settled_now + 5)
+            .unwrap();
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+
+        // Toggle core.fileMode in shared common_dir `.git/config`.
+        let common_cfg_path = main_repo.join(".git/config");
+        let mut cfg_bytes = std::fs::read_to_string(&common_cfg_path).unwrap();
+        cfg_bytes.push_str("\n[core]\n\tfilemode = false\n");
+        std::fs::write(&common_cfg_path, cfg_bytes).unwrap();
+        let common_cfg_2 =
+            stat_settled_entry(&common_cfg_path, i128::MAX / 2, false, false).unwrap();
+        let after_cfg_now = settled_now
+            .max(common_cfg_2.mtime_ns.max(common_cfg_2.ctime_ns) + INVENTORY_RACY_NS + 10);
+        let _ = installer
+            .inventory_with_now("PHP Core", &tools, after_cfg_now)
+            .unwrap();
+        assert_eq!(
+            inventory_live_builds().load(std::sync::atomic::Ordering::Relaxed),
+            before + 2,
+            "linked worktree common_dir config edit must invalidate inventory memo"
         );
     }
 }

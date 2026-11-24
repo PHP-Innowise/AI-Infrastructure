@@ -982,6 +982,7 @@ fn workspace_file_matches_sealed(
                 ));
             }
             if let Some((mtime_ns, ctime_ns, len, ino)) = meta_stamp
+                && now_ns.is_some_and(|now| stamp_is_settled(mtime_ns, ctime_ns, now))
                 && let Ok(mut guard) = read_only_workspace_cache().lock()
             {
                 let entry = ensure_workspace_entry(&mut guard, ws_canon);
@@ -1228,11 +1229,49 @@ fn check_read_only_capsule_program(
             }
         }
     }
-    let mut local_had_hybrid_capsules = false;
-    for (is_local, project_id) in candidate_projects {
-        if !is_local && is_runner && local_had_hybrid_capsules {
-            continue;
+    if is_runner {
+        let mut runner_saw_capsules = false;
+        for (_, project_id) in candidate_projects {
+            let Ok(capsules) = crate::skillcache::db::capsules(
+                &db,
+                &project_id,
+                None,
+                Some("active"),
+                Some("hybrid"),
+                false,
+                false,
+            ) else {
+                return Ok(false);
+            };
+            if capsules.is_empty() {
+                continue;
+            }
+            runner_saw_capsules = true;
+            for row in capsules {
+                let Some(pkg) = load_verified_sealed_capsule(&ws_canon, &db, &row) else {
+                    return Ok(false);
+                };
+                if pkg.capsule.programs.is_empty()
+                    || !pkg.capsule.programs.iter().all(|program| program.read_only)
+                {
+                    return Ok(false);
+                }
+                for (rel, sealed_bytes) in pkg
+                    .files
+                    .iter()
+                    .filter(|(rel, _)| rel.starts_with("programs/"))
+                {
+                    match workspace_file_matches_sealed(&ws_canon, rel, sealed_bytes) {
+                        Ok(()) => {}
+                        Err(err) if err.starts_with("program_symlink_refused:") => return Err(err),
+                        Err(_) => return Ok(false),
+                    }
+                }
+            }
         }
+        return Ok(runner_saw_capsules);
+    }
+    for (_, project_id) in candidate_projects {
         let Ok(capsules) = crate::skillcache::db::capsules(
             &db,
             &project_id,
@@ -1244,48 +1283,6 @@ fn check_read_only_capsule_program(
         ) else {
             continue;
         };
-        if is_local && !capsules.is_empty() {
-            local_had_hybrid_capsules = true;
-        }
-        if is_runner {
-            if capsules.is_empty() {
-                continue;
-            }
-            let mut all_verified_read_only = true;
-            for row in capsules {
-                let Some(pkg) = load_verified_sealed_capsule(&ws_canon, &db, &row) else {
-                    all_verified_read_only = false;
-                    break;
-                };
-                if pkg.capsule.programs.is_empty()
-                    || !pkg.capsule.programs.iter().all(|program| program.read_only)
-                {
-                    all_verified_read_only = false;
-                    break;
-                }
-                for (rel, sealed_bytes) in pkg
-                    .files
-                    .iter()
-                    .filter(|(rel, _)| rel.starts_with("programs/"))
-                {
-                    match workspace_file_matches_sealed(&ws_canon, rel, sealed_bytes) {
-                        Ok(()) => {}
-                        Err(err) if err.starts_with("program_symlink_refused:") => return Err(err),
-                        Err(_) => {
-                            all_verified_read_only = false;
-                            break;
-                        }
-                    }
-                }
-                if !all_verified_read_only {
-                    break;
-                }
-            }
-            if all_verified_read_only {
-                return Ok(true);
-            }
-            continue;
-        }
         for row in capsules {
             let Some(pkg) = load_verified_sealed_capsule(&ws_canon, &db, &row) else {
                 continue;
@@ -2915,5 +2912,109 @@ mod tests {
             Some("readonly:program:python3 programs/check.py")
         );
         let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn workspace_file_matches_sealed_does_not_cache_unsettled_racy_ns() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let v1 = b"print('v1')\n";
+        let v2 = b"print('v2')\n";
+        let file = ws.join("programs/probe.py");
+        std::fs::write(&file, v1).unwrap();
+
+        workspace_file_matches_sealed(&ws, "programs/probe.py", v1).unwrap();
+        {
+            let guard = read_only_workspace_cache().lock().unwrap();
+            let cached = guard
+                .workspaces
+                .get(&ws)
+                .is_some_and(|e| !e.verified_sealed_files.is_empty());
+            assert!(
+                !cached,
+                "unsettled file within RACY_NS must not be inserted into verified_sealed_files"
+            );
+        }
+        // Same-length immediate overwrite within RACY_NS must fail digest verification.
+        std::fs::write(&file, v2).unwrap();
+        let err = workspace_file_matches_sealed(&ws, "programs/probe.py", v1).unwrap_err();
+        assert!(err.starts_with("program_digest_mismatch:"), "got {err}");
+    }
+
+    #[test]
+    fn skillcache_run_multi_sibling_fails_closed_when_later_sibling_is_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let wt1 = root.join("wt1");
+        let wt2 = root.join("wt2");
+        let wt3 = root.join("wt3");
+        std::fs::create_dir_all(wt1.join("programs")).unwrap();
+        let prog_bytes = b"print('check')\n";
+        std::fs::write(wt1.join("programs/check.py"), prog_bytes).unwrap();
+        let git = |p: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(p)
+                    .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "init"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+        git(&wt1, &["worktree", "add", "-q", wt3.to_str().unwrap()]);
+
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _pid3 = store.register(&wt3).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (warm_ro, _) = seed_sealed_capsule(
+            &store,
+            &pid1,
+            "cap-sib-1-ro",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+        let (warm_rw, _) = seed_sealed_capsule(
+            &store,
+            &pid2,
+            "cap-sib-2-rw",
+            "programs/check.py",
+            prog_bytes,
+            false,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&wt3),
+                Some(&store),
+                "skillcache-run run",
+            )
+            .unwrap(),
+            None,
+            "skillcache-run must NOT auto-approve when a later sibling holds an active writable capsule"
+        );
+
+        let _ = infra_skillcache::package::remove(&warm_ro);
+        let _ = infra_skillcache::package::remove(&warm_rw);
     }
 }
