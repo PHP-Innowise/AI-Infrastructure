@@ -4267,7 +4267,19 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        let settled = mtime_a + PRECHECK_RACY_NS + 5_000;
+        let (_, mtime_b, _) = precheck_workspace_stamp_scoped(
+            &ws_canon,
+            &["php".into(), "-l".into(), "src/b.php".into()],
+            Some(&store),
+        )
+        .unwrap();
+        let (_, mtime_ws, _) = precheck_workspace_stamp_scoped(
+            &ws_canon,
+            &["cargo".into(), "check".into()],
+            Some(&store),
+        )
+        .unwrap();
+        let settled = mtime_a.max(mtime_b).max(mtime_ws) + PRECHECK_RACY_NS + 1_000_000;
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_ref = calls.clone();

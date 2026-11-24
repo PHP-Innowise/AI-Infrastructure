@@ -594,10 +594,10 @@ pub fn is_read_only_tool_name(name: &str) -> bool {
 }
 
 fn strip_workspace_prefix(workspace: &Path, ws_canon: Option<&Path>, raw: &str) -> Option<String> {
-    if !raw.starts_with('/') {
+    let candidate = Path::new(raw);
+    if !raw.starts_with('/') && !candidate.is_absolute() {
         return None;
     }
-    let candidate = Path::new(raw);
     if candidate
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
