@@ -187,6 +187,7 @@ pub(in crate::graph_map) fn render_embedded_surface(
     }
     let settled_cam = load_surface_camera(surface);
     record_surface_history(surface, &state, view, &settled_cam);
+    let painted_viewport = viewport_size(surface.canvas);
     let crumbs_id = format!("{prefix}-crumbs");
     let trail_html = surface_history_trail_html(surface);
     let mut crumbs_out = crumbs(view);
@@ -196,9 +197,11 @@ pub(in crate::graph_map) fn render_embedded_surface(
     html(&crumbs_id, &crumbs_out);
     dom::hidden(&crumbs_id, crumbs_out.trim().is_empty());
     sync_history_and_pin_controls(surface, &state);
-    if side_changed {
-        cam.needs_measure = true;
-        save_surface_camera(surface, &cam);
+    sync_surface_after_chrome_layout(surface, painted_viewport);
+    if side_changed && !viewport_size(surface.canvas).2 {
+        let mut latest = load_surface_camera(surface);
+        latest.needs_measure = true;
+        save_surface_camera(surface, &latest);
         dom::later(surface.refit_timer_key, 60, move || {
             refit_surface_if_visible(surface);
         });

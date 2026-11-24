@@ -3726,6 +3726,8 @@ pub(crate) mod canvas2d {
         static LAST_CAMERAS: RefCell<HashMap<String, Camera>> = RefCell::new(HashMap::new());
         static LAST_PAINT_STATE: RefCell<HashMap<String, LastPaintEntry>> =
             RefCell::new(HashMap::new());
+        static LAST_PAINTED_VIEWPORT: RefCell<HashMap<String, (u32, u32)>> =
+            RefCell::new(HashMap::new());
         static REPAINT_LISTENERS: RefCell<HashMap<String, Rc<dyn Fn()>>> =
             RefCell::new(HashMap::new());
         #[cfg(target_arch = "wasm32")]
@@ -3762,6 +3764,12 @@ pub(crate) mod canvas2d {
         #[cfg(target_arch = "wasm32")]
         if let Some(host) = dom::get(canvas_id) {
             let _ = host.set_attribute("data-dense", "true");
+            if host.scroll_left() != 0 {
+                host.set_scroll_left(0);
+            }
+            if host.scroll_top() != 0 {
+                host.set_scroll_top(0);
+            }
         }
     }
 
@@ -4003,6 +4011,9 @@ pub(crate) mod canvas2d {
         LAST_PAINT_STATE.with(|p| {
             p.borrow_mut().remove(canvas_id);
         });
+        LAST_PAINTED_VIEWPORT.with(|v| {
+            v.borrow_mut().remove(canvas_id);
+        });
         REPAINT_LISTENERS.with(|hooks| {
             hooks.borrow_mut().remove(canvas_id);
         });
@@ -4142,6 +4153,12 @@ pub(crate) mod canvas2d {
                 target: &web_sys::Node,
                 init: &JsValue,
             );
+
+            pub(super) type JsResizeObserver;
+            #[wasm_bindgen(constructor, js_class = ResizeObserver)]
+            pub(super) fn new(cb: &js_sys::Function) -> JsResizeObserver;
+            #[wasm_bindgen(method)]
+            pub(super) fn observe(this: &JsResizeObserver, target: &web_sys::Element);
         }
     }
 
@@ -4186,6 +4203,24 @@ pub(crate) mod canvas2d {
         dash_dot: js_sys::Array,
     }
 
+    /// Computes backed Canvas2D pixel dimensions `(target_w, target_h)` for a
+    /// laid-out CSS box `(css_w, css_h)` at clamped DPR `[1.0, 2.0]`.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn dense_bitmap_target_size(css_w: f64, css_h: f64, dpr: f64) -> Option<(u32, u32)> {
+        if !css_w.is_finite() || !css_h.is_finite() || css_w < 64.0 || css_h < 64.0 {
+            return None;
+        }
+        let clamped_dpr = if dpr.is_finite() {
+            dpr.clamp(1.0, 2.0)
+        } else {
+            1.0
+        };
+        Some((
+            ((css_w * clamped_dpr).round() as u32).max(1),
+            ((css_h * clamped_dpr).round() as u32).max(1),
+        ))
+    }
+
     #[cfg(target_arch = "wasm32")]
     struct ThemeWatcherHandles {
         _observer: wasm_ctx::JsMutationObserver,
@@ -4196,6 +4231,12 @@ pub(crate) mod canvas2d {
     }
 
     #[cfg(target_arch = "wasm32")]
+    struct ResizeWatcherHandle {
+        observer: wasm_ctx::JsResizeObserver,
+        _cb: Closure<dyn FnMut(js_sys::Array)>,
+    }
+
+    #[cfg(target_arch = "wasm32")]
     thread_local! {
         static PALETTE_THEME_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static RESOLVED_THEME_META: RefCell<Option<(u64, String, bool)>> = const { RefCell::new(None) };
@@ -4203,6 +4244,93 @@ pub(crate) mod canvas2d {
             RefCell::new(HashMap::new());
         static DASH_CACHE: RefCell<Option<DashArrays>> = const { RefCell::new(None) };
         static THEME_WATCHERS: RefCell<Option<ThemeWatcherHandles>> = const { RefCell::new(None) };
+        static RESIZE_WATCHER: RefCell<Option<ResizeWatcherHandle>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn measure_dense_canvas_box(
+        canvas_el: Option<&Element>,
+        canvas_id: &str,
+    ) -> Option<(f64, f64, f64, u32, u32)> {
+        let (mut vw, mut vh, measured) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
+        if !measured {
+            return None;
+        }
+        if let Some(el) = canvas_el {
+            let rect = el.get_bounding_client_rect();
+            if rect.width() >= 64.0 && rect.height() >= 64.0 {
+                vw = rect.width();
+                vh = rect.height();
+            }
+        }
+        let dpr = dom::window().device_pixel_ratio().clamp(1.0, 2.0);
+        let (target_w, target_h) = dense_bitmap_target_size(vw, vh, dpr)?;
+        Some((vw, vh, dpr, target_w, target_h))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn repaint_resized_canvases(entries: &js_sys::Array) {
+        let mut pending: Vec<(String, LastPaintEntry)> = Vec::new();
+        for entry in entries.iter() {
+            let Ok(target_val) = js_sys::Reflect::get(&entry, &"target".into()) else {
+                continue;
+            };
+            let Ok(host) = target_val.dyn_into::<Element>() else {
+                continue;
+            };
+            let id = host.id();
+            if id.is_empty() {
+                continue;
+            }
+            let Some(paint_state) = LAST_PAINT_STATE.with(|p| p.borrow().get(&id).copied()) else {
+                continue;
+            };
+            let canvas_el = host
+                .query_selector("canvas[data-dense-canvas='true']")
+                .ok()
+                .flatten();
+            let Some((_, _, _, cur_w, cur_h)) = measure_dense_canvas_box(canvas_el.as_ref(), &id)
+            else {
+                continue;
+            };
+            let prev = LAST_PAINTED_VIEWPORT.with(|v| v.borrow().get(&id).copied());
+            let backing_stale = canvas_el.as_ref().is_some_and(|el| {
+                let c: wasm_ctx::CanvasEl = el.clone().unchecked_into();
+                c.width() != cur_w || c.height() != cur_h
+            });
+            if prev != Some((cur_w, cur_h)) || backing_stale {
+                pending.push((id, paint_state));
+            }
+        }
+        for (id, (cam, hover, draw_nodes)) in pending {
+            paint_scene(&id, cam, hover, draw_nodes);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ensure_resize_watcher(host: &Element) {
+        if host.get_attribute("data-resize-observed").as_deref() == Some("true") {
+            return;
+        }
+        RESIZE_WATCHER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                let has_ro = js_sys::Reflect::get(&dom::window(), &"ResizeObserver".into())
+                    .is_ok_and(|v| v.is_function());
+                if !has_ro {
+                    return;
+                }
+                let cb = Closure::wrap(Box::new(move |entries: js_sys::Array| {
+                    repaint_resized_canvases(&entries);
+                }) as Box<dyn FnMut(js_sys::Array)>);
+                let observer = wasm_ctx::JsResizeObserver::new(cb.as_ref().unchecked_ref());
+                *slot = Some(ResizeWatcherHandle { observer, _cb: cb });
+            }
+            if let Some(ref handle) = *slot {
+                handle.observer.observe(host);
+                let _ = host.set_attribute("data-resize-observed", "true");
+            }
+        });
     }
 
     #[allow(dead_code)]
@@ -5253,29 +5381,22 @@ pub(crate) mod canvas2d {
                     }
                 }
                 let guard = store.borrow();
-                let Some((scene, grid, meta)) = guard.get(canvas_id) else {
-                    return false;
-                };
-                let Some(host) = dom::get(canvas_id) else {
-                    return false;
-                };
-                let (vw, vh, measured) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
-                if !measured || !cam.scale.is_finite() || cam.scale <= 0.0 {
-                    return false;
+                let (scene, grid, meta) = guard.get(canvas_id)?;
+                let host = dom::get(canvas_id)?;
+                if !cam.scale.is_finite() || cam.scale <= 0.0 {
+                    return None;
                 }
-                LAST_CAMERAS.with(|c| {
-                    c.borrow_mut().insert(canvas_id.to_owned(), cam);
-                });
-                let dpr = dom::window().device_pixel_ratio().clamp(1.0, 2.0);
-                let target_w = ((vw * dpr).round() as u32).max(1);
-                let target_h = ((vh * dpr).round() as u32).max(1);
-
+                if host.scroll_left() != 0 {
+                    host.set_scroll_left(0);
+                }
+                if host.scroll_top() != 0 {
+                    host.set_scroll_top(0);
+                }
+                ensure_resize_watcher(&host);
                 let canvas_el = match host.query_selector("canvas[data-dense-canvas='true']") {
                     Ok(Some(existing)) => existing,
                     _ => {
-                        let Ok(created) = dom::document().create_element("canvas") else {
-                            return false;
-                        };
+                        let created = dom::document().create_element("canvas").ok()?;
                         let _ = created.set_attribute("class", "graph-dense-canvas");
                         let _ = created.set_attribute("data-dense-canvas", "true");
                         let _ = created.set_attribute("aria-hidden", "true");
@@ -5283,6 +5404,11 @@ pub(crate) mod canvas2d {
                         created
                     }
                 };
+                let (vw, vh, dpr, target_w, target_h) =
+                    measure_dense_canvas_box(Some(&canvas_el), canvas_id)?;
+                LAST_CAMERAS.with(|c| {
+                    c.borrow_mut().insert(canvas_id.to_owned(), cam);
+                });
                 let canvas_js: wasm_ctx::CanvasEl = canvas_el.clone().unchecked_into();
                 if canvas_js.width() != target_w {
                     canvas_js.set_width(target_w);
@@ -5290,9 +5416,7 @@ pub(crate) mod canvas2d {
                 if canvas_js.height() != target_h {
                     canvas_js.set_height(target_h);
                 }
-                let Some(ctx) = canvas_js.get_context("2d") else {
-                    return false;
-                };
+                let ctx = canvas_js.get_context("2d")?;
 
                 let pal = resolve_palette(canvas_id, &host);
                 let host_kind_hover = host
@@ -5434,9 +5558,13 @@ pub(crate) mod canvas2d {
                         base_drawn.is_some(),
                     );
                 }
-                true
+                Some((target_w, target_h))
             });
-            if painted {
+            if let Some((target_w, target_h)) = painted {
+                LAST_PAINTED_VIEWPORT.with(|v| {
+                    v.borrow_mut()
+                        .insert(canvas_id.to_owned(), (target_w, target_h));
+                });
                 LAST_PAINT_STATE.with(|p| {
                     p.borrow_mut()
                         .insert(canvas_id.to_owned(), (cam, hover, draw_nodes));
@@ -6912,6 +7040,28 @@ mod tests {
         assert!(canvas2d::should_paint_cluster_hull_labels(false, true));
         assert!(!canvas2d::should_paint_cluster_hull_labels(true, true));
         assert!(!canvas2d::should_paint_cluster_hull_labels(false, false));
+    }
+
+    #[test]
+    fn dense_bitmap_target_size_scales_and_validates_bounds() {
+        assert_eq!(canvas2d::dense_bitmap_target_size(63.9, 400.0, 2.0), None);
+        assert_eq!(canvas2d::dense_bitmap_target_size(900.0, 63.0, 2.0), None);
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(f64::NAN, 400.0, 2.0),
+            None
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 2.0),
+            Some((1816, 935))
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 3.0),
+            Some((1816, 935))
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 0.5),
+            Some((908, 468))
+        );
     }
 
     trait CameraTestExt {

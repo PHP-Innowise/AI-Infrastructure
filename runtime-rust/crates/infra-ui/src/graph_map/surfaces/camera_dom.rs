@@ -379,6 +379,44 @@ pub(in crate::graph_map) fn refit_surface_if_visible(surface: MapSurface) {
         fit_surface_camera(surface, &mut cam);
     }
 }
+pub(in crate::graph_map) fn viewport_box_changed(
+    before: (f64, f64, bool),
+    after: (f64, f64, bool),
+) -> bool {
+    if !after.2 {
+        return false;
+    }
+    !before.2 || (after.0 - before.0).abs() > 0.5 || (after.1 - before.1).abs() > 0.5
+}
+/// Re-fits or repaints a surface when chrome elements rendered after the canvas
+/// (crumbs, arrow legend, side panel, footer legend) changed its viewport height.
+pub(in crate::graph_map) fn sync_surface_after_chrome_layout(
+    surface: MapSurface,
+    before: (f64, f64, bool),
+) {
+    let after = viewport_size(surface.canvas);
+    if !viewport_box_changed(before, after) {
+        return;
+    }
+    let cam = load_surface_camera(surface);
+    if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+        return;
+    }
+    if (cam.fit_mode || cam.needs_measure) && !surface.embedded && m::yes(&state()["fit"]) {
+        fit();
+        let settled = load_surface_camera(surface);
+        update_surface_active_camera(surface, &settled);
+        return;
+    }
+    if cam.fit_mode || cam.needs_measure {
+        refit_surface_if_visible(surface);
+        let settled = load_surface_camera(surface);
+        update_surface_active_camera(surface, &settled);
+    } else {
+        apply_surface_camera(surface, &cam);
+        update_surface_active_camera(surface, &cam);
+    }
+}
 pub(in crate::graph_map) fn surface_drag_data(surface: MapSurface) -> V {
     if surface.drag_key.is_empty() {
         V::Null
@@ -1232,4 +1270,33 @@ pub(in crate::graph_map) fn resolve_focus_bbox_with_cached_plan(
         plan_beside(nodes.len(), &weighted, &framed, None)
     };
     resolve_focus(view, &plan, probe).bbox
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewport_box_changed;
+
+    #[test]
+    fn viewport_box_changed_detects_post_chrome_resize() {
+        assert!(!viewport_box_changed(
+            (908.0, 490.0, true),
+            (908.0, 490.0, true)
+        ));
+        assert!(!viewport_box_changed(
+            (908.0, 490.0, true),
+            (908.4, 490.2, true)
+        ));
+        assert!(viewport_box_changed(
+            (908.0, 490.0, true),
+            (908.0, 468.0, true)
+        ));
+        assert!(viewport_box_changed(
+            (800.0, 500.0, false),
+            (908.0, 468.0, true)
+        ));
+        assert!(!viewport_box_changed(
+            (908.0, 490.0, true),
+            (800.0, 500.0, false)
+        ));
+    }
 }

@@ -874,6 +874,10 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
     const overlapY = Math.min(planeRect.bottom, hostRect.bottom) - Math.max(planeRect.top, hostRect.top);
     const overlapX = Math.min(planeRect.right, hostRect.right) - Math.max(planeRect.left, hostRect.left);
     const nodeCount = plane.querySelectorAll('.graph-map-node').length;
+    const sampleDomNode = plane.querySelector('.graph-map-node:not(.graph-map-entity-node)');
+    const sampleDomBg = sampleDomNode && host.getAttribute('data-dense') === 'true' && plane.getAttribute('data-scale-tier') === 'dense'
+      ? getComputedStyle(sampleDomNode).backgroundColor
+      : null;
     return {
       dpr: window.devicePixelRatio || 1,
       width: canvas.width,
@@ -888,11 +892,25 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
       nonZeroPixels,
       dataUrlDiffers,
       nodeCount,
+      sampleDomBg,
     };
   }, canvasSelector);
 
   assert(!geom.error, `${label}: ${geom.error}`);
   assert(geom.width > 0 && geom.height > 0, `${label}: dense canvas zero sized (${geom.width}x${geom.height})`);
+  const clampedDpr = Math.min(2, Math.max(1, geom.dpr || 1));
+  const expectedWidth = Math.round(geom.canvasRect.width * clampedDpr);
+  const expectedHeight = Math.round(geom.canvasRect.height * clampedDpr);
+  assert(
+    Math.abs(geom.width - expectedWidth) <= 2 && Math.abs(geom.height - expectedHeight) <= 2,
+    `${label}: dense canvas bitmap (${geom.width}x${geom.height}) drifted from CSS box (${geom.canvasRect.width}x${geom.canvasRect.height} @ ${clampedDpr}x -> ${expectedWidth}x${expectedHeight})`,
+  );
+  if (geom.sampleDomBg !== null) {
+    assert(
+      geom.sampleDomBg === 'rgba(0, 0, 0, 0)' || geom.sampleDomBg === 'transparent',
+      `${label}: expected transparent dense DOM hit target over Canvas2D, got "${geom.sampleDomBg}"`,
+    );
+  }
   if (minDpr > 1) {
     assert(
       geom.dpr >= minDpr

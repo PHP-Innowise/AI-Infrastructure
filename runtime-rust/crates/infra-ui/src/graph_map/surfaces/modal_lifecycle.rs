@@ -247,6 +247,7 @@ pub(in crate::graph_map) fn render(view: &V) {
         let settled_cam = load_surface_camera(MODAL_SURFACE);
         update_surface_active_camera(MODAL_SURFACE, &settled_cam);
     }
+    let painted_viewport = viewport_size("graph-map-canvas");
     let crumbs_html = {
         let mut s = crumbs(view);
         let trail = surface_history_trail_html(MODAL_SURFACE);
@@ -344,6 +345,7 @@ pub(in crate::graph_map) fn render(view: &V) {
             "graph-map-legend",
             "Arrows follow dependencies away from the starting point.",
         );
+        sync_surface_after_chrome_layout(MODAL_SURFACE, painted_viewport);
         if focused {
             dom::focus("graph-map-summary");
         } else {
@@ -366,6 +368,7 @@ pub(in crate::graph_map) fn render(view: &V) {
             "graph-map-legend",
             "Arrows show dependencies between Graphify communities. Hollow links are inferred.",
         );
+        sync_surface_after_chrome_layout(MODAL_SURFACE, painted_viewport);
         if let Some(key) = view["focus"]["path"].as_str().filter(|_| module_focus) {
             let key = json!(key).to_string();
             if let Some(node) = dom::all(NODE_BUTTONS)
@@ -497,6 +500,7 @@ pub(in crate::graph_map) fn render(view: &V) {
         restore_side_focus(side_focus);
     }
     html("graph-map-legend", &legend(view, change));
+    sync_surface_after_chrome_layout(MODAL_SURFACE, painted_viewport);
 }
 /// Asks the server to work out a pull request, a branch or a commit, which
 /// starts the graph of its commit when there is none. `false` when it could
