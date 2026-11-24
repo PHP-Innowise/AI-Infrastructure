@@ -5320,6 +5320,8 @@ mod tests {
                 .arg(dir)
                 .args([
                     "-c",
+                    "core.autocrlf=false",
+                    "-c",
                     "user.name=Test",
                     "-c",
                     "user.email=test@example.invalid",
@@ -5338,6 +5340,7 @@ mod tests {
             std::fs::write(repo.join(".agents/skills/pdf/SKILL.md"), skill_md).unwrap();
             std::fs::write(repo.join("app.php"), "<?php echo 1;\n").unwrap();
             git(repo, &["init", "-q"]);
+            git(repo, &["config", "core.autocrlf", "false"]);
             git(repo, &["add", "."]);
             git(repo, &["commit", "-q", "-m", "base"]);
         }
@@ -5645,13 +5648,21 @@ mod tests {
             let st = std::process::Command::new("git")
                 .arg("-C")
                 .arg(dir)
-                .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                ])
                 .args(args)
                 .status()
                 .unwrap();
             assert!(st.success(), "git {args:?}");
         };
         git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
         git(&wt1, &["add", "."]);
         git(&wt1, &["commit", "-q", "-m", "base"]);
         git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);

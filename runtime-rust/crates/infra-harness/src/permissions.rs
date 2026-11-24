@@ -590,7 +590,7 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
     let mut cur = String::new();
     let mut in_token = false;
     let mut quote: Option<char> = None;
-    let mut chars = command.chars();
+    let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match quote {
             Some(q) if c == q => {
@@ -598,10 +598,19 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
                 in_token = true;
             }
             Some('"') if c == '\\' => {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
-                cur.push(next);
+                if cfg!(windows) {
+                    if matches!(chars.peek(), Some('"' | '\\')) {
+                        let next = chars.next().expect("peeked char");
+                        cur.push(next);
+                    } else {
+                        cur.push('\\');
+                    }
+                } else {
+                    let next = chars
+                        .next()
+                        .ok_or_else(|| "unterminated escape in command".to_owned())?;
+                    cur.push(next);
+                }
                 in_token = true;
             }
             Some(_) => {
@@ -623,7 +632,9 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
                 quote = Some(c);
                 in_token = true;
             }
-            None if c == '\\' => {
+            // On Windows, unquoted `\` is a path separator (e.g. `C:\Users\...\skillcache-run`),
+            // not a POSIX escape prefix.
+            None if !cfg!(windows) && c == '\\' => {
                 let next = chars
                     .next()
                     .ok_or_else(|| "unterminated escape in command".to_owned())?;
@@ -1115,6 +1126,24 @@ fn load_verified_sealed_capsule(
     Some(pkg)
 }
 
+fn is_absolute_arg_path(path_part: &str) -> bool {
+    let bytes = path_part.as_bytes();
+    let is_drive_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let is_win_drive_prefixed =
+        cfg!(windows) && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    path_part.starts_with('/')
+        || path_part.starts_with('\\')
+        || is_drive_abs
+        || is_win_drive_prefixed
+}
+
+fn is_skillcache_run_name(name: &str) -> bool {
+    name == "skillcache-run" || (cfg!(windows) && name.eq_ignore_ascii_case("skillcache-run.exe"))
+}
+
 fn is_skillcache_run_command(
     ws_canon: &Path,
     store: &crate::store::SessionStore,
@@ -1123,12 +1152,17 @@ fn is_skillcache_run_command(
     let Some(cmd) = tokens.first() else {
         return false;
     };
-    let bin_ok = if cmd == "skillcache-run" {
+    let bin_ok = if is_skillcache_run_name(cmd) {
         std::fs::symlink_metadata(ws_canon.join("skillcache-run")).is_err()
+            && (!cfg!(windows)
+                || std::fs::symlink_metadata(ws_canon.join("skillcache-run.exe")).is_err())
     } else if !cmd.contains("..") {
         let cmd_path = Path::new(cmd);
         cmd_path.is_absolute()
-            && cmd_path.file_name().and_then(|n| n.to_str()) == Some("skillcache-run")
+            && cmd_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_skillcache_run_name)
             && std::fs::symlink_metadata(cmd_path).is_ok()
             && cmd_path
                 .parent()
@@ -1171,9 +1205,7 @@ fn check_read_only_capsule_program(
         return Ok(false);
     };
     let is_runner = is_skillcache_run_command(&ws_canon, store, tokens);
-    let first_is_abs = tokens
-        .first()
-        .is_some_and(|cmd| cmd.starts_with('/') || cmd.starts_with('\\'));
+    let first_is_abs = tokens.first().is_some_and(|cmd| is_absolute_arg_path(cmd));
     if first_is_abs && !is_runner {
         return Ok(false);
     }
@@ -1511,7 +1543,7 @@ pub fn classify_read_only_program_command_in_store(
         {
             return Err("argv_parent_traversal: parent or home traversal is not admitted".into());
         }
-        if path_part.starts_with('/') || path_part.starts_with('\\') {
+        if is_absolute_arg_path(path_part) {
             if idx == 0 {
                 first_is_abs = true;
             } else {
@@ -2645,6 +2677,39 @@ mod tests {
         )
         .unwrap_err();
         assert!(arg_err.starts_with("argv_absolute_path:"), "{arg_err}");
+        let drive_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "C:/evil/skillcache-run run",
+        )
+        .unwrap_err();
+        assert!(drive_err.starts_with("argv_absolute_path:"), "{drive_err}");
+        let drive_arg_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "skillcache-run run --out=D:/secret.txt",
+        )
+        .unwrap_err();
+        assert!(
+            drive_arg_err.starts_with("argv_absolute_path:"),
+            "{drive_arg_err}"
+        );
+        assert!(is_absolute_arg_path(r"C:\Users\runner\skillcache-run"));
+        assert!(is_absolute_arg_path(r"\\?\D:\temp\file"));
+        assert!(!is_absolute_arg_path("programs/check.py"));
+        #[cfg(windows)]
+        {
+            let win_arg_err = classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                r"skillcache-run run C:\secret.txt",
+            )
+            .unwrap_err();
+            assert!(
+                win_arg_err.starts_with("argv_absolute_path:"),
+                "{win_arg_err}"
+            );
+        }
 
         let _ = infra_skillcache::package::remove(&warm_dir);
     }
@@ -2871,7 +2936,14 @@ mod tests {
                 std::process::Command::new("git")
                     .arg("-C")
                     .arg(p)
-                    .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                    .args([
+                        "-c",
+                        "core.autocrlf=false",
+                        "-c",
+                        "user.name=T",
+                        "-c",
+                        "user.email=t@e.invalid",
+                    ])
                     .args(args)
                     .status()
                     .unwrap()
@@ -2879,6 +2951,7 @@ mod tests {
             );
         };
         git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
         git(&wt1, &["add", "."]);
         git(&wt1, &["commit", "-q", "-m", "init"]);
         git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
@@ -2957,7 +3030,14 @@ mod tests {
                 std::process::Command::new("git")
                     .arg("-C")
                     .arg(p)
-                    .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                    .args([
+                        "-c",
+                        "core.autocrlf=false",
+                        "-c",
+                        "user.name=T",
+                        "-c",
+                        "user.email=t@e.invalid",
+                    ])
                     .args(args)
                     .status()
                     .unwrap()
@@ -2965,6 +3045,7 @@ mod tests {
             );
         };
         git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
         git(&wt1, &["add", "."]);
         git(&wt1, &["commit", "-q", "-m", "init"]);
         git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);

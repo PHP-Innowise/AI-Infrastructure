@@ -476,14 +476,18 @@ impl ChatController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::longmemeval::{
         lifecycle::Question,
         projection::{NativeRequest, NativeResponse, NativeRuntime},
         registry::{Bridge, Memory, Params},
     };
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
     struct DummyNativeRuntime;
+    #[cfg(unix)]
     impl NativeRuntime for DummyNativeRuntime {
         fn refresh_and_render(
             &mut self,
@@ -499,6 +503,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn make_bridge(dir: &std::path::Path, horizon: usize) -> Box<dyn Memory> {
         std::fs::create_dir_all(dir.join("project-brain/config")).unwrap();
         std::fs::create_dir_all(dir.join("project-brain/schemas")).unwrap();
@@ -516,6 +521,7 @@ mod tests {
         Box::new(bridge)
     }
 
+    #[cfg(unix)]
     fn make_questions(count: usize) -> Vec<Question> {
         (0..count)
             .map(|_| Question {
@@ -525,6 +531,38 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn replay_memo_store_tracks_hits_misses_and_bounds_capacity() {
+        let store = ReplayMemoStore::new();
+        let mut guard = store.lock().unwrap();
+        assert_eq!(guard.stats(), (0, 0, 0));
+        assert!(guard.get("reader", b"req-0").is_none());
+        assert_eq!(guard.stats(), (0, 0, 1));
+
+        for i in 0..=REPLAY_MEMO_CAP {
+            guard.insert(
+                "reader",
+                format!("req-{i}").as_bytes(),
+                ReplayMemoEntry {
+                    answer: Some(format!("ans-{i}")),
+                    grade: None,
+                    response_bytes: 12,
+                    capture: CompletionCapture::default(),
+                },
+            );
+        }
+        assert_eq!(guard.stats().0, REPLAY_MEMO_CAP);
+        assert!(guard.get("reader", b"req-0").is_none());
+        let hit = guard.get("reader", format!("req-{REPLAY_MEMO_CAP}").as_bytes());
+        assert_eq!(
+            hit.and_then(|e| e.answer).as_deref(),
+            Some(format!("ans-{REPLAY_MEMO_CAP}").as_str())
+        );
+        guard.clear();
+        assert_eq!(guard.stats(), (0, 0, 0));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn replay_memo_is_disabled_by_default_and_opts_in_preserving_seals() {
         let base =

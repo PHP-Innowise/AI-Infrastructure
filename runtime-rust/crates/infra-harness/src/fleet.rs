@@ -2185,6 +2185,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+        // Stop the live filesystem watcher started by `auto_start` so editing `token.rs`
+        // below deterministically leaves `GraphIrStore` stale on slower/Windows CI before
+        // `evaluate_fleet_lens_scope` runs multiple git checks.
+        graphs.close();
 
         // Edit ONLY src/auth/token.rs:
         // - Before Graph-IR refreshes for dirty `src/auth/token.rs`, `evaluate_fleet_lens_scope`

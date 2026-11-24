@@ -3486,13 +3486,21 @@ mod tests {
             let st = std::process::Command::new("git")
                 .arg("-C")
                 .arg(dir)
-                .args(["-c", "user.name=T", "-c", "user.email=t@e.invalid"])
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                ])
                 .args(args)
                 .status()
                 .unwrap();
             assert!(st.success(), "git {args:?}");
         };
         git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
         git(&wt1, &["add", "."]);
         git(&wt1, &["commit", "-q", "-m", "base"]);
         git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
