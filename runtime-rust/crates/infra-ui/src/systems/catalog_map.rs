@@ -361,7 +361,7 @@ pub(super) fn sync_system_graph_header(agg: &V) {
     session::sync_working_indicator();
 }
 
-pub(super) async fn poll_system_graph_status(check: bool) {
+pub(crate) async fn poll_system_graph_status(check: bool) {
     dom::cancel_timer("system-graph-poll");
     let project = dom::value("system-project");
     let config = dom::value("system-config");

@@ -1,10 +1,11 @@
 use super::graph_ops::now_utc_iso_ms;
 use super::helpers::{
-    AtomProvenance, atom_symbols_for_project, build_upsert_atom_params, clean_opt, detect_language,
-    format_atom_line_with_authority, format_context_capsule, format_omnigraph_ts,
-    list_atom_symbols, normalize_atom_row, normalize_file_row, normalize_session_row,
-    normalize_symbol_row, normalize_turn_row, parse_string_list, parse_tags_opt, pascal_to_snake,
-    str_field, symbol_edges, upsert_atom_files, upsert_atom_symbols,
+    AtomProvenance, atom_symbols_for_project, build_upsert_atom_params, clean_opt,
+    clear_atom_files, detect_language, format_atom_line_with_authority, format_context_capsule,
+    format_omnigraph_ts, list_atom_symbols, normalize_atom_row, normalize_file_row,
+    normalize_session_row, normalize_symbol_row, normalize_turn_row, parse_string_list,
+    parse_tags_opt, pascal_to_snake, str_field, symbol_edges, upsert_atom_files,
+    upsert_atom_symbols,
 };
 use super::{OmnigraphManager, OmnigraphMode, VALID_ATOM_KINDS};
 use crate::omnigraph::{
@@ -37,6 +38,217 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
+
+#[derive(Clone, Debug)]
+struct CanonicalSyncLedgerEntry {
+    atom_sha256: String,
+    files_sha256: String,
+    supersedes_sha256: String,
+}
+
+fn open_canonical_sync_ledger(state_dir: &Path) -> Option<rusqlite::Connection> {
+    let dir = state_dir.join("cache/omnigraph");
+    std::fs::create_dir_all(&dir).ok()?;
+    let db = rusqlite::Connection::open(dir.join("sync_ledger.sqlite3")).ok()?;
+    db.execute_batch(
+        "PRAGMA busy_timeout = 5000;
+         CREATE TABLE IF NOT EXISTS canonical_sync_ledger(
+             endpoint TEXT NOT NULL,
+             graph_id TEXT NOT NULL,
+             branch TEXT NOT NULL,
+             project_id TEXT NOT NULL,
+             atom_id TEXT NOT NULL,
+             atom_sha256 TEXT NOT NULL,
+             files_sha256 TEXT NOT NULL,
+             supersedes_sha256 TEXT NOT NULL DEFAULT '',
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY(endpoint, graph_id, branch, project_id, atom_id)
+         );",
+    )
+    .ok()?;
+    Some(db)
+}
+
+fn load_canonical_sync_ledger(
+    db: &rusqlite::Connection,
+    endpoint: &str,
+    graph_id: &str,
+    branch: &str,
+    project_id: &str,
+) -> BTreeMap<String, CanonicalSyncLedgerEntry> {
+    let mut out = BTreeMap::new();
+    let Ok(mut stmt) = db.prepare(
+        "SELECT atom_id, atom_sha256, files_sha256, supersedes_sha256
+         FROM canonical_sync_ledger
+         WHERE endpoint = ?1 AND graph_id = ?2 AND branch = ?3 AND project_id = ?4",
+    ) else {
+        return out;
+    };
+    let Ok(rows) = stmt.query_map(
+        rusqlite::params![endpoint, graph_id, branch, project_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CanonicalSyncLedgerEntry {
+                    atom_sha256: row.get(1)?,
+                    files_sha256: row.get(2)?,
+                    supersedes_sha256: row.get(3)?,
+                },
+            ))
+        },
+    ) else {
+        return out;
+    };
+    for (atom_id, entry) in rows.flatten() {
+        out.insert(atom_id, entry);
+    }
+    out
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Ledger upsert stores the multi-tenant key plus per-atom, file-edge, and supersedes digests."
+)]
+fn save_canonical_sync_ledger(
+    db: &rusqlite::Connection,
+    endpoint: &str,
+    graph_id: &str,
+    branch: &str,
+    project_id: &str,
+    atom_id: &str,
+    entry: &CanonicalSyncLedgerEntry,
+    ts: &str,
+) {
+    let _ = db.execute(
+        "INSERT INTO canonical_sync_ledger(
+             endpoint, graph_id, branch, project_id, atom_id,
+             atom_sha256, files_sha256, supersedes_sha256, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(endpoint, graph_id, branch, project_id, atom_id) DO UPDATE SET
+             atom_sha256 = excluded.atom_sha256,
+             files_sha256 = excluded.files_sha256,
+             supersedes_sha256 = excluded.supersedes_sha256,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            endpoint,
+            graph_id,
+            branch,
+            project_id,
+            atom_id,
+            entry.atom_sha256,
+            entry.files_sha256,
+            entry.supersedes_sha256,
+            ts
+        ],
+    );
+}
+
+fn delete_canonical_sync_ledger(
+    db: &rusqlite::Connection,
+    endpoint: &str,
+    graph_id: &str,
+    branch: &str,
+    project_id: &str,
+    atom_id: &str,
+) {
+    let _ = db.execute(
+        "DELETE FROM canonical_sync_ledger
+         WHERE endpoint = ?1 AND graph_id = ?2 AND branch = ?3 AND project_id = ?4 AND atom_id = ?5",
+        rusqlite::params![endpoint, graph_id, branch, project_id, atom_id],
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Canonical atom digest hashes every semantic parameter passed to GQ_UPSERT_ATOM without volatile sync clocks."
+)]
+fn canonical_atom_digest(
+    atom_id: &str,
+    effective_project_id: &str,
+    kind: &str,
+    title: &str,
+    summary: &str,
+    body: &str,
+    tags: Option<Vec<String>>,
+    branch: &str,
+    source_session_id: Option<&str>,
+    confidence: f64,
+    pin_priority: i32,
+    verified: bool,
+    prov: &AtomProvenance,
+) -> String {
+    let mut params_without_clocks = build_upsert_atom_params(
+        atom_id,
+        effective_project_id,
+        kind,
+        title,
+        summary,
+        body,
+        tags,
+        branch,
+        source_session_id,
+        confidence,
+        pin_priority,
+        verified,
+        prov,
+        "",
+        "",
+    );
+    if let Some(obj) = params_without_clocks.as_object_mut() {
+        obj.remove("created_at");
+        obj.remove("updated_at");
+    }
+    let canonical = infra_core::domain::json::canonical(&params_without_clocks)
+        .unwrap_or_else(|_| params_without_clocks.to_string());
+    store::sha(canonical.as_bytes())
+}
+
+fn canonical_sorted_list_digest(values: &[String]) -> String {
+    let sorted: BTreeSet<&str> = values.iter().map(String::as_str).collect();
+    let encoded = serde_json::to_string(&sorted).unwrap_or_default();
+    store::sha(encoded.as_bytes())
+}
+
+async fn list_atom_files_map(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+    project_atom_ids: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_atom: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let edges = query_edges_safe(
+        client,
+        GQ_LIST_FILE_EDGES,
+        "list_file_edges",
+        &json!({ "project_id": project_id }),
+        Some(branch),
+        None,
+    )
+    .await;
+    for edge in &edges {
+        if let (Some(atom_id), Some(path)) =
+            (str_field(edge, "source_id"), str_field(edge, "target_id"))
+        {
+            by_atom.entry(atom_id).or_default().insert(path);
+        }
+    }
+    if edges.len() >= 2000
+        && let Ok(ndjson) = client
+            .export_branch(Some(branch), &["TouchesFile"], None)
+            .await
+        && let Ok(parsed) = parse_ndjson_records(&ndjson)
+    {
+        for edge in parsed.edges {
+            if edge.edge_type == "TouchesFile"
+                && (project_id.is_empty() || project_atom_ids.contains(&edge.from))
+            {
+                by_atom.entry(edge.from).or_default().insert(edge.to);
+            }
+        }
+    }
+    by_atom
+}
 
 impl OmnigraphManager {
     /// Explicitly share selected `atom_ids` into `target_session_id` (recording `ConsumedBy` edges).
@@ -1832,12 +2044,25 @@ impl OmnigraphManager {
         let branch = CANONICAL_KNOWLEDGE_BRANCH;
         ensure_branch_exists(&client, branch, Some("main")).await?;
 
+        let endpoint_key = cfg.endpoint.as_deref().unwrap_or("").trim().to_owned();
+        let graph_key = cfg.graph_id.clone();
+        let ledger_db = open_canonical_sync_ledger(&self.state_dir);
+        let ledger_rows = ledger_db
+            .as_ref()
+            .map(|db| load_canonical_sync_ledger(db, &endpoint_key, &graph_key, branch, project_id))
+            .unwrap_or_default();
+
         let mut existing_ids = collect_branch_atom_ids(&client, project_id, branch).await;
         // A record or chunk names declarations of the project's own files;
         // what each synced atom named before is replaced only when it changed.
         let root = self.project_root(project_id, None);
         let mut previous_symbols = list_atom_symbols(&client, project_id, branch).await;
+        let mut previous_files =
+            list_atom_files_map(&client, project_id, branch, &existing_ids).await;
         let mut symbol_count = 0usize;
+        let mut skipped_atoms = 0usize;
+        let mut skipped_files = 0usize;
+        let mut mutated_atoms = 0usize;
         let ts = now_utc_iso_ms();
         let mut atom_ids = Vec::new();
         let mut pending_supersedes: Vec<(String, Vec<String>)> = Vec::new();
@@ -1874,35 +2099,103 @@ impl OmnigraphManager {
                 .unwrap_or("");
             let source_session_id =
                 str_field(item, "source_session_id").or_else(|| str_field(item, "session_id"));
+            let supersedes = parse_string_list(&item["supersedes_atom_ids"]);
 
-            let atom_params = build_upsert_atom_params(
+            let atom_sha256 = canonical_atom_digest(
                 &atom_id,
                 effective_project_id,
                 &kind,
                 &title,
                 &summary,
                 &body,
-                tags,
+                tags.clone(),
                 branch,
                 source_session_id.as_deref(),
                 confidence,
                 pin_priority,
                 verified,
                 &prov,
-                &ts,
-                &ts,
             );
-            client
-                .mutate(&ChangeRequest {
-                    query: GQ_UPSERT_ATOM.into(),
-                    name: Some("upsert_atom".into()),
-                    params: Some(atom_params),
-                    branch: Some(branch.to_string()),
-                    settings: None,
-                })
-                .await?;
+            let files_sha256 = canonical_sorted_list_digest(&files);
+            let supersedes_sha256 = canonical_sorted_list_digest(&supersedes);
 
-            upsert_atom_files(&client, effective_project_id, branch, &atom_id, &files, &ts).await;
+            let prev_ledger = ledger_rows.get(&atom_id);
+            let on_branch = existing_ids.contains(&atom_id);
+            let atom_unchanged =
+                on_branch && prev_ledger.is_some_and(|r| r.atom_sha256 == atom_sha256);
+
+            if atom_unchanged {
+                skipped_atoms += 1;
+            } else {
+                let atom_params = build_upsert_atom_params(
+                    &atom_id,
+                    effective_project_id,
+                    &kind,
+                    &title,
+                    &summary,
+                    &body,
+                    tags,
+                    branch,
+                    source_session_id.as_deref(),
+                    confidence,
+                    pin_priority,
+                    verified,
+                    &prov,
+                    &ts,
+                    &ts,
+                );
+                client
+                    .mutate(&ChangeRequest {
+                        query: GQ_UPSERT_ATOM.into(),
+                        name: Some("upsert_atom".into()),
+                        params: Some(atom_params),
+                        branch: Some(branch.to_string()),
+                        settings: None,
+                    })
+                    .await?;
+                mutated_atoms += 1;
+            }
+
+            let prev_files_set = previous_files.remove(&atom_id).unwrap_or_default();
+            let wanted_files_set: BTreeSet<String> = files.iter().cloned().collect();
+            let files_unchanged = (files.is_empty() && prev_files_set.is_empty())
+                || (on_branch
+                    && wanted_files_set == prev_files_set
+                    && prev_ledger.is_some_and(|r| r.files_sha256 == files_sha256));
+            let mut files_sync_ok = true;
+            if files_unchanged {
+                skipped_files += 1;
+            } else if !prev_files_set.is_subset(&wanted_files_set) {
+                // Files were removed or swapped out: clear prior TouchesFile edges first so stale links don't persist.
+                if !clear_atom_files(&client, branch, &atom_id).await {
+                    files_sync_ok = false;
+                } else if !files.is_empty() {
+                    upsert_atom_files(&client, effective_project_id, branch, &atom_id, &files, &ts)
+                        .await;
+                }
+            } else if !files.is_empty() {
+                let target_files: Vec<String> = if atom_unchanged && on_branch {
+                    files
+                        .iter()
+                        .filter(|f| !prev_files_set.contains(f.as_str()))
+                        .cloned()
+                        .collect()
+                } else {
+                    files.clone()
+                };
+                if !target_files.is_empty() {
+                    upsert_atom_files(
+                        &client,
+                        effective_project_id,
+                        branch,
+                        &atom_id,
+                        &target_files,
+                        &ts,
+                    )
+                    .await;
+                }
+            }
+
             let symbols = atom_symbols_for_project(
                 Some(&self.state_dir),
                 effective_project_id,
@@ -1921,9 +2214,34 @@ impl OmnigraphManager {
             )
             .await;
             existing_ids.insert(atom_id.clone());
-            let supersedes = parse_string_list(&item["supersedes_atom_ids"]);
-            if !supersedes.is_empty() {
+            if !supersedes.is_empty()
+                && (!atom_unchanged
+                    || prev_ledger.is_none_or(|r| r.supersedes_sha256 != supersedes_sha256))
+            {
                 pending_supersedes.push((atom_id.clone(), supersedes));
+            }
+            if let Some(ref db) = ledger_db {
+                let persisted_files_sha256 = if files_sync_ok {
+                    files_sha256
+                } else {
+                    prev_ledger
+                        .map(|r| r.files_sha256.clone())
+                        .unwrap_or_default()
+                };
+                save_canonical_sync_ledger(
+                    db,
+                    &endpoint_key,
+                    &graph_key,
+                    branch,
+                    project_id,
+                    &atom_id,
+                    &CanonicalSyncLedgerEntry {
+                        atom_sha256,
+                        files_sha256: persisted_files_sha256,
+                        supersedes_sha256,
+                    },
+                    &ts,
+                );
             }
             atom_ids.push(atom_id);
         }
@@ -1976,7 +2294,19 @@ impl OmnigraphManager {
                             })
                             .await
                         {
-                            Ok(_) => deleted_atom_ids.push(atom_id),
+                            Ok(_) => {
+                                if let Some(ref db) = ledger_db {
+                                    delete_canonical_sync_ledger(
+                                        db,
+                                        &endpoint_key,
+                                        &graph_key,
+                                        branch,
+                                        project_id,
+                                        &atom_id,
+                                    );
+                                }
+                                deleted_atom_ids.push(atom_id);
+                            }
                             Err(error) => {
                                 prune_error = Some(error.to_string());
                                 break;
@@ -1992,6 +2322,9 @@ impl OmnigraphManager {
             "ok": true,
             "branch": branch,
             "synced": atom_ids.len(),
+            "mutated_atoms": mutated_atoms,
+            "skipped_atoms": skipped_atoms,
+            "skipped_files": skipped_files,
             "symbols": symbol_count,
             "atom_ids": atom_ids,
             "deleted": deleted_atom_ids.len(),
@@ -2674,25 +3007,12 @@ pub(super) async fn list_atom_files(
     branch: &str,
     atom_id: &str,
 ) -> Vec<String> {
-    let edges = query_edges_safe(
-        client,
-        GQ_LIST_FILE_EDGES,
-        "list_file_edges",
-        &json!({ "project_id": project_id }),
-        Some(branch),
-        None,
-    )
-    .await;
-    let mut files = Vec::new();
-    for edge in &edges {
-        if str_field(edge, "source_id").as_deref() == Some(atom_id)
-            && let Some(path) = str_field(edge, "target_id")
-            && !files.contains(&path)
-        {
-            files.push(path);
-        }
-    }
-    files
+    let target_set = BTreeSet::from([atom_id.to_owned()]);
+    list_atom_files_map(client, project_id, branch, &target_set)
+        .await
+        .remove(atom_id)
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default()
 }
 
 pub(super) async fn collect_branch_atom_ids(

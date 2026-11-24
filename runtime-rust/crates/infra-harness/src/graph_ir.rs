@@ -140,7 +140,6 @@ pub(crate) struct IrUpdateDelta {
     pub touched_semantic_targets: Vec<String>,
     pub prev_semantic_anchor_files: Vec<String>,
     pub touched_di_files: Vec<String>,
-    #[allow(dead_code)]
     pub reexport_changed: bool,
 }
 
@@ -812,6 +811,8 @@ impl GraphIrStore {
                     &skip_re_resolve,
                     manifest_changed,
                     &[],
+                    Some(&manifests),
+                    Some(&crate_map),
                 )?;
                 (re_resolve, callers)
             } else {
@@ -860,6 +861,8 @@ impl GraphIrStore {
                         &skip_re_resolve,
                         manifest_changed,
                         &[],
+                        Some(&manifests),
+                        Some(&crate_map),
                     )?;
                 } else {
                     pre_tx_incoming.clear();
@@ -952,6 +955,7 @@ impl GraphIrStore {
 
             let summary = recompute_summary(&tx, &now, truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
+            upsert_meta(&tx, "workspace_root", &real_root.to_string_lossy())?;
             upsert_meta(&tx, "manifest_stamp", &manifest_stamp)?;
             if let Some(ref head) = git_head {
                 upsert_meta(&tx, "git_head", head)?;
@@ -1117,7 +1121,7 @@ impl GraphIrStore {
         let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
         let mut manifests = Arc::new(ManifestIndex::default());
         let mut crate_map = Arc::new(CratePackageMap::default());
-        let mut cached_bundle_key_len: Option<usize> = None;
+        let mut cached_bundle_key: Option<(usize, u128)> = None;
         let mut cached_re_resolve: BTreeMap<String, AstFileExtraction> = BTreeMap::new();
         let (
             files_removed,
@@ -1183,12 +1187,25 @@ impl GraphIrStore {
                 let (re_resolve_paths, pre_tx_incoming) =
                     if !affected_targets.is_empty() || manifest_changed {
                         let callers = query_incoming_callers_from_conn(&conn, &affected_targets)?;
+                        let bundle_key = (
+                            existing_files.len(),
+                            graph_deps::known_files_hash(&existing_files),
+                        );
+                        if cached_bundle_key != Some(bundle_key) {
+                            let (m, cm) =
+                                graph_deps::cached_manifests_for_root(&real_root, &existing_files);
+                            manifests = m;
+                            crate_map = cm;
+                            cached_bundle_key = Some(bundle_key);
+                        }
                         let re_resolve = collect_affected_dependents(
                             &conn,
                             &affected_targets,
                             &skip_re_resolve,
                             manifest_changed,
                             &manifest_lang_vec,
+                            Some(&manifests),
+                            Some(&crate_map),
                         )?;
                         (re_resolve, callers)
                     } else {
@@ -1259,13 +1276,17 @@ impl GraphIrStore {
             } else {
                 None
             };
+            let bundle_key = (
+                existing_files.len(),
+                graph_deps::known_files_hash(&existing_files),
+            );
             if (!parsed_units.is_empty() || !re_resolve_paths.is_empty())
-                && cached_bundle_key_len != Some(existing_files.len())
+                && cached_bundle_key != Some(bundle_key)
             {
                 let (m, cm) = graph_deps::cached_manifests_for_root(&real_root, &existing_files);
                 manifests = m;
                 crate_map = cm;
-                cached_bundle_key_len = Some(existing_files.len());
+                cached_bundle_key = Some(bundle_key);
             }
 
             let mut conn = lock_conn(&self.conn)?;
@@ -1363,6 +1384,7 @@ impl GraphIrStore {
                 && existing_files.len() >= MAX_IR_FILES;
             let summary = recompute_summary(&tx, &now, prev_truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
+            upsert_meta(&tx, "workspace_root", &real_root.to_string_lossy())?;
             if let Some(stamp) = &manifest_stamp {
                 upsert_meta(&tx, "manifest_stamp", stamp)?;
             }
@@ -2046,15 +2068,27 @@ impl GraphIrStore {
 
     /// Exports incremental nodes/links for `Index::update_files`, supporting regular code
     /// edges, `ir_reexports` propagation, and `ir_semantic_edges` (`sem:*` & `di_binds`).
+    #[cfg(test)]
     pub(crate) fn export_ir_delta_for_files(
         &self,
+        delta: &IrUpdateDelta,
+    ) -> Result<Option<IrDeltaElements>> {
+        self.export_ir_delta_for_files_with_root(None, delta)
+    }
+
+    /// Like [`Self::export_ir_delta_for_files`], resolving tsconfig/package/crate manifest
+    /// aliases from `root_opt` (or persisted `ir_meta.workspace_root`) during re-export
+    /// propagation.
+    pub(crate) fn export_ir_delta_for_files_with_root(
+        &self,
+        root_opt: Option<&Path>,
         delta: &IrUpdateDelta,
     ) -> Result<Option<IrDeltaElements>> {
         if delta.manifest_changed {
             return Ok(None);
         }
         let mut effective_edited: BTreeSet<String> = delta.edited_files.iter().cloned().collect();
-        let removed_files: BTreeSet<String> = delta.removed_files.iter().cloned().collect();
+        let mut removed_files: BTreeSet<String> = delta.removed_files.iter().cloned().collect();
         let mut dirty_files: BTreeSet<String> = effective_edited.clone();
         dirty_files.extend(removed_files.iter().cloned());
         dirty_files.extend(delta.re_resolved_files.iter().cloned());
@@ -2069,17 +2103,72 @@ impl GraphIrStore {
             .any(|p| p.ends_with(".rs") || p.ends_with(".rs.modules"));
 
         self.with_read_conn(|conn| {
-            let files = {
+            let real_files = {
                 let mut stmt = conn.prepare("SELECT path FROM ir_files ORDER BY path")?;
                 let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
-            let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+            let real_file_set: BTreeSet<&str> = real_files.iter().map(String::as_str).collect();
 
-            for prev_anchor in &delta.prev_semantic_anchor_files {
-                if file_set.contains(prev_anchor.as_str()) {
-                    effective_edited.insert(prev_anchor.clone());
-                    dirty_files.insert(prev_anchor.clone());
+            if delta.reexport_changed {
+                let mut reexp_seeds: BTreeSet<String> = effective_edited.clone();
+                reexp_seeds.extend(removed_files.iter().cloned());
+                let resolved_root = root_opt.map(Path::to_path_buf).or_else(|| {
+                    conn.query_row(
+                        "SELECT value FROM ir_meta WHERE key = 'workspace_root'",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                });
+                let bundle = resolved_root.as_deref().map(|ws_root| {
+                    let known: BTreeSet<String> = real_files.iter().cloned().collect();
+                    graph_deps::cached_manifests_for_root(ws_root, &known)
+                });
+                let manifests_opt = bundle.as_ref().map(|(m, _)| m.as_ref());
+                let crate_map_opt = bundle.as_ref().map(|(_, cm)| cm.as_ref());
+                let (chain_deps, _) = collect_reexport_chain_dependents(
+                    conn,
+                    &reexp_seeds,
+                    &dirty_files,
+                    manifests_opt,
+                    crate_map_opt,
+                )?;
+                dirty_files.extend(chain_deps);
+            }
+
+            // Discover all active semantic buckets and canonical targets in DB after update.
+            let mut active_non_di_buckets: BTreeSet<String> = BTreeSet::new();
+            let mut targets_by_bucket: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut has_di_binds_in_db = false;
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT file_path, kind, target FROM ir_semantic_edges",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (fp, kind, target) = row?;
+                    if !real_file_set.contains(fp.as_str()) {
+                        continue;
+                    }
+                    if kind == "di_binds" {
+                        has_di_binds_in_db = true;
+                    } else {
+                        let canon = canonical_sem_target(&kind, &target);
+                        let bucket = semantic_namespace_bucket(&canon).to_owned();
+                        active_non_di_buckets.insert(bucket.clone());
+                        targets_by_bucket.entry(bucket).or_default().push(canon);
+                    }
                 }
             }
 
@@ -2090,6 +2179,7 @@ impl GraphIrStore {
             let seed_sem_files: Vec<String> = effective_edited
                 .iter()
                 .chain(dirty_files.iter())
+                .filter(|f| real_file_set.contains(f.as_str()))
                 .cloned()
                 .collect::<BTreeSet<_>>()
                 .into_iter()
@@ -2116,6 +2206,26 @@ impl GraphIrStore {
                 }
             }
 
+            // Include all sibling canonical targets within any touched semantic namespace bucket
+            // so replacing that virtual bucket file never drops surviving sem:* hubs in it.
+            let mut touched_sem_buckets: BTreeSet<String> = touched_sem_targets
+                .iter()
+                .map(|t| semantic_namespace_bucket(t).to_owned())
+                .collect();
+            for prev_bucket in &delta.prev_semantic_anchor_files {
+                if prev_bucket.starts_with("__semantic__/") {
+                    touched_sem_buckets.insert(prev_bucket.clone());
+                }
+            }
+            if !touched_di_targets.is_empty() {
+                touched_sem_buckets.insert("__semantic__/services".to_owned());
+            }
+            for bucket in &touched_sem_buckets {
+                if let Some(bucket_targets) = targets_by_bucket.get(bucket) {
+                    touched_sem_targets.extend(bucket_targets.iter().cloned());
+                }
+            }
+
             let sem_targets_vec: Vec<String> = touched_sem_targets.iter().cloned().collect();
             let mut sem_rows = query_semantic_rows_for_targets(conn, &sem_targets_vec)?;
 
@@ -2124,21 +2234,17 @@ impl GraphIrStore {
                 .iter()
                 .map(|r| (r.file_path.clone(), r.kind.clone(), r.target.clone(), r.line))
                 .collect();
-            if !touched_di_targets.is_empty() {
-                let di_vec: Vec<String> = touched_di_targets.iter().cloned().collect();
-                for chunk in di_vec.chunks(200) {
-                    let placeholders = (1..=chunk.len())
-                        .map(|i| format!("?{i}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let sql = format!(
+            if !touched_di_targets.is_empty() || touched_sem_buckets.contains("__semantic__/services")
+            {
+                let mut di_rows = Vec::new();
+                if touched_sem_buckets.contains("__semantic__/services") && has_di_binds_in_db {
+                    let mut stmt = conn.prepare(
                         "SELECT file_path, kind, target, source_symbol, line, evidence
                          FROM ir_semantic_edges
-                         WHERE kind = 'di_binds' AND target IN ({placeholders})
-                         ORDER BY id"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                         WHERE kind = 'di_binds'
+                         ORDER BY id",
+                    )?;
+                    let rows = stmt.query_map([], |row| {
                         Ok(StoredSemanticRow {
                             file_path: row.get(0)?,
                             kind: row.get(1)?,
@@ -2149,63 +2255,38 @@ impl GraphIrStore {
                         })
                     })?;
                     for r in rows {
-                        let r = r?;
-                        if seen_sem_row_keys.insert((
-                            r.file_path.clone(),
-                            r.kind.clone(),
-                            r.target.clone(),
-                            r.line,
-                        )) {
-                            sem_rows.push(r);
+                        di_rows.push(r?);
+                    }
+                } else {
+                    let di_vec: Vec<String> = touched_di_targets.iter().cloned().collect();
+                    for chunk in di_vec.chunks(200) {
+                        let placeholders = (1..=chunk.len())
+                            .map(|i| format!("?{i}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let sql = format!(
+                            "SELECT file_path, kind, target, source_symbol, line, evidence
+                             FROM ir_semantic_edges
+                             WHERE kind = 'di_binds' AND target IN ({placeholders})
+                             ORDER BY id"
+                        );
+                        let mut stmt = conn.prepare(&sql)?;
+                        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                            Ok(StoredSemanticRow {
+                                file_path: row.get(0)?,
+                                kind: row.get(1)?,
+                                target: row.get(2)?,
+                                source_symbol: row.get(3)?,
+                                line: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                                evidence: row.get(5)?,
+                            })
+                        })?;
+                        for r in rows {
+                            di_rows.push(r?);
                         }
                     }
                 }
-            }
-
-            // Compute new anchors for every touched semantic target and ensure new anchor files
-            // are in `effective_edited` so `sem:*` nodes are created/moved/removed cleanly.
-            let new_anchors = compute_semantic_anchor_map(&sem_rows, Some(&file_set));
-            for (_, anchor_file, _) in new_anchors.values() {
-                effective_edited.insert((*anchor_file).to_owned());
-                dirty_files.insert((*anchor_file).to_owned());
-            }
-            for row in &sem_rows {
-                if file_set.contains(row.file_path.as_str()) {
-                    dirty_files.insert(row.file_path.clone());
-                }
-            }
-
-            // Ensure any file in `effective_edited` also has ALL of its own semantic rows loaded so
-            // unrelated `sem:*` nodes anchored on an edited file are never dropped on replacement.
-            let edited_vec: Vec<String> = effective_edited.iter().cloned().collect();
-            let mut extra_targets = BTreeSet::new();
-            for chunk in edited_vec.chunks(200) {
-                let placeholders = (1..=chunk.len())
-                    .map(|i| format!("?{i}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "SELECT kind, target FROM ir_semantic_edges WHERE file_path IN ({placeholders})"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?;
-                for row in rows {
-                    let (kind, target) = row?;
-                    if kind == "di_binds" {
-                        touched_di_targets.insert(target);
-                    } else {
-                        let canon = canonical_sem_target(&kind, &target);
-                        if !touched_sem_targets.contains(&canon) {
-                            extra_targets.insert(canon);
-                        }
-                    }
-                }
-            }
-            if !extra_targets.is_empty() {
-                let extra_vec: Vec<String> = extra_targets.into_iter().collect();
-                for r in query_semantic_rows_for_targets(conn, &extra_vec)? {
+                for r in di_rows {
                     if seen_sem_row_keys.insert((
                         r.file_path.clone(),
                         r.kind.clone(),
@@ -2217,13 +2298,35 @@ impl GraphIrStore {
                 }
             }
 
+            // Add touched active semantic namespace buckets to `effective_edited` so `sem:*`
+            // nodes are updated cleanly, and ensure any surviving semantic rows on edited real
+            // files retain their buckets.
+            for bucket in &touched_sem_buckets {
+                if active_non_di_buckets.contains(bucket.as_str())
+                    || bucket == "__semantic__/services"
+                {
+                    effective_edited.insert(bucket.clone());
+                    dirty_files.insert(bucket.clone());
+                }
+            }
+            for row in &sem_rows {
+                if real_file_set.contains(row.file_path.as_str()) {
+                    dirty_files.insert(row.file_path.clone());
+                }
+            }
+
             if dirty_files.len() > 256 {
                 return Ok(None);
             }
 
             let mut di_concrete_files = BTreeSet::new();
-            if !touched_di_targets.is_empty() {
-                let short_names: Vec<String> = touched_di_targets
+            let di_targets_in_rows: BTreeSet<String> = sem_rows
+                .iter()
+                .filter(|r| r.kind == "di_binds")
+                .map(|r| r.target.clone())
+                .collect();
+            if !di_targets_in_rows.is_empty() {
+                let short_names: Vec<String> = di_targets_in_rows
                     .iter()
                     .filter_map(|t| t.strip_prefix("service:"))
                     .flat_map(|s| {
@@ -2247,7 +2350,7 @@ impl GraphIrStore {
                     })?;
                     for r in rows {
                         let fp = r?;
-                        if file_set.contains(fp.as_str()) {
+                        if real_file_set.contains(fp.as_str()) {
                             di_concrete_files.insert(fp);
                         }
                     }
@@ -2282,20 +2385,24 @@ impl GraphIrStore {
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-            let mut needed_symbol_files: BTreeSet<String> = effective_edited.clone();
+            let mut needed_symbol_files: BTreeSet<String> = effective_edited
+                .iter()
+                .filter(|f| real_file_set.contains(f.as_str()))
+                .cloned()
+                .collect();
             for fp in &di_concrete_files {
                 needed_symbol_files.insert(fp.clone());
             }
             for row in &sem_rows {
-                if file_set.contains(row.file_path.as_str()) {
+                if real_file_set.contains(row.file_path.as_str()) {
                     needed_symbol_files.insert(row.file_path.clone());
                 }
             }
             for edge in &edges {
-                if file_set.contains(edge.source_file.as_str()) {
+                if real_file_set.contains(edge.source_file.as_str()) {
                     needed_symbol_files.insert(edge.source_file.clone());
                 }
-                if file_set.contains(edge.target_file.as_str()) {
+                if real_file_set.contains(edge.target_file.as_str()) {
                     needed_symbol_files.insert(edge.target_file.clone());
                 }
             }
@@ -2323,10 +2430,10 @@ impl GraphIrStore {
 
             let emit_files: Vec<String> = effective_edited
                 .iter()
-                .filter(|f| file_set.contains(f.as_str()))
+                .filter(|f| real_file_set.contains(f.as_str()))
                 .cloned()
                 .collect();
-            let communities = compute_file_communities_for_delta(conn, &files)?;
+            let communities = compute_file_communities_for_delta(conn, &real_files)?;
             let mut used_node_ids = BTreeSet::new();
             for path in &needed_symbol_files {
                 if !effective_edited.contains(path) {
@@ -2341,12 +2448,12 @@ impl GraphIrStore {
                 &mut used_node_ids,
             );
             let (edge_links, resolved_targets_by_source) =
-                collect_resolved_edge_links(&edges, &file_set, &maps);
+                collect_resolved_edge_links(&edges, &real_file_set, &maps);
             link_specs.extend(edge_links);
 
             emit_semantic_nodes_and_links(
                 &sem_rows,
-                &file_set,
+                &real_file_set,
                 &maps,
                 &resolved_targets_by_source,
                 &communities,
@@ -2355,6 +2462,35 @@ impl GraphIrStore {
                 &mut node_specs,
                 &mut link_specs,
             );
+
+            // Reconcile virtual `__semantic__/*` namespace buckets across `files`, `edited_files`,
+            // and `removed_files` so incremental `Index::update_files` matches full export exactly.
+            let mut all_active_buckets = active_non_di_buckets;
+            let services_bucket = "__semantic__/services";
+            if node_specs.iter().any(|n| n.source_file == services_bucket)
+                || (!effective_edited.contains(services_bucket)
+                    && has_di_binds_in_db
+                    && unresolved_di_exists_in_db(conn, &real_file_set)?)
+            {
+                all_active_buckets.insert(services_bucket.to_owned());
+            }
+            if !all_active_buckets.contains(services_bucket)
+                && effective_edited.remove(services_bucket)
+            {
+                dirty_files.remove(services_bucket);
+            }
+            for prev_bucket in &delta.prev_semantic_anchor_files {
+                if prev_bucket.starts_with("__semantic__/")
+                    && !all_active_buckets.contains(prev_bucket.as_str())
+                {
+                    effective_edited.remove(prev_bucket.as_str());
+                    removed_files.insert(prev_bucket.clone());
+                }
+            }
+            let mut files = real_files;
+            files.extend(all_active_buckets);
+            files.sort();
+            files.dedup();
 
             let neighbor_files: Vec<String> = needed_symbol_files
                 .into_iter()
@@ -2948,6 +3084,100 @@ impl GraphIrStore {
     }
 }
 
+fn push_import_path_tokens(out: &mut BTreeSet<String>, raw_path: &str, kind: &str) {
+    let trimmed = raw_path.trim().to_ascii_lowercase();
+    if trimmed.is_empty() || trimmed.len() > 240 {
+        return;
+    }
+    const CODE_EXTS: &[&str] = &[
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".rs", ".py", ".pyi", ".php",
+        ".phtml", ".inc",
+    ];
+    let no_ext = CODE_EXTS
+        .iter()
+        .find_map(|ext| trimmed.strip_suffix(ext))
+        .unwrap_or(trimmed.as_str());
+
+    if no_ext.contains('/') {
+        if no_ext.len() >= 2 && no_ext.len() <= 160 {
+            out.insert(no_ext.to_owned());
+        }
+        let mut clean = no_ext;
+        while let Some(rest) = clean
+            .strip_prefix("../")
+            .or_else(|| clean.strip_prefix("./"))
+            .or_else(|| clean.strip_prefix("@/"))
+            .or_else(|| clean.strip_prefix("~/"))
+        {
+            clean = rest;
+        }
+        let clean = clean.trim_matches('/');
+        if !clean.is_empty() {
+            if clean.contains('/') && clean.len() <= 160 {
+                out.insert(clean.to_owned());
+            }
+            let segs: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
+            if let Some(&last) = segs.last() {
+                if matches!(last, "index" | "mod" | "lib" | "__init__") && segs.len() >= 2 {
+                    let parent = segs[segs.len() - 2];
+                    out.insert(format!("{parent}/{last}"));
+                    if parent != "src" {
+                        out.insert(format!("./{parent}"));
+                        out.insert(format!("../{parent}"));
+                    }
+                } else if !last.is_empty() {
+                    out.insert(format!("./{last}"));
+                    out.insert(format!("../{last}"));
+                }
+            }
+            if segs.len() >= 2 {
+                out.insert(format!("{}/{}", segs[segs.len() - 2], segs[segs.len() - 1]));
+            }
+        }
+    } else if no_ext.contains("::") {
+        let clean = no_ext
+            .trim_end_matches("::*")
+            .trim_end_matches("::self")
+            .trim_matches(':');
+        if clean.len() >= 2 && clean.len() <= 160 {
+            out.insert(clean.to_owned());
+        }
+        let segs: Vec<&str> = clean.split("::").filter(|s| !s.is_empty()).collect();
+        for w in segs.windows(2) {
+            out.insert(format!("{}::{}", w[0], w[1]));
+        }
+        let head = segs.first().copied();
+        for &seg in &segs {
+            if !matches!(seg, "crate" | "super" | "self" | "src") {
+                out.insert(format!("::{seg}"));
+                if matches!(head, Some("crate" | "super" | "self")) {
+                    out.insert(format!("{}::{seg}", head.unwrap()));
+                }
+            }
+        }
+    } else if no_ext.contains('.') {
+        if no_ext.len() >= 2 && no_ext.len() <= 160 {
+            out.insert(no_ext.to_owned());
+        }
+        let segs: Vec<&str> = no_ext.split('.').filter(|s| !s.is_empty()).collect();
+        for w in segs.windows(2) {
+            out.insert(format!("{}.{}", w[0], w[1]));
+        }
+        if let Some(&last) = segs.last()
+            && !last.is_empty()
+        {
+            out.insert(format!(".{last}"));
+        }
+    } else if kind == "mod_decl" {
+        out.insert(format!("{no_ext}::mod"));
+        out.insert(format!("{no_ext}/mod"));
+        if no_ext != "src" {
+            out.insert(format!("./{no_ext}"));
+            out.insert(format!("../{no_ext}"));
+        }
+    }
+}
+
 fn collect_symbol_ref_tokens(ir: &AstFileExtraction) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut push_tok = |raw: &str| {
@@ -2988,6 +3218,9 @@ fn collect_symbol_ref_tokens(ir: &AstFileExtraction) -> BTreeSet<String> {
         } else {
             push_tok(&sem.target);
         }
+    }
+    for imp in &ir.imports {
+        push_import_path_tokens(&mut out, &imp.path, &imp.kind);
     }
     out
 }
@@ -3191,19 +3424,79 @@ fn parse_paths_parallel(real_root: &Path, paths: &[String]) -> (Vec<ParsedUnit>,
 fn candidate_path_tokens(rel_path: &str) -> Vec<String> {
     let lower = rel_path.to_ascii_lowercase();
     let mut tokens = Vec::new();
+    let mut push_unique = |tok: String| {
+        if tok.len() >= 2 && !tokens.contains(&tok) {
+            tokens.push(tok);
+        }
+    };
     let without_ext = lower
         .rsplit_once('.')
         .map_or(lower.as_str(), |(stem, _)| stem);
-    if !without_ext.is_empty() {
-        tokens.push(without_ext.to_owned());
+    let file_stem = without_ext.rsplit('/').next().unwrap_or("");
+    if !matches!(file_stem, "mod" | "lib" | "index" | "__init__") {
+        if !without_ext.is_empty() {
+            push_unique(without_ext.to_owned());
+        }
+        if !file_stem.is_empty() {
+            push_unique(file_stem.to_owned());
+        }
+        return tokens;
     }
-    if let Some(file_stem) = without_ext.rsplit('/').next()
-        && !file_stem.is_empty()
-    {
-        if !matches!(file_stem, "mod" | "lib" | "index" | "__init__") {
-            tokens.push(file_stem.to_owned());
-        } else if let Some(parent_dir) = without_ext.rsplit('/').nth(1).filter(|s| !s.is_empty()) {
-            tokens.push(parent_dir.to_owned());
+
+    let segs: Vec<&str> = without_ext.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() <= 1 {
+        // Root entry file (`index.ts`, `lib.rs`, `__init__.py`, `mod.rs`): emit scoped specifiers
+        // instead of bare `"index"` / `"lib"` so unrelated identifiers never trigger fanout.
+        push_unique(format!("./{file_stem}"));
+        push_unique(format!("../{file_stem}"));
+        if matches!(file_stem, "mod" | "lib") {
+            push_unique(format!("::{file_stem}"));
+            push_unique(format!("crate::{file_stem}"));
+        }
+        if file_stem == "__init__" {
+            push_unique(format!(".{file_stem}"));
+        }
+        return tokens;
+    }
+
+    push_unique(without_ext.to_owned());
+    push_unique(format!("./{file_stem}"));
+    push_unique(format!("../{file_stem}"));
+    let parent_path = segs[..segs.len() - 1].join("/");
+    if parent_path.contains('/') {
+        push_unique(parent_path);
+    }
+    let parent_dir = segs[segs.len() - 2];
+    push_unique(format!("{parent_dir}/{file_stem}"));
+    if matches!(file_stem, "mod" | "lib") {
+        push_unique(format!("{parent_dir}::{file_stem}"));
+    }
+    if segs.len() >= 3 {
+        let grand = segs[segs.len() - 3];
+        push_unique(format!("{grand}/{parent_dir}"));
+        if matches!(file_stem, "mod" | "lib") {
+            push_unique(format!("{grand}::{parent_dir}"));
+        }
+        if file_stem == "__init__" {
+            push_unique(format!("{grand}.{parent_dir}"));
+        }
+        if file_stem == "lib" && parent_dir == "src" {
+            push_unique(format!("{grand}::lib"));
+            push_unique(format!("::{grand}"));
+            push_unique(format!("crate::{grand}"));
+        }
+    }
+    if parent_dir != "src" || segs.len() == 2 {
+        push_unique(format!("./{parent_dir}"));
+        push_unique(format!("../{parent_dir}"));
+        if file_stem == "mod" {
+            push_unique(format!("::{parent_dir}"));
+            push_unique(format!("crate::{parent_dir}"));
+            push_unique(format!("self::{parent_dir}"));
+            push_unique(format!("super::{parent_dir}"));
+        }
+        if file_stem == "__init__" {
+            push_unique(format!(".{parent_dir}"));
         }
     }
     tokens
@@ -3372,40 +3665,62 @@ fn query_incoming_callers_from_conn(
     Ok(callers)
 }
 
-fn collect_affected_dependents(
+fn collect_reexport_chain_dependents(
     conn: &Connection,
-    affected_targets: &BTreeSet<String>,
+    seed_targets: &BTreeSet<String>,
     skip_files: &BTreeSet<String>,
-    manifest_changed: bool,
-    manifest_langs: &[&str],
-) -> Result<Vec<String>> {
-    let mut candidates = BTreeSet::new();
-    for src in query_incoming_callers_from_conn(conn, affected_targets)? {
-        if !skip_files.contains(&src) {
-            candidates.insert(src);
+    manifests_opt: Option<&ManifestIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let mut out = BTreeSet::new();
+    if seed_targets.is_empty() {
+        return Ok((out, BTreeSet::new()));
+    }
+    let reexport_rows: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT file_path, orig_path FROM ir_reexports")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if reexport_rows.is_empty() {
+        return Ok((out, BTreeSet::new()));
+    }
+    let mut known_files: BTreeSet<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM ir_files")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()?
+    };
+    known_files.extend(seed_targets.iter().cloned());
+
+    let reexp_barrels = graph_deps::collect_backward_reexport_barrels(
+        &reexport_rows,
+        seed_targets,
+        &known_files,
+        manifests_opt,
+        crate_map_opt,
+        graph_deps::MAX_REEXPORT_HOPS,
+    );
+    if reexp_barrels.is_empty() {
+        return Ok((out, reexp_barrels));
+    }
+
+    for barrel in &reexp_barrels {
+        if !skip_files.contains(barrel) {
+            out.insert(barrel.clone());
+        }
+    }
+    for caller in query_incoming_callers_from_conn(conn, &reexp_barrels)? {
+        if !skip_files.contains(&caller) {
+            out.insert(caller);
         }
     }
 
-    // Re-export propagation: files referencing an edited module/barrel token (via `ir_symbol_refs`)
-    // or importing from a re-exported module must also be considered when re-exports exist on
-    // affected targets.
     let reexp_tokens: Vec<String> = {
         let mut set = BTreeSet::new();
-        for target in affected_targets {
-            let has_reexp: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ir_reexports WHERE file_path = ?1)",
-                    [target],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if has_reexp {
-                for tok in candidate_path_tokens(target) {
-                    let t = tok.trim().to_ascii_lowercase();
-                    if t.len() >= 2 {
-                        set.insert(t);
-                    }
+        for barrel in &reexp_barrels {
+            for tok in candidate_path_tokens(barrel) {
+                let t = tok.trim().to_ascii_lowercase();
+                if t.len() >= 2 {
+                    set.insert(t);
                 }
             }
         }
@@ -3426,14 +3741,47 @@ fn collect_affected_dependents(
         for r in rows {
             let fp = r?;
             if !skip_files.contains(&fp) {
-                candidates.insert(fp);
+                out.insert(fp);
             }
         }
     }
+    Ok((out, reexp_barrels))
+}
+
+fn collect_affected_dependents(
+    conn: &Connection,
+    affected_targets: &BTreeSet<String>,
+    skip_files: &BTreeSet<String>,
+    manifest_changed: bool,
+    manifest_langs: &[&str],
+    manifests_opt: Option<&ManifestIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Result<Vec<String>> {
+    let mut candidates = BTreeSet::new();
+    for src in query_incoming_callers_from_conn(conn, affected_targets)? {
+        if !skip_files.contains(&src) {
+            candidates.insert(src);
+        }
+    }
+
+    // Multi-hop re-export propagation: traverse `ir_reexports` backwards up to
+    // `MAX_REEXPORT_HOPS` (`8`) so leaf or intermediate-barrel changes invalidate upstream
+    // barrels and every consumer referencing those barrels.
+    let (reexp_deps, reexp_barrels) = collect_reexport_chain_dependents(
+        conn,
+        affected_targets,
+        skip_files,
+        manifests_opt,
+        crate_map_opt,
+    )?;
+    candidates.extend(reexp_deps);
 
     let tokens: Vec<String> = affected_targets
         .iter()
+        .chain(reexp_barrels.iter())
         .flat_map(|p| candidate_path_tokens(p))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     if manifest_changed || !tokens.is_empty() {
         let mut stmt =
@@ -4097,6 +4445,27 @@ fn update_reexport_index_for_units(
     }
 }
 
+/// Maps a canonical semantic hub target key (e.g. `route:...`, `table:...`) into a
+/// dedicated virtual namespace bucket so `sem:*` nodes are never attributed to a single
+/// arbitrary `anchor_file`'s directory or module.
+pub(crate) fn semantic_namespace_bucket(target_key: &str) -> &'static str {
+    let key = target_key
+        .trim()
+        .strip_prefix("sem:")
+        .unwrap_or(target_key.trim());
+    if key.starts_with("route:") {
+        "__semantic__/routes"
+    } else if key.starts_with("table:") {
+        "__semantic__/tables"
+    } else if key.starts_with("event:") {
+        "__semantic__/events"
+    } else if key.starts_with("service:") {
+        "__semantic__/services"
+    } else {
+        "__semantic__/contracts"
+    }
+}
+
 fn canonical_sem_target(kind: &str, target: &str) -> String {
     if matches!(kind, "exposes_route" | "route" | "calls_route")
         && let Some(raw) = target.strip_prefix("route:")
@@ -4157,6 +4526,23 @@ fn emit_semantic_nodes_and_links(
     links: &mut Vec<IrLinkSpec>,
 ) {
     let semantic_anchors = compute_semantic_anchor_map(sem_edges, Some(file_set));
+    let comm_base = communities
+        .values()
+        .map(|(id, _)| id.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let mut target_all_test: BTreeMap<String, bool> = BTreeMap::new();
+    for edge in sem_edges {
+        if !file_set.contains(edge.file_path.as_str()) {
+            continue;
+        }
+        let target_key = canonical_sem_target(&edge.kind, &edge.target);
+        let edge_is_test = is_test_path(&edge.file_path);
+        target_all_test
+            .entry(target_key)
+            .and_modify(|all| *all &= edge_is_test)
+            .or_insert(edge_is_test);
+    }
 
     let resolve_di_target = |source_file: &str, src_id: &str, svc: &str| -> Option<String> {
         let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
@@ -4252,29 +4638,38 @@ fn emit_semantic_nodes_and_links(
             existing.clone()
         } else {
             let sem_id = format!("sem:{target_key}");
-            let (_, anchor_file, anchor_line) = semantic_anchors
+            let (_, _, anchor_line) = semantic_anchors
                 .get(target_key.as_str())
                 .copied()
                 .unwrap_or((1, edge.file_path.as_str(), edge.line));
+            let sem_bucket = semantic_namespace_bucket(&target_key);
             let should_emit_node =
-                emit_node_files.is_none_or(|allowed| allowed.contains(anchor_file));
+                emit_node_files.is_none_or(|allowed| allowed.contains(sem_bucket));
             if should_emit_node {
-                let (comm_id, comm_name) = communities
-                    .get(anchor_file)
-                    .map_or((None, None), |(id, name)| (Some(*id), Some(name.clone())));
+                let all_test = target_all_test
+                    .get(target_key.as_str())
+                    .copied()
+                    .unwrap_or(false);
+                let (sem_comm_offset, sem_comm_name) = match sem_bucket {
+                    "__semantic__/routes" => (0u32, "semantic:routes"),
+                    "__semantic__/tables" => (1u32, "semantic:tables"),
+                    "__semantic__/events" => (2u32, "semantic:events"),
+                    "__semantic__/services" => (3u32, "semantic:services"),
+                    _ => (4u32, "semantic:contracts"),
+                };
                 nodes.push(IrNodeSpec {
                     id: sem_id.clone(),
                     label: target_key.clone(),
-                    source_file: anchor_file.to_owned(),
+                    source_file: sem_bucket.to_owned(),
                     source_location: Some(format!("L{anchor_line}")),
                     end_line: 0,
                     file_type: None,
                     node_kind: Some("semantic".to_owned()),
-                    community: comm_id,
-                    community_name: comm_name,
+                    community: Some(comm_base.saturating_add(sem_comm_offset)),
+                    community_name: Some(sem_comm_name.to_owned()),
                     callable_class: false,
                     is_abstract: false,
-                    is_test: is_test_path(anchor_file),
+                    is_test: all_test,
                 });
             }
             emitted_semantic_nodes.insert(target_key.clone(), sem_id.clone());
@@ -4426,6 +4821,49 @@ struct PrevReexportSemanticState {
     prev_sem_anchors: Vec<String>,
 }
 
+fn unresolved_di_exists_in_db(conn: &Connection, real_file_set: &BTreeSet<&str>) -> Result<bool> {
+    let mut di_stmt = conn.prepare(
+        "SELECT file_path, kind, target, source_symbol, line, evidence
+         FROM ir_semantic_edges
+         WHERE kind = 'di_binds'
+         ORDER BY id",
+    )?;
+    let di_rows = di_stmt
+        .query_map([], |row| {
+            Ok(StoredSemanticRow {
+                file_path: row.get(0)?,
+                kind: row.get(1)?,
+                target: row.get(2)?,
+                source_symbol: row.get(3)?,
+                line: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(1),
+                evidence: row.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if di_rows.is_empty() {
+        return Ok(false);
+    }
+    let mut sym_stmt = conn.prepare(
+        "SELECT DISTINCT name FROM ir_symbols WHERE kind IN ('class', 'interface', 'trait', 'enum', 'struct', 'type')",
+    )?;
+    let type_names: BTreeSet<String> = sym_stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    for row in &di_rows {
+        if !real_file_set.contains(row.file_path.as_str()) {
+            continue;
+        }
+        let target_key = canonical_sem_target(&row.kind, &row.target);
+        if let Some(svc) = target_key.strip_prefix("service:") {
+            let short = svc.rsplit(['\\', ':', '.']).next().unwrap_or(svc).trim();
+            if short.is_empty() || !type_names.contains(short) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn collect_prev_reexport_and_semantic_state(
     conn: &Connection,
     touched_files: &[String],
@@ -4507,13 +4945,13 @@ fn collect_prev_reexport_and_semantic_state(
         }
     }
 
-    let target_list: Vec<String> = prev_sem_targets.iter().cloned().collect();
-    let prev_rows = query_semantic_rows_for_targets(conn, &target_list)?;
-    let prev_anchors = compute_semantic_anchor_map(&prev_rows, None);
-    let prev_anchor_files: BTreeSet<String> = prev_anchors
-        .into_values()
-        .map(|(_, fp, _)| fp.to_owned())
+    let mut prev_anchor_files: BTreeSet<String> = prev_sem_targets
+        .iter()
+        .map(|target| semantic_namespace_bucket(target).to_owned())
         .collect();
+    if !prev_di_targets.is_empty() {
+        prev_anchor_files.insert("__semantic__/services".to_owned());
+    }
 
     Ok(PrevReexportSemanticState {
         prev_reexports,
@@ -5349,78 +5787,214 @@ fn raw_dir_labels(files: &[String]) -> (Vec<String>, bool) {
     (raw_labels, needs_edge_components)
 }
 
+fn edge_pair_weights<'b>(
+    edges: &[(&'b str, &'b str, &'b str, &'b str)],
+) -> Vec<(&'b str, &'b str, u64)> {
+    // Aggregate `(src_file, dst_file)` structural coupling: active edges (`calls`, `extends`,
+    // `implements`, `inherits`) contribute `2` per distinct target symbol, while passive import /
+    // type-annotation edges contribute at most `1` per `(src_file, dst_file)` pair so a single
+    // cross-folder class import + type hint + method call (`modules.rs` 1-dependency case) ties
+    // cleanly at `3` rather than collapsing distinct module folders together.
+    let mut active_targets: BTreeMap<(&'b str, &'b str), BTreeSet<&'b str>> = BTreeMap::new();
+    let mut passive_pairs: BTreeSet<(&'b str, &'b str)> = BTreeSet::new();
+    let mut all_pairs: BTreeSet<(&'b str, &'b str)> = BTreeSet::new();
+    for &(src, dst, rel, tgt_sym) in edges {
+        if src == dst {
+            continue;
+        }
+        let canon_pair = if src < dst { (src, dst) } else { (dst, src) };
+        all_pairs.insert(canon_pair);
+        if matches!(rel, "calls" | "extends" | "implements" | "inherits") {
+            let sym_key = if tgt_sym.is_empty() { rel } else { tgt_sym };
+            active_targets
+                .entry(canon_pair)
+                .or_default()
+                .insert(sym_key);
+        } else {
+            passive_pairs.insert(canon_pair);
+        }
+    }
+    all_pairs
+        .into_iter()
+        .map(|pair| {
+            let active = active_targets.get(&pair).map_or(0u64, |s| s.len() as u64) * 2;
+            let passive = u64::from(passive_pairs.contains(&pair));
+            (pair.0, pair.1, (active + passive).max(1))
+        })
+        .collect()
+}
+
 fn finish_file_communities<'a>(
     files: &'a [String],
-    mut raw_labels: Vec<String>,
-    split_components: bool,
-    edge_pairs: &[(&str, &str)],
+    raw_labels: Vec<String>,
+    distinct_folder_count: usize,
+    edge_weights: &[(&str, &str, u64)],
 ) -> BTreeMap<&'a str, (u32, String)> {
     if files.is_empty() {
         return BTreeMap::new();
     }
 
-    // Group connected flat files inside the same generic directory if directory structure alone
-    // did not distinguish separate components.
-    if split_components {
-        let mut idx_by_file: BTreeMap<&str, usize> = BTreeMap::new();
-        for (i, f) in files.iter().enumerate() {
-            idx_by_file.insert(f.as_str(), i);
+    let n = files.len();
+    let mut idx_by_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, f) in files.iter().enumerate() {
+        idx_by_file.insert(f.as_str(), i);
+    }
+
+    // Aggregate undirected edge weights across distinct files from `ir_edges`.
+    let mut adj_weights: Vec<BTreeMap<usize, u64>> = vec![BTreeMap::new(); n];
+    for &(src, dst, w) in edge_weights {
+        if src == dst || w == 0 {
+            continue;
         }
-        let mut parent: Vec<usize> = (0..files.len()).collect();
-        fn find_root(parent: &mut [usize], mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
+        if let (Some(&u), Some(&v)) = (idx_by_file.get(src), idx_by_file.get(dst))
+            && u != v
+        {
+            *adj_weights[u].entry(v).or_default() += w;
+            *adj_weights[v].entry(u).or_default() += w;
+        }
+    }
+    let adj: Vec<Vec<(usize, u64)>> = adj_weights
+        .into_iter()
+        .map(|m| m.into_iter().collect())
+        .collect();
+
+    let has_folder_signal = distinct_folder_count > 1;
+    let mut seed_names: Vec<String> = Vec::new();
+    let mut seed_id_of: BTreeMap<String, usize> = BTreeMap::new();
+    let mut folder_seed: Vec<usize> = Vec::with_capacity(n);
+    for (i, raw) in raw_labels.iter().enumerate() {
+        let sid = if has_folder_signal {
+            if let Some(&existing) = seed_id_of.get(raw) {
+                existing
+            } else {
+                let id = seed_names.len();
+                seed_names.push(raw.clone());
+                seed_id_of.insert(raw.clone(), id);
+                id
             }
-            x
-        }
-        for &(src, dst) in edge_pairs {
-            if let (Some(&u), Some(&v)) = (idx_by_file.get(src), idx_by_file.get(dst)) {
-                let ru = find_root(&mut parent, u);
-                let rv = find_root(&mut parent, v);
-                if ru != rv {
-                    parent[rv] = ru.min(rv);
-                    parent[ru] = ru.min(rv);
-                }
+        } else {
+            seed_names.push(raw.clone());
+            i
+        };
+        folder_seed.push(sid);
+    }
+
+    // Run deterministic edge-weighted label propagation over `ir_edges`, using folder prefix
+    // only as a tie-breaker / single-dependency prior (`3`) so multi-call or multi-file cross-
+    // folder clusters unify cleanly while loosely coupled distinct folders preserve clean boundaries.
+    const FOLDER_PREFIX_PRIOR: u64 = 3;
+    let mut labels: Vec<usize> = folder_seed.clone();
+    const MAX_LP_ITERS: usize = 16;
+    for _ in 0..MAX_LP_ITERS {
+        let mut changed = false;
+        for u in 0..n {
+            if adj[u].is_empty() {
+                continue;
             }
-        }
-        let mut comp_min_stem: BTreeMap<usize, String> = BTreeMap::new();
-        for (i, path) in files.iter().enumerate() {
-            let root = find_root(&mut parent, i);
-            let leaf = path.rsplit('/').next().unwrap_or(path);
-            let stem = leaf.rsplit_once('.').map_or(leaf, |(s, _)| s);
-            comp_min_stem
-                .entry(root)
-                .and_modify(|prev| {
-                    if stem < prev.as_str() {
-                        *prev = stem.to_owned();
-                    }
+            let mut candidate_scores: BTreeMap<usize, u64> = BTreeMap::new();
+            for &(v, w) in &adj[u] {
+                *candidate_scores.entry(labels[v]).or_default() += w;
+            }
+            if has_folder_signal {
+                *candidate_scores.entry(folder_seed[u]).or_default() += FOLDER_PREFIX_PRIOR;
+            }
+            let own_folder = folder_seed[u];
+            let current = labels[u];
+            let best = candidate_scores
+                .into_iter()
+                .max_by(|&(la, sa), &(lb, sb)| {
+                    sa.cmp(&sb)
+                        .then_with(|| (la == own_folder).cmp(&(lb == own_folder)))
+                        .then_with(|| (la == current).cmp(&(lb == current)))
+                        .then_with(|| seed_names[lb].cmp(&seed_names[la]))
+                        .then_with(|| lb.cmp(&la))
                 })
-                .or_insert_with(|| stem.to_owned());
-        }
-        if comp_min_stem.len() > 1 {
-            for (i, label) in raw_labels.iter_mut().enumerate().take(files.len()) {
-                let root = find_root(&mut parent, i);
-                if let Some(stem) = comp_min_stem.get(&root) {
-                    *label = stem.clone();
-                }
+                .map_or(current, |(l, _)| l);
+            if best != current {
+                labels[u] = best;
+                changed = true;
             }
+        }
+        if !changed {
+            break;
         }
     }
 
-    let mut ordered_names: BTreeSet<(String, String)> = BTreeSet::new();
-    for label in &raw_labels {
-        ordered_names.insert((label.to_ascii_lowercase(), label.clone()));
+    // Group members by converged cluster ID and pick the dominant folder/stem label for each
+    // cluster, disambiguating distinct clusters that happen to share the same folder name.
+    let mut cluster_members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, &cid) in labels.iter().enumerate() {
+        cluster_members.entry(cid).or_default().push(i);
     }
-    let mut id_by_name: BTreeMap<String, u32> = BTreeMap::new();
-    for (idx, (_, name)) in ordered_names.into_iter().enumerate() {
-        id_by_name.insert(name, idx as u32);
+
+    let mut cluster_base_names: Vec<(usize, String, String)> =
+        Vec::with_capacity(cluster_members.len());
+    for (cid, members) in &cluster_members {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut min_stem: Option<String> = None;
+        for &m in members {
+            *counts.entry(raw_labels[m].as_str()).or_default() += 1;
+            let leaf = files[m].rsplit('/').next().unwrap_or(&files[m]);
+            let stem = leaf.rsplit_once('.').map_or(leaf, |(s, _)| s);
+            if min_stem.as_deref().is_none_or(|prev| stem < prev) {
+                min_stem = Some(stem.to_owned());
+            }
+        }
+        let dominant_name = if !has_folder_signal {
+            min_stem.clone().unwrap_or_else(|| "root".to_owned())
+        } else {
+            counts
+                .into_iter()
+                .max_by(|&(na, ca), &(nb, cb)| ca.cmp(&cb).then_with(|| nb.cmp(na)))
+                .map_or_else(|| "root".to_owned(), |(name, _)| name.to_owned())
+        };
+        cluster_base_names.push((
+            *cid,
+            dominant_name,
+            min_stem.unwrap_or_else(|| "root".to_owned()),
+        ));
+    }
+
+    cluster_base_names.sort_by(|a, b| {
+        a.1.to_ascii_lowercase()
+            .cmp(&b.1.to_ascii_lowercase())
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    let mut used_names: BTreeSet<String> = BTreeSet::new();
+    let mut cluster_info: BTreeMap<usize, (u32, String)> = BTreeMap::new();
+    for (cid, base_name, min_stem) in cluster_base_names {
+        let mut final_name = base_name.clone();
+        if used_names.contains(&final_name) {
+            let candidate = format!("{base_name} ({min_stem})");
+            if !used_names.contains(&candidate) {
+                final_name = candidate;
+            } else {
+                let mut suffix = 2usize;
+                loop {
+                    let alt = format!("{base_name}#{suffix}");
+                    if !used_names.contains(&alt) {
+                        final_name = alt;
+                        break;
+                    }
+                    suffix += 1;
+                }
+            }
+        }
+        used_names.insert(final_name.clone());
+        let id = cluster_info.len() as u32;
+        cluster_info.insert(cid, (id, final_name));
     }
 
     let mut out = BTreeMap::new();
-    for (path, label) in files.iter().zip(raw_labels) {
-        let id = id_by_name.get(&label).copied().unwrap_or(0);
-        out.insert(path.as_str(), (id, label));
+    for (i, path) in files.iter().enumerate() {
+        let info = cluster_info
+            .get(&labels[i])
+            .cloned()
+            .unwrap_or((0, raw_labels[i].clone()));
+        out.insert(path.as_str(), info);
     }
     out
 }
@@ -5429,44 +6003,62 @@ fn compute_file_communities<'a>(
     files: &'a [String],
     edges: &[StoredEdgeRow],
 ) -> BTreeMap<&'a str, (u32, String)> {
-    let (raw_labels, needs_edge_components) = raw_dir_labels(files);
-    let edge_pairs: Vec<(&str, &str)> = if needs_edge_components {
-        edges
-            .iter()
-            .map(|e| (e.source_file.as_str(), e.target_file.as_str()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    finish_file_communities(files, raw_labels, needs_edge_components, &edge_pairs)
+    let (raw_labels, _) = raw_dir_labels(files);
+    let distinct_len = raw_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let raw_edges: Vec<(&str, &str, &str, &str)> = edges
+        .iter()
+        .filter(|e| e.source_file != e.target_file)
+        .map(|e| {
+            (
+                e.source_file.as_str(),
+                e.target_file.as_str(),
+                e.relation.as_str(),
+                e.target_symbol.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    let weights = edge_pair_weights(&raw_edges);
+    finish_file_communities(files, raw_labels, distinct_len, &weights)
 }
 
 fn compute_file_communities_for_delta<'a>(
     conn: &Connection,
     files: &'a [String],
 ) -> Result<BTreeMap<&'a str, (u32, String)>> {
-    let (raw_labels, needs_edge_components) = raw_dir_labels(files);
-    if !needs_edge_components {
-        return Ok(finish_file_communities(files, raw_labels, false, &[]));
-    }
-    let owned_pairs: Vec<(String, String)> = {
+    let (raw_labels, _) = raw_dir_labels(files);
+    let distinct_len = raw_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let owned_edges: Vec<(String, String, String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT source_file, target_file FROM ir_edges WHERE source_file != target_file",
+            "SELECT source_file, target_file, relation, COALESCE(target_symbol, '') FROM ir_edges WHERE source_file != target_file",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
-    let borrowed_pairs: Vec<(&str, &str)> = owned_pairs
+    let borrowed: Vec<(&str, &str, &str, &str)> = owned_edges
         .iter()
-        .map(|(s, t)| (s.as_str(), t.as_str()))
+        .map(|(s, t, r, ts)| (s.as_str(), t.as_str(), r.as_str(), ts.as_str()))
         .collect();
+    let weights = edge_pair_weights(&borrowed);
     Ok(finish_file_communities(
         files,
         raw_labels,
-        true,
-        &borrowed_pairs,
+        distinct_len,
+        &weights,
     ))
 }
 
@@ -7287,6 +7879,384 @@ function helper(v: number): number { return v + 1; }
         assert!(
             edges.contains(&("src/consumer.ts".to_owned(), "src/impl_b.ts".to_owned())),
             "handle_a must invalidate reexport_cache against external DB write_epoch: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn multi_hop_barrel_propagation_and_scoped_tokens_avoid_spurious_rebuild_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/mid")).unwrap();
+        std::fs::create_dir_all(root.join("src/top")).unwrap();
+        std::fs::create_dir_all(root.join("src/utils")).unwrap();
+        std::fs::create_dir_all(root.join("src/unrelated")).unwrap();
+        std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
+
+        std::fs::write(
+            root.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"core-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/core/src/lib.rs"),
+            "pub fn core_boot() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/impl_a.ts"),
+            "export function op(): number { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/impl_b.ts"),
+            "export function op(): number { return 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/mid/index.ts"),
+            "export * from '../impl_a';\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/top/index.ts"), "export * from '../mid';\n").unwrap();
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { op } from './top';\nexport function run(): number { return op(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/utils/index.ts"),
+            "export const utilVal = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/utils_caller.ts"),
+            "import { utilVal } from './utils';\nexport const seen = utilVal;\n",
+        )
+        .unwrap();
+        // 300 unrelated files mentioning `utils` and `src` as identifiers/paths without importing `src/utils/index.ts` or `crates/core/src/lib.rs`.
+        for i in 0..300 {
+            std::fs::write(
+                root.join(format!("src/unrelated/u{i:03}.ts")),
+                "export const utils = 'src';\nexport function index(src: number): number { return src; }\n",
+            )
+            .unwrap();
+        }
+
+        // Verify candidate_path_tokens emits scoped module specifiers, never bare `src`/`utils`/`index`/`lib`.
+        let utils_tokens = candidate_path_tokens("src/utils/index.ts");
+        assert!(
+            utils_tokens.contains(&"./utils".to_owned()),
+            "{utils_tokens:?}"
+        );
+        assert!(
+            utils_tokens.contains(&"utils/index".to_owned()),
+            "{utils_tokens:?}"
+        );
+        assert!(
+            !utils_tokens.contains(&"utils".to_owned()),
+            "{utils_tokens:?}"
+        );
+
+        let lib_tokens = candidate_path_tokens("crates/core/src/lib.rs");
+        assert!(
+            lib_tokens.contains(&"src::lib".to_owned()),
+            "{lib_tokens:?}"
+        );
+        assert!(
+            lib_tokens.contains(&"core::src".to_owned()),
+            "{lib_tokens:?}"
+        );
+        assert!(!lib_tokens.contains(&"src".to_owned()), "{lib_tokens:?}");
+        assert!(!lib_tokens.contains(&"lib".to_owned()), "{lib_tokens:?}");
+
+        let store = GraphIrStore::open(&state, "multi-hop-barrel").unwrap();
+        store.sync_workspace(&root).unwrap();
+        let (base_nodes, base_links, _, _) = store.export_ir_graph_elements().unwrap();
+        let mut live_index =
+            crate::graph_map::Index::from_ir_parts(&root, None, None, base_nodes, base_links)
+                .unwrap();
+
+        // 1. Editing intermediate barrel `src/mid/index.ts` must propagate through `src/top/index.ts` to `src/consumer.ts`.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/mid/index.ts"),
+            "export * from '../impl_b';\n",
+        )
+        .unwrap();
+        let d_mid = store
+            .update_paths_with_delta(&root, &["src/mid/index.ts".to_owned()])
+            .unwrap();
+        assert!(d_mid.reexport_changed);
+        assert!(
+            d_mid
+                .re_resolved_files
+                .contains(&"src/top/index.ts".to_owned()),
+            "expected upstream barrel src/top/index.ts in re_resolved_files: {:?}",
+            d_mid.re_resolved_files
+        );
+        assert!(
+            d_mid
+                .re_resolved_files
+                .contains(&"src/consumer.ts".to_owned()),
+            "expected multi-hop barrel consumer src/consumer.ts in re_resolved_files: {:?}",
+            d_mid.re_resolved_files
+        );
+        let ir_d_mid = store
+            .export_ir_delta_for_files(&d_mid)
+            .unwrap()
+            .expect("multi-hop barrel edit must export incrementally, not Ok(None)");
+        live_index = live_index.update_files(&root, ir_d_mid).unwrap();
+        let edges = store.all_resolved_file_edges().unwrap();
+        assert!(
+            edges.contains(&("src/consumer.ts".to_owned(), "src/impl_b.ts".to_owned())),
+            "consumer must resolve through updated multi-hop barrel to impl_b.ts: {edges:?}"
+        );
+        let (full_nodes, full_links, _, _) = store.export_ir_graph_elements().unwrap();
+        let full_idx =
+            crate::graph_map::Index::from_ir_parts(&root, None, None, full_nodes, full_links)
+                .unwrap();
+        assert_eq!(live_index.node_link_counts(), full_idx.node_link_counts());
+
+        // 2. Editing `src/utils/index.ts` and `crates/core/src/lib.rs` must NOT fan out to the 300 unrelated files.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/utils/index.ts"),
+            "export const utilVal = 2;\n",
+        )
+        .unwrap();
+        let d_utils = store
+            .update_paths_with_delta(&root, &["src/utils/index.ts".to_owned()])
+            .unwrap();
+        assert!(
+            d_utils.re_resolved_files.len() <= 5,
+            "scoped tokens must avoid unrelated fanout: {:?}",
+            d_utils.re_resolved_files
+        );
+        assert!(
+            store.export_ir_delta_for_files(&d_utils).unwrap().is_some(),
+            "utils/index.ts edit must stay incremental instead of >256 fallback"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("crates/core/src/lib.rs"),
+            "pub fn core_boot() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        let d_lib = store
+            .update_paths_with_delta(&root, &["crates/core/src/lib.rs".to_owned()])
+            .unwrap();
+        assert!(
+            d_lib.re_resolved_files.len() <= 5,
+            "lib.rs edit must avoid bare `src`/`lib` fanout: {:?}",
+            d_lib.re_resolved_files
+        );
+        assert!(
+            store.export_ir_delta_for_files(&d_lib).unwrap().is_some(),
+            "crates/core/src/lib.rs edit must stay incremental"
+        );
+
+        let src_index_tokens = candidate_path_tokens("src/index.ts");
+        assert!(src_index_tokens.contains(&"./index".to_owned()));
+        assert!(src_index_tokens.contains(&"./src".to_owned()));
+        let crate_lib_tokens = candidate_path_tokens("crates/core/src/lib.rs");
+        assert!(crate_lib_tokens.contains(&"::core".to_owned()));
+        assert!(crate_lib_tokens.contains(&"crate::core".to_owned()));
+    }
+
+    #[test]
+    fn incremental_reexport_propagates_through_tsconfig_path_alias_barrel() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@acme/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/leaf_a.ts"), "export const val = 1;\n").unwrap();
+        std::fs::write(root.join("src/leaf_b.ts"), "export const val = 2;\n").unwrap();
+        std::fs::write(root.join("src/mid.ts"), "export { val } from './leaf_a';\n").unwrap();
+        std::fs::write(
+            root.join("src/outer.ts"),
+            "export { val } from '@acme/mid';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/consumer.ts"),
+            "import { val } from './outer';\nexport const out = val;\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "p-alias-reexp").unwrap();
+        store.sync_workspace_with_delta(&root).unwrap();
+        assert!(
+            store
+                .all_resolved_file_edges()
+                .unwrap()
+                .contains(&("src/consumer.ts".to_owned(), "src/leaf_a.ts".to_owned()))
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(root.join("src/mid.ts"), "export { val } from './leaf_b';\n").unwrap();
+        let delta = store
+            .update_paths_with_delta(&root, &["src/mid.ts".to_owned()])
+            .unwrap();
+        assert!(delta.reexport_changed);
+        assert!(
+            delta
+                .re_resolved_files
+                .contains(&"src/consumer.ts".to_owned()),
+            "expected tsconfig-aliased outer barrel consumer in re_resolved_files: {:?}",
+            delta.re_resolved_files
+        );
+        assert!(store.export_ir_delta_for_files(&delta).unwrap().is_some());
+        assert!(
+            store
+                .all_resolved_file_edges()
+                .unwrap()
+                .contains(&("src/consumer.ts".to_owned(), "src/leaf_b.ts".to_owned()))
+        );
+    }
+
+    #[test]
+    fn semantic_hubs_use_namespace_buckets_and_cleanup_on_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("app/Controllers")).unwrap();
+        std::fs::create_dir_all(root.join("app/Services")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            root.join("app/Controllers/OrderController.php"),
+            "<?php\nnamespace App\\Controllers;\nclass OrderController {\n  public function index() { DB::table('orders')->get(); }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/Services/OrderService.php"),
+            "<?php\nnamespace App\\Services;\nclass OrderService {\n  public function sync() { DB::table('orders')->update([]); }\n}\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "p-sem-ns").unwrap();
+        store.sync_workspace_with_delta(&root).unwrap();
+        let doc = store.export_node_link_json().unwrap();
+        let live_graph = state.join("live-graph.json");
+        std::fs::write(&live_graph, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+        let sem_node = doc["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "sem:table:orders")
+            .expect("sem:table:orders node");
+        assert_eq!(sem_node["source_file"], "__semantic__/tables");
+        assert_eq!(sem_node["community_name"], "semantic:tables");
+
+        // Remove the query from both files and check live graph cleanup via delta patch.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("app/Controllers/OrderController.php"),
+            "<?php\nnamespace App\\Controllers;\nclass OrderController { public function index() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/Services/OrderService.php"),
+            "<?php\nnamespace App\\Services;\nclass OrderService { public function sync() {} }\n",
+        )
+        .unwrap();
+        let delta = store
+            .update_paths_with_delta(
+                &root,
+                &[
+                    "app/Controllers/OrderController.php".to_owned(),
+                    "app/Services/OrderService.php".to_owned(),
+                ],
+            )
+            .unwrap();
+        let elem_delta = store
+            .export_ir_delta_for_files_with_root(Some(root.as_path()), &delta)
+            .unwrap()
+            .expect("incremental delta");
+        store
+            .patch_live_graph_from_deltas_atomic(&live_graph, &[&elem_delta])
+            .unwrap();
+        let patched: Value = serde_json::from_slice(&std::fs::read(&live_graph).unwrap()).unwrap();
+        assert!(
+            !patched["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "sem:table:orders"),
+            "stale sem:table:orders hub must be cleaned up once all callers stop touching it"
+        );
+    }
+
+    #[test]
+    fn compute_file_communities_prefers_structural_edges_over_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src/alpha")).unwrap();
+        std::fs::create_dir_all(root.join("src/beta")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        // Strongly coupled cross-folder pair across alpha and beta (multiple exported calls),
+        // plus an uncoupled file in alpha that shares the folder name only.
+        std::fs::write(
+            root.join("src/beta/engine.ts"),
+            "export function stepA() {}\nexport function stepB() {}\nexport function stepC() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/alpha/driver.ts"),
+            "import { stepA, stepB, stepC } from '../beta/engine';\nexport function runDriver() { stepA(); stepB(); stepC(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/beta/worker.ts"),
+            "import { stepA, stepB, stepC } from './engine';\nexport function runWorker() { stepA(); stepB(); stepC(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/alpha/isolated_helper.ts"),
+            "export function ping() { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/alpha/isolated_caller.ts"),
+            "import { ping } from './isolated_helper';\nexport function check() { return ping(); }\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "p-comm").unwrap();
+        store.sync_workspace_with_delta(&root).unwrap();
+        let doc = store.export_node_link_json().unwrap();
+        let comm_of = |path: &str| -> u64 {
+            doc["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["source_file"] == path)
+                .and_then(|n| n["community"].as_u64())
+                .unwrap_or_else(|| panic!("missing file {path}"))
+        };
+        assert_eq!(
+            comm_of("src/alpha/driver.ts"),
+            comm_of("src/beta/engine.ts"),
+            "cross-folder strongly coupled driver & engine must merge structurally"
+        );
+        assert_eq!(
+            comm_of("src/beta/worker.ts"),
+            comm_of("src/beta/engine.ts"),
+            "worker & engine must share cluster"
+        );
+        assert_ne!(
+            comm_of("src/alpha/isolated_helper.ts"),
+            comm_of("src/alpha/driver.ts"),
+            "unrelated file in same folder must not merge over strong structural community"
         );
     }
 }

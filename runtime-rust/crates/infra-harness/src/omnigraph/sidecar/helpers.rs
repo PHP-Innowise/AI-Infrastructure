@@ -3,8 +3,9 @@ use super::{MAX_ATOM_SYMBOLS, MAX_SYMBOL_FILES, VALID_RELATIONS};
 use crate::omnigraph::{
     client::{ChangeOp, ChangeRequest, CommitOutput, EntityKind, OmnigraphClient},
     schema::{
-        CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_ATOM_SYMBOLS, GQ_LINK_MENTIONS_SYMBOL,
-        GQ_LINK_TOUCHES_FILE, GQ_LIST_SYMBOL_EDGES, GQ_UPSERT_FILE, GQ_UPSERT_SYMBOL,
+        CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_ATOM_FILES, GQ_CLEAR_ATOM_SYMBOLS,
+        GQ_LINK_MENTIONS_SYMBOL, GQ_LINK_TOUCHES_FILE, GQ_LIST_SYMBOL_EDGES, GQ_UPSERT_FILE,
+        GQ_UPSERT_SYMBOL,
     },
     transfer::parse_i64_opt,
 };
@@ -138,6 +139,23 @@ pub(super) fn parse_tags_opt(val: &Value) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect()
     })
+}
+
+pub(super) async fn clear_atom_files(
+    client: &OmnigraphClient,
+    branch: &str,
+    atom_id: &str,
+) -> bool {
+    client
+        .mutate(&ChangeRequest {
+            query: GQ_CLEAR_ATOM_FILES.into(),
+            name: Some("clear_atom_files".into()),
+            params: Some(json!({ "atom_id": atom_id })),
+            branch: Some(branch.to_string()),
+            settings: None,
+        })
+        .await
+        .is_ok()
 }
 
 pub(super) async fn upsert_atom_files(

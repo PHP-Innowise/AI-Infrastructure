@@ -1576,6 +1576,9 @@ impl Index {
                 }
                 let from_path = &self.files[from as usize];
                 let to_path = &self.files[to as usize];
+                if from_path.starts_with("__semantic__/") || to_path.starts_with("__semantic__/") {
+                    continue;
+                }
                 if !under(norm_scope, from_path) && !under(norm_scope, to_path) {
                     continue;
                 }
@@ -1761,54 +1764,403 @@ impl Index {
             return;
         }
 
-        let pkg_pairs: HashSet<(&str, &str)> = package_v
-            .iter()
-            .map(|v| (v.from.as_str(), v.to.as_str()))
-            .collect();
-        let sem_from_to: HashSet<(&str, &str)> = semantic_v
-            .iter()
-            .map(|v| (v.from.as_str(), v.to.as_str()))
-            .collect();
-        let mut violated_files: HashSet<&str> = HashSet::new();
-        for v in package_v.iter().chain(semantic_v.iter()) {
-            violated_files.insert(v.from.as_str());
+        let view_lod = view["lod"].as_str().map(str::to_owned);
+        let symbols_mode =
+            view["mode"].as_str() == Some("file") || view_lod.as_deref() == Some("symbol");
+        let opened = self.opens(&scope);
+
+        let mut drawn_nodes: HashSet<String> = HashSet::new();
+        let mut file_nodes: HashSet<String> = HashSet::new();
+        let mut folder_nodes: HashSet<String> = HashSet::new();
+        let mut file_of_sym: HashMap<String, String> = HashMap::new();
+        if let Some(nodes) = view["nodes"].as_array() {
+            for node in nodes {
+                let Some(path) = node["path"].as_str() else {
+                    continue;
+                };
+                drawn_nodes.insert(path.to_owned());
+                if node["folder"] == true {
+                    folder_nodes.insert(path.to_owned());
+                } else {
+                    if node["symbol"] != true {
+                        file_nodes.insert(path.to_owned());
+                    }
+                    let resolved = node["file"]
+                        .as_str()
+                        .or_else(|| if node["symbol"] == true { opened } else { None })
+                        .unwrap_or_else(|| path.split_once('#').map_or(path, |(f, _)| f));
+                    file_of_sym.insert(path.to_owned(), resolved.to_owned());
+                }
+            }
+        }
+
+        let manifest_dirs = if view_lod.as_deref() == Some("crate") {
+            self.manifest_dirs()
+        } else {
+            &[]
+        };
+        let box_for = |file_path: &str| -> String {
+            match view_lod.as_deref() {
+                Some("crate") => crate::graph_map::lod::node_bucket(
+                    manifest_dirs,
+                    crate::graph_map::Lod::Crate,
+                    file_path,
+                ),
+                Some("folder") => crate::graph_map::lod::node_bucket(
+                    &[],
+                    crate::graph_map::Lod::Folder,
+                    file_path,
+                ),
+                _ => {
+                    if file_nodes.contains(file_path) || drawn_nodes.contains(file_path) {
+                        return file_path.to_owned();
+                    }
+                    let mut parent = holder(file_path);
+                    while !parent.is_empty() {
+                        if folder_nodes.contains(parent) {
+                            return parent.to_owned();
+                        }
+                        parent = holder(parent);
+                    }
+                    if folder_nodes.contains(".") {
+                        ".".to_owned()
+                    } else {
+                        file_path.to_owned()
+                    }
+                }
+            }
+        };
+
+        #[derive(Clone, Debug)]
+        struct MatchedEdgeRule {
+            kind: &'static str,
+            rule_id: Option<String>,
+            relation: Option<String>,
+            target: Option<String>,
+        }
+
+        let mut pkg_by_boxes: BTreeMap<(String, String), Vec<MatchedEdgeRule>> = BTreeMap::new();
+        let mut sem_by_exact_target: BTreeMap<(String, String), Vec<MatchedEdgeRule>> =
+            BTreeMap::new();
+        let mut sem_by_bucket: BTreeMap<(String, String), Vec<MatchedEdgeRule>> = BTreeMap::new();
+        let mut violated_boxes: HashSet<String> = HashSet::new();
+
+        for v in &package_v {
+            let fb = box_for(&v.from);
+            let tb = box_for(&v.to);
+            violated_boxes.insert(v.from.clone());
+            violated_boxes.insert(fb.clone());
+            if !fb.is_empty() && !tb.is_empty() && fb != tb {
+                pkg_by_boxes
+                    .entry((fb, tb))
+                    .or_default()
+                    .push(MatchedEdgeRule {
+                        kind: "package",
+                        rule_id: v.rule_id.clone(),
+                        relation: None,
+                        target: Some(v.to.clone()),
+                    });
+            }
+        }
+        for v in &semantic_v {
+            let fb = box_for(&v.from);
+            violated_boxes.insert(v.from.clone());
+            violated_boxes.insert(fb.clone());
+            let clean_target = v.to.trim().strip_prefix("sem:").unwrap_or(v.to.trim());
+            let sem_bucket = crate::graph_ir::semantic_namespace_bucket(clean_target);
+            let m = MatchedEdgeRule {
+                kind: "semantic",
+                rule_id: v.rule_id.clone(),
+                relation: v.relation.clone(),
+                target: Some(clean_target.to_owned()),
+            };
+            sem_by_exact_target
+                .entry((fb.clone(), clean_target.to_owned()))
+                .or_default()
+                .push(m.clone());
+            if !fb.is_empty() {
+                sem_by_bucket
+                    .entry((fb, sem_bucket.to_owned()))
+                    .or_default()
+                    .push(m);
+            }
         }
         if !cycle_v.is_empty() {
             for group in self.scc_groups(certain) {
                 if scope.is_empty() || group.iter().any(|p| under(&scope, p)) {
                     for p in group {
                         if let Some(stored) = self.files.iter().find(|f| f.as_str() == p) {
-                            violated_files.insert(stored.as_str());
+                            violated_boxes.insert(stored.clone());
+                            violated_boxes.insert(box_for(stored));
                         }
                     }
                 }
             }
         }
 
-        let file_of_edge_end =
-            |raw: &str| -> String { raw.split_once('#').map_or(raw, |(f, _)| f).to_owned() };
+        let edge_semantic_target = |raw: &str| -> Option<String> {
+            let trimmed = raw.trim();
+            if let Some(stripped) = trimmed.strip_prefix("sem:") {
+                return Some(stripped.to_owned());
+            }
+            if let Some((_, frag)) = trimmed.split_once('#') {
+                let without_line = frag
+                    .strip_prefix('L')
+                    .and_then(|rest| {
+                        rest.split_once(':').and_then(|(digits, label)| {
+                            (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                                .then_some(label)
+                        })
+                    })
+                    .unwrap_or(frag);
+                let candidate = without_line.strip_prefix("sem:").unwrap_or(without_line);
+                if candidate.starts_with("route:")
+                    || candidate.starts_with("table:")
+                    || candidate.starts_with("event:")
+                    || candidate.starts_with("service:")
+                    || without_line.starts_with("sem:")
+                {
+                    return Some(candidate.to_owned());
+                }
+            }
+            if trimmed.starts_with("route:")
+                || trimmed.starts_with("table:")
+                || trimmed.starts_with("event:")
+                || trimmed.starts_with("service:")
+            {
+                return Some(trimmed.to_owned());
+            }
+            None
+        };
+
+        let apply_matches_to_edge = |edge: &mut Value, matches: &[MatchedEdgeRule]| {
+            if matches.is_empty() {
+                return;
+            }
+            edge["against"] = json!(true);
+            let mut rule_ids: BTreeSet<String> = edge["rule_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            let mut existing_rules: Vec<Value> = edge["architecture_rules"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let mut seen_keys: BTreeSet<(String, String, String, String)> = existing_rules
+                .iter()
+                .map(|r| {
+                    (
+                        r["kind"].as_str().unwrap_or("").to_owned(),
+                        r["rule_id"].as_str().unwrap_or("").to_owned(),
+                        r["relation"].as_str().unwrap_or("").to_owned(),
+                        r["target"].as_str().unwrap_or("").to_owned(),
+                    )
+                })
+                .collect();
+            let mut newly_added = 0u64;
+            for m in matches {
+                if let Some(ref rid) = m.rule_id
+                    && !rid.is_empty()
+                {
+                    rule_ids.insert(rid.clone());
+                }
+                let key = (
+                    m.kind.to_owned(),
+                    m.rule_id.clone().unwrap_or_default(),
+                    m.relation.clone().unwrap_or_default(),
+                    m.target.clone().unwrap_or_default(),
+                );
+                if seen_keys.insert(key) {
+                    newly_added += 1;
+                    let mut entry = json!({ "kind": m.kind });
+                    if let Some(ref rid) = m.rule_id {
+                        entry["rule_id"] = json!(rid);
+                    }
+                    if let Some(ref rel) = m.relation {
+                        entry["relation"] = json!(rel);
+                    }
+                    if let Some(ref tgt) = m.target {
+                        entry["target"] = json!(tgt);
+                    }
+                    existing_rules.push(entry);
+                }
+            }
+            if newly_added > 0 {
+                let prev = edge["architecture_violation"].as_u64().unwrap_or(0);
+                edge["architecture_violation"] = json!(prev + newly_added);
+            }
+            if !rule_ids.is_empty() {
+                let ids: Vec<String> = rule_ids.into_iter().collect();
+                edge["rule_ids"] = json!(ids);
+            }
+            if !existing_rules.is_empty() {
+                existing_rules.sort_by(|a, b| {
+                    a["kind"]
+                        .as_str()
+                        .cmp(&b["kind"].as_str())
+                        .then_with(|| a["rule_id"].as_str().cmp(&b["rule_id"].as_str()))
+                        .then_with(|| a["relation"].as_str().cmp(&b["relation"].as_str()))
+                        .then_with(|| a["target"].as_str().cmp(&b["target"].as_str()))
+                });
+                edge["architecture_rules"] = json!(existing_rules);
+            }
+        };
+
+        let mut present_edges: HashSet<(String, String)> = HashSet::new();
         if let Some(edges) = view["edges"].as_array_mut() {
             for edge in edges {
-                let from_raw = edge["from"].as_str().unwrap_or("");
-                let to_raw = edge["to"].as_str().unwrap_or("");
-                let from_f = file_of_edge_end(from_raw);
-                let to_f = file_of_edge_end(to_raw);
-                let is_pkg_bad = pkg_pairs.contains(&(from_f.as_str(), to_f.as_str()));
-                let is_sem_bad = sem_from_to
-                    .iter()
-                    .any(|(vf, vt)| *vf == from_f && (to_raw.contains(vt) || to_f == *vt));
-                if is_pkg_bad || is_sem_bad {
-                    edge["against"] = json!(true);
-                    let prev = edge["architecture_violation"].as_u64().unwrap_or(0);
-                    edge["architecture_violation"] = json!(prev + 1);
+                let from_raw = edge["from"].as_str().unwrap_or("").to_owned();
+                let to_raw = edge["to"].as_str().unwrap_or("").to_owned();
+                present_edges.insert((from_raw.clone(), to_raw.clone()));
+                let from_key = if symbols_mode {
+                    file_of_sym.get(&from_raw).cloned().unwrap_or_else(|| {
+                        from_raw
+                            .split_once('#')
+                            .map_or(from_raw.clone(), |(f, _)| f.to_owned())
+                    })
+                } else {
+                    from_raw.clone()
+                };
+                let to_key = if symbols_mode {
+                    file_of_sym.get(&to_raw).cloned().unwrap_or_else(|| {
+                        to_raw
+                            .split_once('#')
+                            .map_or(to_raw.clone(), |(f, _)| f.to_owned())
+                    })
+                } else {
+                    to_raw.clone()
+                };
+
+                let mut matches = Vec::new();
+                if let Some(pkg_hits) = pkg_by_boxes.get(&(from_key.clone(), to_key)) {
+                    matches.extend(pkg_hits.iter().cloned());
+                }
+                if let Some(exact_sem) = edge_semantic_target(&to_raw) {
+                    if let Some(sem_hits) = sem_by_exact_target.get(&(from_key.clone(), exact_sem))
+                    {
+                        matches.extend(sem_hits.iter().cloned());
+                    }
+                } else if !symbols_mode
+                    && to_raw.starts_with("__semantic__/")
+                    && let Some(sem_hits) = sem_by_bucket.get(&(from_key, to_raw))
+                {
+                    matches.extend(sem_hits.iter().cloned());
+                }
+                apply_matches_to_edge(edge, &matches);
+            }
+        }
+
+        // Preserve package/semantic breaching edges past DRAWN truncation within a dedicated
+        // KEPT_VIOLATIONS budget so rolled-up Crate/Folder/File views never silently drop them.
+        let mut extended_kept = 0usize;
+        if !symbols_mode {
+            let mut missing: BTreeMap<(String, String), Vec<MatchedEdgeRule>> = BTreeMap::new();
+            for ((fb, tb), hits) in &pkg_by_boxes {
+                if fb != tb
+                    && drawn_nodes.contains(fb.as_str())
+                    && drawn_nodes.contains(tb.as_str())
+                    && !present_edges.contains(&(fb.clone(), tb.clone()))
+                {
+                    missing
+                        .entry((fb.clone(), tb.clone()))
+                        .or_default()
+                        .extend(hits.iter().cloned());
+                }
+            }
+            if matches!(view_lod.as_deref(), Some("crate" | "folder")) {
+                for ((fb, tb), hits) in &sem_by_bucket {
+                    if fb != tb
+                        && drawn_nodes.contains(fb.as_str())
+                        && drawn_nodes.contains(tb.as_str())
+                        && !present_edges.contains(&(fb.clone(), tb.clone()))
+                    {
+                        missing
+                            .entry((fb.clone(), tb.clone()))
+                            .or_default()
+                            .extend(hits.iter().cloned());
+                    }
+                }
+            } else {
+                for ((fb, clean_target), hits) in &sem_by_exact_target {
+                    let candidates = [
+                        format!("sem:{clean_target}"),
+                        clean_target.clone(),
+                        crate::graph_ir::semantic_namespace_bucket(clean_target).to_owned(),
+                    ];
+                    if drawn_nodes.contains(fb.as_str())
+                        && let Some(tb) = candidates
+                            .into_iter()
+                            .find(|cand| fb != cand && drawn_nodes.contains(cand.as_str()))
+                        && !present_edges.contains(&(fb.clone(), tb.clone()))
+                    {
+                        missing
+                            .entry((fb.clone(), tb))
+                            .or_default()
+                            .extend(hits.iter().cloned());
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                let mut pair_flows: HashMap<(String, String), EdgeFlow> = HashMap::new();
+                for &(from, to, ref pair) in &self.pairs {
+                    if pair.weight(certain) == 0 {
+                        continue;
+                    }
+                    let ends = (
+                        box_for(&self.files[from as usize]),
+                        box_for(&self.files[to as usize]),
+                    );
+                    if missing.contains_key(&ends) {
+                        pair_flows.entry(ends).or_default().add_pair(pair, certain);
+                    }
+                }
+                let mut rows: Vec<((String, String), Vec<MatchedEdgeRule>, EdgeFlow)> = missing
+                    .into_iter()
+                    .map(|(ends, hits)| {
+                        let flow = pair_flows.remove(&ends).unwrap_or_default();
+                        (ends, hits, flow)
+                    })
+                    .collect();
+                rows.sort_by(|a, b| {
+                    b.2.flow
+                        .links
+                        .cmp(&a.2.flow.links)
+                        .then_with(|| b.1.len().cmp(&a.1.len()))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                rows.truncate(KEPT_VIOLATIONS);
+                extended_kept = rows.len();
+                let mut added_edges = Vec::with_capacity(rows.len());
+                for ((from, to), hits, flow) in rows {
+                    let eff_flow = if flow.flow.links == 0 {
+                        EdgeFlow {
+                            flow: Flow {
+                                links: hits.len() as u64,
+                                guessed: 0,
+                            },
+                            kinds: BTreeMap::new(),
+                        }
+                    } else {
+                        flow
+                    };
+                    let mut edge = self.edge_json(&from, &to, &eff_flow);
+                    edge["kept"] = json!("violation");
+                    apply_matches_to_edge(&mut edge, &hits);
+                    added_edges.push(edge);
+                }
+                if let Some(edges) = view["edges"].as_array_mut() {
+                    edges.extend(added_edges);
                 }
             }
         }
+
         if let Some(nodes) = view["nodes"].as_array_mut() {
             for node in nodes {
                 let p = node["path"].as_str().unwrap_or("");
                 let file_p = p.split_once('#').map_or(p, |(f, _)| f);
-                if violated_files.contains(file_p) {
+                if violated_boxes.contains(p) || violated_boxes.contains(file_p) {
                     node["architecture_violation"] = json!(true);
                 }
             }
@@ -1829,6 +2181,7 @@ impl Index {
             );
             pat.insert("semantic_violations".to_owned(), json!(semantic_v));
             pat.insert("extended_violations".to_owned(), json!(all));
+            pat.insert("extended_kept".to_owned(), json!(extended_kept));
         }
     }
 }

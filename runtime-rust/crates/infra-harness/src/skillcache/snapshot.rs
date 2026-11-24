@@ -23,11 +23,59 @@
 use crate::{HarnessError, Result};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
+
+type InflightSnapshotMap = BTreeMap<(PathBuf, String), usize>;
+
+fn inflight_snapshots() -> &'static Mutex<InflightSnapshotMap> {
+    static MAP: OnceLock<Mutex<InflightSnapshotMap>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn canon_state(state: &Path) -> PathBuf {
+    infra_core::fs::canonical_or_missing(state).unwrap_or_else(|_| state.to_path_buf())
+}
+
+/// RAII pin preventing snapshot GC from removing an in-flight turn's snapshot
+/// before its trace is persisted or explicitly discarded.
+pub(crate) struct InflightSnapshotGuard {
+    state_key: PathBuf,
+    generation: String,
+}
+
+impl Drop for InflightSnapshotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = inflight_snapshots().lock() {
+            let key = (self.state_key.clone(), self.generation.clone());
+            if let Some(count) = guard.get_mut(&key) {
+                if *count <= 1 {
+                    guard.remove(&key);
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn pin_inflight(state: &Path, generation: &str) -> InflightSnapshotGuard {
+    let state_key = canon_state(state);
+    if let Ok(mut guard) = inflight_snapshots().lock() {
+        *guard
+            .entry((state_key.clone(), generation.to_string()))
+            .or_insert(0) += 1;
+    }
+    InflightSnapshotGuard {
+        state_key,
+        generation: generation.to_string(),
+    }
+}
 
 /// A snapshot whose new objects exceed this is not kept.
 const OBJECT_BYTES: u64 = 512 * 1024 * 1024;
@@ -409,6 +457,7 @@ fn take_with_options(
     limits: Limits,
     allowlist: &[String],
 ) -> Result<Option<Value>> {
+    let _inflight = pin_inflight(state, generation);
     let root = folder(state, generation)?;
     let Ok(located) = git(
         workspace,
@@ -540,12 +589,15 @@ pub fn remove(state: &Path, generation: &str) -> Result<()> {
     }
 }
 
-/// Drops every snapshot whose launch is not one of `kept`.
+/// Drops every snapshot whose launch is not one of `kept` and not currently in-flight.
 pub fn collect(state: &Path, kept: &[String]) {
+    let state_key = canon_state(state);
     let root = state.join("skillcache/snapshots");
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
         if let Some(name) = entry.file_name().to_str()
             && !kept.iter().any(|generation| generation == name)
+            && let Ok(guard) = inflight_snapshots().lock()
+            && !guard.contains_key(&(state_key.clone(), name.to_string()))
         {
             let _ = std::fs::remove_dir_all(entry.path());
         }

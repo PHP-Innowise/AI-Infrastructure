@@ -155,9 +155,10 @@ pub(super) use camera_dom::{
     patch_edge_state_dom, refit_surface_if_visible, render_surface_focus_strip,
     reset_surface_camera_100, resolve_focus_bbox_with_cached_plan, save_surface_camera,
     store_surface_plan_cache, surface_drag_data, surface_view_signature, sync_node_blast_dom,
-    sync_viewport_culling, toggle_bool_attr, try_patch_canvas_dom_in_place, viewport_size,
-    zoom_surface_camera_at, zoom_surface_camera_to_bbox, CachedSurfacePlan, Camera,
-    PatchedCanvasMeta, SurfaceViewSignature, SURFACE_PLAN_CACHE,
+    sync_surface_after_chrome_layout, sync_viewport_culling, toggle_bool_attr,
+    try_patch_canvas_dom_in_place, viewport_size, zoom_surface_camera_at,
+    zoom_surface_camera_to_bbox, CachedSurfacePlan, Camera, PatchedCanvasMeta,
+    SurfaceViewSignature, SURFACE_PLAN_CACHE,
 };
 #[allow(unused_imports)]
 pub use camera_dom::{focus_strip_chips_html, focus_strip_chips_html_for_surface};
@@ -251,5 +252,6 @@ pub(super) use state_urls::{build_map_path, progressive_lod_for_state};
 #[allow(unused_imports)]
 pub(crate) use state_urls::{
     invalidate_surface_analysis_caches, invalidate_surface_analysis_caches_for_live_project,
-    maybe_schedule_idle_refresh, show_non_destructive_stale_banner,
+    maybe_schedule_idle_refresh, refresh_external_views_for_stale_sse,
+    show_non_destructive_stale_banner,
 };

@@ -830,6 +830,22 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        pattern: "/api/sessions/{session_id}/waiting-permissions",
+        operation: "sessions.waiting_permissions",
+        status: 200,
+        token: false,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/permissions/waiting",
+        operation: "permissions.waiting",
+        status: 200,
+        token: false,
+        query: &["project_id", "session_id", "limit"],
+    },
+    Route {
+        method: "GET",
         pattern: "/api/sessions/{session_id}/permission-rules",
         operation: "sessions.permission_rules_list",
         status: 200,
@@ -890,7 +906,7 @@ pub const ROUTES: &[Route] = &[
         operation: "delivery.get",
         status: 200,
         token: false,
-        query: &[],
+        query: &["strict", "no_cache", "cache"],
     },
     Route {
         method: "GET",
@@ -1336,6 +1352,14 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/requalify",
         operation: "skillcache.requalify",
+        status: 202,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/recompile",
+        operation: "skillcache.recompile",
         status: 202,
         token: true,
         query: &[],
@@ -2055,6 +2079,7 @@ struct SseRegistration {
     start: ReplayStart,
     filter_sid: Option<String>,
     filter_pid: Option<String>,
+    services: Arc<dyn Services>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -2082,15 +2107,47 @@ fn take_sse_handoff(token: &str) -> Option<SseRegistration> {
     map.remove(token).map(|(_, reg)| reg)
 }
 
+#[cfg(test)]
 fn matches_sse_filter(
     frame: &StreamFrame,
     filter_sid: Option<&str>,
     filter_pid: Option<&str>,
 ) -> bool {
+    matches_sse_filter_with(frame, filter_sid, filter_pid, |_, _| false)
+}
+
+fn matches_sse_filter_for_services(
+    frame: &StreamFrame,
+    filter_sid: Option<&str>,
+    filter_pid: Option<&str>,
+    services: &dyn Services,
+) -> bool {
+    matches_sse_filter_with(
+        frame,
+        filter_sid,
+        filter_pid,
+        |subscribed_pid, event_pid| services.allows_sse_graph_project(subscribed_pid, event_pid),
+    )
+}
+
+fn matches_sse_filter_with<F>(
+    frame: &StreamFrame,
+    filter_sid: Option<&str>,
+    filter_pid: Option<&str>,
+    allows_graph_project: F,
+) -> bool
+where
+    F: FnOnce(&str, &str) -> bool,
+{
     if let Some(pid) = filter_pid
         && frame.event != "waiting_counts"
         && !(frame.event == "resync" && frame.project_id.is_none())
         && frame.project_id.as_deref() != Some(pid)
+        && !(matches!(frame.event, "graph_status" | "system_graph_status")
+            && frame
+                .project_id
+                .as_deref()
+                .is_some_and(|event_pid| allows_graph_project(pid, event_pid)))
     {
         return false;
     }
@@ -2179,8 +2236,12 @@ async fn run_sse_stream(
                     continue;
                 }
                 last_sent_seq = frame.seq;
-                if !matches_sse_filter(&frame, reg.filter_sid.as_deref(), reg.filter_pid.as_deref())
-                {
+                if !matches_sse_filter_for_services(
+                    &frame,
+                    reg.filter_sid.as_deref(),
+                    reg.filter_pid.as_deref(),
+                    reg.services.as_ref(),
+                ) {
                     continue;
                 }
                 let formatted = format_sse_frame(frame.seq, frame.event, &frame.data);
@@ -2221,10 +2282,11 @@ async fn run_sse_stream(
                             continue;
                         }
                         last_sent_seq = frame.seq;
-                        if !matches_sse_filter(
+                        if !matches_sse_filter_for_services(
                             &frame,
                             reg.filter_sid.as_deref(),
                             reg.filter_pid.as_deref(),
+                            reg.services.as_ref(),
                         ) {
                             continue;
                         }
@@ -3023,6 +3085,7 @@ fn serve_sse_request(
         start,
         filter_sid,
         filter_pid,
+        services: Arc::clone(&app.services),
         shutdown: app.shutdown.subscribe(),
     });
     apply_security_headers(
@@ -3143,6 +3206,10 @@ async fn serve(
         && matches!(&payload,Payload::Json(value)if value["current"]==true)
     {
         200
+    } else if route.operation == "skillcache.recompile"
+        && matches!(&payload, Payload::Json(value) if value["needs_trace"] == true || value["status"] == 409)
+    {
+        409
     } else {
         route.status
     };
@@ -3705,6 +3772,123 @@ mod tests {
         assert!(!matches_sse_filter(&status, Some("s-a"), Some("proj-b")));
         assert!(matches_sse_filter(&status, Some("s-b"), Some("proj-b")));
     }
+
+    #[tokio::test]
+    async fn skillcache_recompile_and_delivery_query_http_seams() {
+        struct SeamServices;
+        impl crate::services::Services for SeamServices {
+            fn request<'a>(
+                &'a self,
+                operation: &'a str,
+                request: Value,
+            ) -> crate::services::Reply<'a> {
+                Box::pin(async move {
+                    match operation {
+                        "skillcache.recompile" => {
+                            if request["params"]["capsule_id"] == "cap-needs-trace" {
+                                Ok(Payload::Json(json!({
+                                    "status": 409,
+                                    "code": "needs_trace",
+                                    "needs_trace": true,
+                                    "error": "Needs fresh trace"
+                                })))
+                            } else {
+                                Ok(Payload::Json(
+                                    json!({"queued": true, "compile_id": "cmp-1"}),
+                                ))
+                            }
+                        }
+                        "delivery.get" => Ok(Payload::Json(json!({"query": request["query"]}))),
+                        _ => Ok(Payload::Json(json!({}))),
+                    }
+                })
+            }
+
+            fn close<'a>(&'a self) -> crate::services::CloseFuture<'a> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let mut app = test_http_app(8766);
+        app.services = Arc::new(SeamServices);
+
+        let no_token = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-1/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, 2)
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            handle(State(app.clone()), no_token).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let needs_trace_body = br#"{"compiler":{"provider":"codex"}}"#;
+        let needs_trace_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-needs-trace/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header("x-harness-token", "test-csrf-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, needs_trace_body.len())
+            .body(Body::from(needs_trace_body.as_slice()))
+            .unwrap();
+        let needs_trace_resp = handle(State(app.clone()), needs_trace_req).await;
+        assert_eq!(needs_trace_resp.status(), StatusCode::CONFLICT);
+        let needs_trace_body: Value = serde_json::from_slice(
+            &to_bytes(needs_trace_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(needs_trace_body["needs_trace"], true);
+        assert_eq!(needs_trace_body["code"], "needs_trace");
+
+        let queued_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/p1/skillcache/capsules/cap-ok/recompile")
+            .header(header::HOST, "127.0.0.1:8766")
+            .header("x-harness-token", "test-csrf-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, 2)
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            handle(State(app.clone()), queued_req).await.status(),
+            StatusCode::ACCEPTED
+        );
+
+        let delivery_req = Request::builder()
+            .method("GET")
+            .uri("/api/sessions/s1/delivery?strict=true&no_cache=true&cache=false")
+            .header(header::HOST, "127.0.0.1:8766")
+            .body(Body::empty())
+            .unwrap();
+        let delivery_resp = handle(State(app.clone()), delivery_req).await;
+        assert_eq!(delivery_resp.status(), StatusCode::OK);
+        let delivery_body: Value = serde_json::from_slice(
+            &to_bytes(delivery_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(delivery_body["query"]["strict"], "true");
+        assert_eq!(delivery_body["query"]["no_cache"], "true");
+        assert_eq!(delivery_body["query"]["cache"], "false");
+
+        let bad_delivery = Request::builder()
+            .method("GET")
+            .uri("/api/sessions/s1/delivery?unknown=1")
+            .header(header::HOST, "127.0.0.1:8766")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            handle(State(app), bad_delivery).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3725,6 +3909,7 @@ mod skillcache_route_tests {
             ("skillcache.get", "GET", false, 200),
             ("skillcache.compile", "POST", true, 202),
             ("skillcache.requalify", "POST", true, 202),
+            ("skillcache.recompile", "POST", true, 202),
             ("skillcache.invalidate", "POST", true, 200),
             ("skillcache.retire", "POST", true, 200),
             ("skillcache.delete", "DELETE", true, 200),
@@ -3808,5 +3993,88 @@ mod skillcache_route_tests {
                 Some("p1")
             ));
         }
+    }
+
+    #[test]
+    fn route_matches_dedicated_waiting_permissions_endpoints() {
+        let (per_session, params) =
+            route("GET", "/api/sessions/sess-42/waiting-permissions").unwrap();
+        assert_eq!(per_session.operation, "sessions.waiting_permissions");
+        assert_eq!(
+            params.get("session_id").and_then(Value::as_str),
+            Some("sess-42")
+        );
+        assert!(per_session.query.is_empty());
+
+        let (batch, batch_params) = route("GET", "/api/permissions/waiting").unwrap();
+        assert_eq!(batch.operation, "permissions.waiting");
+        assert!(batch_params.is_empty());
+        assert_eq!(batch.query, &["project_id", "session_id", "limit"]);
+    }
+
+    #[test]
+    fn sse_filter_for_services_admits_member_project_graph_events_only() {
+        struct SystemGraphServicesStub;
+        impl crate::services::Services for SystemGraphServicesStub {
+            fn request<'a>(
+                &'a self,
+                _operation: &'a str,
+                _request: Value,
+            ) -> crate::services::Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+
+            fn allows_sse_graph_project(&self, subscribed_pid: &str, event_pid: &str) -> bool {
+                subscribed_pid == "sys-1" && event_pid == "member-a"
+            }
+
+            fn close<'a>(&'a self) -> crate::services::CloseFuture<'a> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let services = SystemGraphServicesStub;
+        for event in ["graph_status", "system_graph_status"] {
+            let member_frame = StreamFrame {
+                seq: 10,
+                event,
+                session_id: None,
+                project_id: Some("member-a".into()),
+                data: json!({"state": "ready"}),
+            };
+            assert!(matches_sse_filter_for_services(
+                &member_frame,
+                Some("sess-1"),
+                Some("sys-1"),
+                &services
+            ));
+            let unrelated_frame = StreamFrame {
+                seq: 11,
+                event,
+                session_id: None,
+                project_id: Some("other-proj".into()),
+                data: json!({"state": "ready"}),
+            };
+            assert!(!matches_sse_filter_for_services(
+                &unrelated_frame,
+                Some("sess-1"),
+                Some("sys-1"),
+                &services
+            ));
+        }
+
+        let non_graph_member_frame = StreamFrame {
+            seq: 12,
+            event: "session_status",
+            session_id: Some("sess-member".into()),
+            project_id: Some("member-a".into()),
+            data: json!({"status": "idle"}),
+        };
+        assert!(!matches_sse_filter_for_services(
+            &non_graph_member_frame,
+            None,
+            Some("sys-1"),
+            &services
+        ));
     }
 }

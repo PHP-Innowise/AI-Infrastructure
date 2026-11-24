@@ -577,45 +577,140 @@ pub(in crate::graph_map) fn build_overlay_extras(
     }
 }
 
+fn resolve_system_service_member_project(sys_pid: &str, service_id: &str) -> Option<String> {
+    if service_id.is_empty() || service_id == "__system__" {
+        return (!sys_pid.is_empty()).then(|| sys_pid.to_owned());
+    }
+    let status = m::data("system-graph-status");
+    let status_pid = m::text(&status, "project_id");
+    let ui_sys_pid = if cfg!(target_arch = "wasm32") {
+        dom::value("system-project")
+    } else {
+        String::new()
+    };
+    if sys_pid.is_empty() || status_pid == sys_pid || ui_sys_pid == sys_pid {
+        if let Some(gid) = status["services"][service_id]["graph_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            return Some(gid.to_owned());
+        }
+    }
+    let catalog = m::data("system-catalog")["catalog"].clone();
+    for svc in m::array(&catalog["services"]) {
+        if m::text(&svc, "id") != service_id {
+            continue;
+        }
+        if let Some(gid) = svc["graph_id"].as_str().filter(|s| !s.is_empty()) {
+            return Some(gid.to_owned());
+        }
+        let svc_root = normalize_fs_path(&m::text(&svc, "root"));
+        if svc_root.is_empty() {
+            continue;
+        }
+        let sys_path = normalize_fs_path(m::text(&m::project(sys_pid), "path").as_str());
+        let is_abs =
+            svc_root.starts_with('/') || (svc_root.len() >= 2 && svc_root.as_bytes()[1] == b':');
+        let resolved_root = if !is_abs && !sys_path.is_empty() {
+            normalize_fs_path(&format!(
+                "{}/{}",
+                sys_path.trim_end_matches('/'),
+                svc_root.trim_start_matches("./")
+            ))
+        } else {
+            svc_root
+        };
+        for proj in m::read(|s| m::array(&s.boot["projects"])) {
+            let p_path = normalize_fs_path(&m::text(&proj, "path"));
+            if !p_path.is_empty() && p_path == resolved_root {
+                let pid = m::text(&proj, "id");
+                if !pid.is_empty() {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn surface_matches_live_project(
+    surface: MapSurface,
+    target_project: &str,
+    live_project: &str,
+) -> bool {
+    if target_project.is_empty() {
+        return true;
+    }
+    if surface.name == "session" {
+        return live_project.is_empty() || live_project == target_project;
+    }
+    if let Some(stored) = GraphTargetScope::from_json(&m::data(surface.scope_model_key)) {
+        match &stored {
+            GraphTargetScope::SingleProject { project_id } => {
+                let eff = if surface.name == "modal" && !live_project.is_empty() {
+                    live_project
+                } else {
+                    project_id.as_str()
+                };
+                return eff.is_empty() || eff == target_project;
+            }
+            GraphTargetScope::SystemService {
+                project_id,
+                service_id,
+                ..
+            } => {
+                if project_id.is_empty() || project_id == target_project {
+                    return true;
+                }
+                if resolve_system_service_member_project(project_id, service_id).as_deref()
+                    == Some(target_project)
+                {
+                    return true;
+                }
+                if service_id == "__system__" {
+                    let status = m::data("system-graph-status");
+                    let cat = m::data("system-catalog")["catalog"].clone();
+                    let sys_meta = m::project(project_id);
+                    let ev_meta = m::project(target_project);
+                    return system_project_matches(
+                        target_project,
+                        project_id,
+                        &status,
+                        &cat,
+                        sys_meta["path"].as_str(),
+                        ev_meta["path"].as_str(),
+                    );
+                }
+                return false;
+            }
+        }
+    }
+    live_project.is_empty() || live_project == target_project
+}
+
 pub(crate) fn show_non_destructive_stale_banner(project_id: &str, message: &str) {
     let text = if message.trim().is_empty() {
         "Graph updated — Refresh"
     } else {
         message.trim()
     };
-    if open() {
-        let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
-        if project_id.is_empty() || modal_proj.is_empty() || modal_proj == project_id {
-            dom::text("graph-map-stale-text", text);
-            dom::hidden("graph-map-stale-banner", false);
-        }
+    let live_project = dom::value("project");
+    if open() && surface_matches_live_project(MODAL_SURFACE, project_id, &live_project) {
+        dom::text("graph-map-stale-text", text);
+        dom::hidden("graph-map-stale-banner", false);
     }
     for surface in [
         SESSION_SURFACE,
         SYSTEM_EMBEDDED_SURFACE,
         SYSTEM_CHANGE_SURFACE,
     ] {
-        if dom::get(surface.canvas).is_some() {
-            let surf_proj = surface_scope(surface).project_id().to_owned();
-            if project_id.is_empty() || surf_proj.is_empty() || surf_proj == project_id {
-                dom::text(&format!("{}-stale-text", surface.id_prefix), text);
-                dom::hidden(&format!("{}-stale-banner", surface.id_prefix), false);
-            }
+        if dom::get(surface.canvas).is_some()
+            && surface_matches_live_project(surface, project_id, &live_project)
+        {
+            dom::text(&format!("{}-stale-text", surface.id_prefix), text);
+            dom::hidden(&format!("{}-stale-banner", surface.id_prefix), false);
         }
     }
-}
-
-fn resolved_surface_project_for_invalidation(surface: MapSurface, live_project: &str) -> String {
-    if surface.name == "session" {
-        return live_project.to_owned();
-    }
-    if let Some(stored) = GraphTargetScope::from_json(&m::data(surface.scope_model_key)) {
-        if stored.is_system() || live_project.is_empty() {
-            return stored.project_id().to_owned();
-        }
-        return live_project.to_owned();
-    }
-    live_project.to_owned()
 }
 
 pub(crate) fn invalidate_surface_analysis_caches_for_live_project(
@@ -628,8 +723,7 @@ pub(crate) fn invalidate_surface_analysis_caches_for_live_project(
         SYSTEM_EMBEDDED_SURFACE,
         SYSTEM_CHANGE_SURFACE,
     ] {
-        let surf_proj = resolved_surface_project_for_invalidation(surface, live_project);
-        if project_id.is_empty() || surf_proj.is_empty() || surf_proj == project_id {
+        if surface_matches_live_project(surface, project_id, live_project) {
             m::next(surface.changes_epoch);
             m::next(surface.impact_epoch);
             m::set(surface.changes_key, V::Null);
@@ -749,7 +843,7 @@ fn dom_visible(id: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn refresh_active_external_views(proj: &str) {
+fn refresh_active_external_views(proj: &str, poll_system_status: bool) {
     let active_view = m::read(|s| s.view.clone());
     if matches!(active_view.as_str(), "systems" | "system-changes") {
         let sys_project = dom::value("system-project");
@@ -766,6 +860,11 @@ fn refresh_active_external_views(proj: &str) {
             sys_proj_meta["path"].as_str(),
             ev_proj_meta["path"].as_str(),
         ) {
+            if poll_system_status {
+                spawn_local(async {
+                    crate::systems::poll_system_graph_status(false).await;
+                });
+            }
             if active_view == "systems"
                 && dom_visible("system-map-canvas")
                 && (cat.is_object() || m::data("system-map-doc")["nodes"].is_array())
@@ -824,11 +923,32 @@ fn refresh_active_external_views(proj: &str) {
     }
 }
 
+pub(crate) fn refresh_external_views_for_stale_sse(project_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        refresh_active_external_views(project_id, true);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = project_id;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SseRefreshMode {
     SkipAlreadyCurrent,
     TargetedPatch,
     FullReload,
+}
+
+fn path_within_scope(path: &str, scope: &str) -> bool {
+    let p = normalize_rel_path(path);
+    let s = scope.trim_matches('/');
+    !p.is_empty() && (s.is_empty() || p == s || p.starts_with(&format!("{s}/")))
+}
+
+fn edge_touches_removed(edge: &V, removed_set: &BTreeSet<String>) -> bool {
+    let from = normalize_rel_path(&m::text(edge, "from"));
+    let to = normalize_rel_path(&m::text(edge, "to"));
+    removed_set.contains(&from) || removed_set.contains(&to)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -845,21 +965,24 @@ pub(super) fn plan_sse_graph_refresh(
     if !view.is_object() {
         return SseRefreshMode::FullReload;
     }
-    if delta.full_reload || delta.schema_changed || !delta.removed_files.is_empty() {
+    if delta.full_reload
+        || delta.schema_changed
+        || delta.changed_files.len() > 32
+        || delta.removed_files.len() > 32
+    {
         return SseRefreshMode::FullReload;
     }
     let counts_changed =
         (delta.nodes.is_some() && prev_nodes.is_some() && delta.nodes != prev_nodes)
             || (delta.edges.is_some() && prev_edges.is_some() && delta.edges != prev_edges);
-    if counts_changed {
-        return SseRefreshMode::FullReload;
-    }
     let view_rev = view["ir_revision"].as_u64();
-    if delta.revision.is_some() && view_rev == delta.revision && delta.changed_files.is_empty() {
+    if delta.revision.is_some()
+        && view_rev == delta.revision
+        && delta.changed_files.is_empty()
+        && delta.removed_files.is_empty()
+        && !counts_changed
+    {
         return SseRefreshMode::SkipAlreadyCurrent;
-    }
-    if delta.changed_files.is_empty() || delta.changed_files.len() > 32 {
-        return SseRefreshMode::FullReload;
     }
     if m::yes(&view["preliminary"]) || m::yes(&view["truncated"]) {
         return SseRefreshMode::FullReload;
@@ -878,12 +1001,97 @@ pub(super) fn plan_sse_graph_refresh(
     {
         return SseRefreshMode::FullReload;
     }
-    let unscoped = m::text(state, "scope").is_empty()
+
+    let removed_set: BTreeSet<String> = delta
+        .removed_files
+        .iter()
+        .map(|f| normalize_rel_path(f))
+        .filter(|f| !f.is_empty())
+        .collect();
+    if !removed_set.is_empty() && view["focus"].is_object() {
+        let fpath = normalize_rel_path(&m::text(&view["focus"], "path"));
+        if !fpath.is_empty() && removed_set.contains(&fpath) {
+            return SseRefreshMode::FullReload;
+        }
+    }
+
+    let mut loaded_paths: BTreeSet<String> = BTreeSet::new();
+    let mut removed_in_view = 0usize;
+    for node in nodes {
+        let p = normalize_rel_path(&m::text(node, "path"));
+        let f = normalize_rel_path(&m::text(node, "file"));
+        let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+        if is_folder
+            && !p.is_empty()
+            && removed_set
+                .iter()
+                .any(|rem| p == "." || path_within_scope(rem, &p))
+        {
+            // Removing a file rolled up into a folder node alters aggregated folder counts/edges.
+            return SseRefreshMode::FullReload;
+        }
+        if (!p.is_empty() && removed_set.contains(&p))
+            || (!f.is_empty() && removed_set.contains(&f))
+        {
+            removed_in_view += 1;
+        }
+        if !p.is_empty() {
+            loaded_paths.insert(p);
+        }
+        if !f.is_empty() {
+            loaded_paths.insert(f);
+        }
+    }
+
+    let scope = m::text(state, "scope");
+    let view_scope = m::text(view, "scope");
+    let eff_scope = if !scope.trim_matches('/').is_empty() {
+        scope.clone()
+    } else {
+        view_scope
+    };
+    let unscoped = eff_scope.trim_matches('/').is_empty()
         && m::text(state, "focus").is_empty()
         && !m::yes(&state["isolate_active"]);
-    if unscoped && delta.nodes.is_some_and(|n| n as usize != nodes.len()) {
+    for rem in &removed_set {
+        if !loaded_paths.contains(rem) && !unscoped && path_within_scope(rem, &eff_scope) {
+            return SseRefreshMode::FullReload;
+        }
+    }
+    for changed in &delta.changed_files {
+        let norm = normalize_rel_path(changed);
+        if norm.is_empty() || removed_set.contains(&norm) || loaded_paths.contains(&norm) {
+            continue;
+        }
+        // Newly created/unloaded file visible in current scope requires FullReload to add its node.
+        if unscoped || path_within_scope(&norm, &eff_scope) {
+            return SseRefreshMode::FullReload;
+        }
+    }
+
+    if unscoped {
+        let surviving_nodes = nodes.len().saturating_sub(removed_in_view) as u64;
+        if delta.nodes.is_some_and(|n| n != surviving_nodes) {
+            return SseRefreshMode::FullReload;
+        }
+        if let Some(edges) = view["edges"].as_array() {
+            let removed_edges = edges
+                .iter()
+                .filter(|e| edge_touches_removed(e, &removed_set))
+                .count();
+            let surviving_edges = edges.len().saturating_sub(removed_edges) as u64;
+            if delta.edges.is_some_and(|e| e != surviving_edges) {
+                return SseRefreshMode::FullReload;
+            }
+        } else if delta.edges.is_some_and(|e| e > 0) && removed_in_view == 0 {
+            return SseRefreshMode::FullReload;
+        }
+    }
+
+    if delta.changed_files.is_empty() && delta.removed_files.is_empty() && !counts_changed {
         return SseRefreshMode::FullReload;
     }
+
     SseRefreshMode::TargetedPatch
 }
 
@@ -896,35 +1104,252 @@ pub(super) fn apply_sse_delta_patch_to_view(
         view["ir_revision"] = json!(rev);
     }
     view["stale"] = json!(delta.state == "stale");
-    if delta.changed_files.is_empty() {
-        return 0;
+    let mut patched = 0usize;
+
+    let removed_set: BTreeSet<String> = delta
+        .removed_files
+        .iter()
+        .map(|f| normalize_rel_path(f))
+        .filter(|f| !f.is_empty())
+        .collect();
+    if !removed_set.is_empty() {
+        let mut dropped_node_paths: BTreeSet<String> = BTreeSet::new();
+        let mut removed_file_count = 0u64;
+        let mut dropped_nodes_count = 0usize;
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            let mut next_nodes = Vec::with_capacity(nodes.len());
+            for mut node in std::mem::take(nodes) {
+                let path = normalize_rel_path(&m::text(&node, "path"));
+                let file = normalize_rel_path(&m::text(&node, "file"));
+                let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+                let is_leaf_file = !is_folder
+                    && !m::yes(&node["symbol"])
+                    && !m::yes(&node["semantic"])
+                    && !path.starts_with("sem:")
+                    && !path.starts_with("__semantic__/");
+                if !is_folder {
+                    if (!path.is_empty() && removed_set.contains(&path))
+                        || (!file.is_empty() && removed_set.contains(&file))
+                    {
+                        if !path.is_empty() {
+                            dropped_node_paths.insert(path);
+                        }
+                        if is_leaf_file {
+                            removed_file_count += 1;
+                        }
+                        dropped_nodes_count += 1;
+                        patched += 1;
+                        continue;
+                    }
+                    next_nodes.push(node);
+                } else {
+                    let child_rem = if path.is_empty() {
+                        0u64
+                    } else {
+                        removed_set
+                            .iter()
+                            .filter(|rem| path == "." || path_within_scope(rem, &path))
+                            .count() as u64
+                    };
+                    if child_rem > 0 {
+                        if let Some(prev_files) = node["files"].as_u64() {
+                            let decremented = child_rem.min(prev_files);
+                            let remaining = prev_files.saturating_sub(child_rem);
+                            removed_file_count += decremented;
+                            if remaining == 0 {
+                                if !path.is_empty() {
+                                    dropped_node_paths.insert(path);
+                                }
+                                dropped_nodes_count += 1;
+                                patched += 1;
+                                continue;
+                            }
+                            node["files"] = json!(remaining);
+                            patched += 1;
+                        }
+                    }
+                    next_nodes.push(node);
+                }
+            }
+            *nodes = next_nodes;
+        }
+
+        let mut lost_out: HashMap<String, u64> = HashMap::new();
+        let mut lost_in: HashMap<String, u64> = HashMap::new();
+        let mut removed_links = 0u64;
+        let mut removed_guessed = 0u64;
+        let mut dropped_edges_count = 0usize;
+        if let Some(edges) = view["edges"].as_array_mut() {
+            let before = edges.len();
+            edges.retain(|edge| {
+                let from = normalize_rel_path(&m::text(edge, "from"));
+                let to = normalize_rel_path(&m::text(edge, "to"));
+                let drop_from = removed_set.contains(&from) || dropped_node_paths.contains(&from);
+                let drop_to = removed_set.contains(&to) || dropped_node_paths.contains(&to);
+                if drop_from || drop_to {
+                    let links = edge["links"].as_u64().unwrap_or(1).max(1);
+                    let guessed = edge["guessed"].as_u64().unwrap_or(0).min(links);
+                    removed_links += links;
+                    removed_guessed += guessed;
+                    if !drop_from && !from.is_empty() {
+                        *lost_out.entry(from).or_default() += links;
+                    }
+                    if !drop_to && !to.is_empty() {
+                        *lost_in.entry(to).or_default() += links;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            dropped_edges_count = before.saturating_sub(edges.len());
+            patched += dropped_edges_count;
+        }
+
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            for node in nodes.iter_mut() {
+                let path = normalize_rel_path(&m::text(node, "path"));
+                if let Some(&d_out) = lost_out.get(&path) {
+                    if let Some(prev) = node["out"].as_u64() {
+                        node["out"] = json!(prev.saturating_sub(d_out));
+                    }
+                }
+                if let Some(&d_in) = lost_in.get(&path) {
+                    if let Some(prev) = node["in"].as_u64() {
+                        node["in"] = json!(prev.saturating_sub(d_in));
+                    }
+                }
+            }
+        }
+        if view["focus"].is_object() {
+            for side in ["uses", "used_by"] {
+                if let Some(arr) = view["focus"][side].as_array_mut() {
+                    arr.retain(|entry| {
+                        let p = normalize_rel_path(&m::text(entry, "path"));
+                        p.is_empty()
+                            || (!removed_set.contains(&p) && !dropped_node_paths.contains(&p))
+                    });
+                }
+            }
+        }
+        if let Some(totals) = view["totals"].as_object_mut() {
+            if let Some(prev) = totals.get("files").and_then(V::as_u64) {
+                totals.insert(
+                    "files".into(),
+                    json!(prev.saturating_sub(removed_file_count)),
+                );
+            }
+            if let Some(prev) = totals.get("links").and_then(V::as_u64) {
+                totals.insert("links".into(), json!(prev.saturating_sub(removed_links)));
+            }
+            if let Some(prev) = totals.get("guessed").and_then(V::as_u64) {
+                totals.insert(
+                    "guessed".into(),
+                    json!(prev.saturating_sub(removed_guessed)),
+                );
+            }
+            if let Some(prev) = totals.get("read").and_then(V::as_u64) {
+                let removed_read = removed_links.saturating_sub(removed_guessed);
+                totals.insert("read".into(), json!(prev.saturating_sub(removed_read)));
+            }
+            if let Some(prev) = totals.get("nodes").and_then(V::as_u64) {
+                totals.insert(
+                    "nodes".into(),
+                    json!(prev.saturating_sub(dropped_nodes_count as u64)),
+                );
+            }
+            if let Some(prev) = totals.get("edges").and_then(V::as_u64) {
+                totals.insert(
+                    "edges".into(),
+                    json!(prev.saturating_sub(dropped_edges_count as u64)),
+                );
+            }
+        }
     }
+
+    if delta.nodes.is_some() || delta.edges.is_some() {
+        if let Some(totals) = view["totals"].as_object_mut() {
+            if let Some(n) = delta.nodes {
+                if totals.get("symbols").is_some_and(V::is_number) {
+                    totals.insert("symbols".into(), json!(n));
+                    patched += 1;
+                }
+            }
+            if let Some(e) = delta.edges {
+                if totals.get("relations").is_some_and(V::is_number) {
+                    totals.insert("relations".into(), json!(e));
+                    patched += 1;
+                }
+            }
+        }
+    }
+
     let changed_set: BTreeSet<String> = delta
         .changed_files
         .iter()
         .map(|f| normalize_rel_path(f))
         .filter(|f| !f.is_empty())
         .collect();
-    if changed_set.is_empty() {
-        return 0;
-    }
-    let mut patched = 0usize;
-    if let Some(nodes) = view["nodes"].as_array_mut() {
-        for node in nodes {
-            let path = normalize_rel_path(&m::text(node, "path"));
-            let file = normalize_rel_path(&m::text(node, "file"));
-            if (!path.is_empty() && changed_set.contains(&path))
-                || (!file.is_empty() && changed_set.contains(&file))
-            {
-                node["changed"] = json!(true);
-                patched += 1;
+    let plain_map = view["chosen"].is_null();
+    if !changed_set.is_empty() || plain_map {
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            for node in nodes {
+                let path = normalize_rel_path(&m::text(node, "path"));
+                let file = normalize_rel_path(&m::text(node, "file"));
+                let is_folder = m::yes(&node["folder"]) || node["files"].is_u64();
+                let match_count = if changed_set.is_empty() {
+                    0u64
+                } else if is_folder {
+                    if path.is_empty() {
+                        0
+                    } else {
+                        changed_set
+                            .iter()
+                            .filter(|c| path == "." || path_within_scope(c, &path))
+                            .count() as u64
+                    }
+                } else if (!path.is_empty() && changed_set.contains(&path))
+                    || (!file.is_empty() && changed_set.contains(&file))
+                {
+                    1
+                } else {
+                    0
+                };
+                if match_count > 0 {
+                    node["changed"] = json!(match_count);
+                    node["sse_changed"] = json!(true);
+                    patched += 1;
+                } else if node["sse_changed"] == json!(true)
+                    || (plain_map
+                        && (node["changed"].as_u64().unwrap_or(0) > 0
+                            || node["changed"].as_bool() == Some(true)))
+                {
+                    node["changed"] = json!(0);
+                    if let Some(obj) = node.as_object_mut() {
+                        obj.remove("sse_changed");
+                    }
+                    patched += 1;
+                }
             }
         }
-    }
-    if view["focus"].is_object() {
-        let fpath = normalize_rel_path(&m::text(&view["focus"], "path"));
-        if !fpath.is_empty() && changed_set.contains(&fpath) {
-            view["focus"]["changed"] = json!(true);
+        if view["focus"].is_object() {
+            let fpath = normalize_rel_path(&m::text(&view["focus"], "path"));
+            let matched = !fpath.is_empty() && changed_set.contains(&fpath);
+            if matched {
+                view["focus"]["changed"] = json!(1);
+                view["focus"]["sse_changed"] = json!(true);
+                patched += 1;
+            } else if view["focus"]["sse_changed"] == json!(true)
+                || (plain_map
+                    && (view["focus"]["changed"].as_u64().unwrap_or(0) > 0
+                        || view["focus"]["changed"].as_bool() == Some(true)))
+            {
+                view["focus"]["changed"] = json!(0);
+                if let Some(obj) = view["focus"].as_object_mut() {
+                    obj.remove("sse_changed");
+                }
+                patched += 1;
+            }
         }
     }
     patched
@@ -961,24 +1386,45 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         let proj = project_id.to_owned();
-        dom::later("graph-sse-idle-refresh", 250, move || {
+        let timer_key = if proj.is_empty() {
+            "graph-sse-idle-refresh".to_owned()
+        } else {
+            format!("graph-sse-idle-refresh:{proj}")
+        };
+        dom::later(&timer_key, 250, move || {
             if any_graph_drag_active() {
                 return;
             }
-            let raw_event = m::data("graph-sse-status");
+            let raw_event = if proj.is_empty() {
+                m::data("graph-sse-status")
+            } else {
+                let per_proj = m::data(&format!("graph-sse-status:{proj}"));
+                if per_proj.is_object() {
+                    per_proj
+                } else {
+                    m::data("graph-sse-status")
+                }
+            };
             let delta = crate::graph::extract_sse_delta_payload(&raw_event);
-            let delta_meta = m::data("graph-sse-delta-meta");
+            let delta_meta = if proj.is_empty() {
+                m::data("graph-sse-delta-meta")
+            } else {
+                let per_proj = m::data(&format!("graph-sse-delta-meta:{proj}"));
+                if per_proj.is_object() {
+                    per_proj
+                } else {
+                    m::data("graph-sse-delta-meta")
+                }
+            };
             let prev_nodes = delta_meta["prev_nodes"].as_u64();
             let prev_edges = delta_meta["prev_edges"].as_u64();
+            let live_project = dom::value("project");
 
             let mut need_full_modal = false;
-            if open() {
-                let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
-                if project_scope_matches(&proj, &modal_proj) {
-                    need_full_modal =
-                        patch_surface_sse_delta(MODAL_SURFACE, &delta, prev_nodes, prev_edges)
-                            == SseRefreshMode::FullReload;
-                }
+            if open() && surface_matches_live_project(MODAL_SURFACE, &proj, &live_project) {
+                need_full_modal =
+                    patch_surface_sse_delta(MODAL_SURFACE, &delta, prev_nodes, prev_edges)
+                        == SseRefreshMode::FullReload;
             }
 
             let mut embedded_full = Vec::new();
@@ -987,14 +1433,12 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
                 SYSTEM_EMBEDDED_SURFACE,
                 SYSTEM_CHANGE_SURFACE,
             ] {
-                if dom::get(surface.canvas).is_some() {
-                    let surf_proj = surface_scope(surface).project_id().to_owned();
-                    if project_scope_matches(&proj, &surf_proj)
-                        && patch_surface_sse_delta(surface, &delta, prev_nodes, prev_edges)
-                            == SseRefreshMode::FullReload
-                    {
-                        embedded_full.push(surface);
-                    }
+                if dom::get(surface.canvas).is_some()
+                    && surface_matches_live_project(surface, &proj, &live_project)
+                    && patch_surface_sse_delta(surface, &delta, prev_nodes, prev_edges)
+                        == SseRefreshMode::FullReload
+                {
+                    embedded_full.push(surface);
                 }
             }
 
@@ -1025,7 +1469,10 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
                     });
                 }
             }
-            refresh_active_external_views(&proj);
+            let from_sys_status = !m::text(&raw_event, "source_project_id").is_empty()
+                || !m::text(&raw_event, "member_project_id").is_empty()
+                || m::text(&raw_event, "action") == "ir_delta";
+            refresh_active_external_views(&proj, !from_sys_status);
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1207,13 +1654,12 @@ pub(super) fn should_trigger_auto_lod_for_target(state: &V, view: &V, scale: f64
 }
 
 pub(super) fn should_trigger_auto_lod_reload(
-    embedded: bool,
     state: &V,
     view: &V,
     prev_scale: f64,
     next_scale: f64,
 ) -> bool {
-    if embedded || !prev_scale.is_finite() || !next_scale.is_finite() || next_scale <= 0.0 {
+    if !prev_scale.is_finite() || !next_scale.is_finite() || next_scale <= 0.0 {
         return false;
     }
     if auto_lod_tier_for_scale(prev_scale) == auto_lod_tier_for_scale(next_scale)
@@ -1224,11 +1670,11 @@ pub(super) fn should_trigger_auto_lod_reload(
     should_trigger_auto_lod_for_target(state, view, next_scale)
 }
 
-fn live_camera_scale_for_map_path(state: &V, embedded: bool) -> Option<f64> {
-    if embedded || m::yes(&state["fit"]) {
+fn live_camera_scale_for_surface_key(state: &V, camera_key: &str) -> Option<f64> {
+    if m::yes(&state["fit"]) || camera_key.is_empty() {
         return None;
     }
-    let raw_cam = m::data(MODAL_SURFACE.camera_key);
+    let raw_cam = m::data(camera_key);
     if !raw_cam.is_object() || raw_cam["fit_mode"].as_bool() != Some(false) {
         return None;
     }
@@ -1278,7 +1724,29 @@ pub fn progressive_lod_for_state(
     (None, None)
 }
 
+pub(in crate::graph_map) fn build_surface_map_path(
+    surface: MapSurface,
+    scope: &GraphTargetScope,
+    state: &V,
+) -> String {
+    build_scoped_map_path_with_camera_key(scope, state, surface.embedded, surface.camera_key)
+}
+
 pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool) -> String {
+    let camera_key = if embedded {
+        SESSION_SURFACE.camera_key
+    } else {
+        MODAL_SURFACE.camera_key
+    };
+    build_scoped_map_path_with_camera_key(scope, state, embedded, camera_key)
+}
+
+fn build_scoped_map_path_with_camera_key(
+    scope: &GraphTargetScope,
+    state: &V,
+    embedded: bool,
+    camera_key: &str,
+) -> String {
     let mut query = vec![("scope", m::text(state, "scope"))];
     if embedded {
         let sid = if scope.is_system() {
@@ -1358,7 +1826,7 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
         let depth = state["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 6);
         query.push(("depth", depth.to_string()));
     }
-    let live_scale = live_camera_scale_for_map_path(state, embedded);
+    let live_scale = live_camera_scale_for_surface_key(state, camera_key);
     let (lod_val, min_weight_val) = progressive_lod_for_state(state, live_scale);
     if let Some(level) = lod_val {
         query.push(("lod", level));
@@ -1548,14 +2016,13 @@ mod tests {
 
         // Crossing 0.65 downward while full view is loaded triggers reload; staying at 0.8 -> 0.7 does not.
         assert!(!should_trigger_auto_lod_reload(
-            false, &state, &full_view, 0.85, 0.72
+            &state, &full_view, 0.85, 0.72
         ));
         assert!(should_trigger_auto_lod_reload(
-            false, &state, &full_view, 0.72, 0.55
+            &state, &full_view, 0.72, 0.55
         ));
         // Crossing 0.35 downward while folder view is loaded triggers crate reload.
         assert!(should_trigger_auto_lod_reload(
-            false,
             &state,
             &folder_view,
             0.50,
@@ -1563,16 +2030,29 @@ mod tests {
         ));
         // Already loaded at crate LOD -> zooming within < 0.35 does not reload again.
         assert!(!should_trigger_auto_lod_reload(
-            false,
             &state,
             &crate_view,
             0.30,
             0.20
         ));
-        // Embedded surfaces do not trigger modal auto_lod reloads.
-        assert!(!should_trigger_auto_lod_reload(
-            true, &state, &full_view, 0.72, 0.55
-        ));
+
+        // Embedded surfaces (SESSION_SURFACE, SYSTEM_EMBEDDED_SURFACE, SYSTEM_CHANGE_SURFACE)
+        // share auto_lod camera-scale URL routing using each surface's own camera_key.
+        for surf in [
+            SESSION_SURFACE,
+            SYSTEM_EMBEDDED_SURFACE,
+            SYSTEM_CHANGE_SURFACE,
+        ] {
+            m::set(surf.camera_key, json!({ "scale": 0.25, "fit_mode": false }));
+            let scope = GraphTargetScope::single("proj-emb");
+            let url = build_surface_map_path(surf, &scope, &state);
+            m::take(surf.camera_key);
+            assert!(
+                url.contains("lod=crate") && url.contains("min_weight=2"),
+                "expected surface {} auto_lod URL to include crate LOD: {url}",
+                surf.name
+            );
+        }
     }
 
     #[test]
@@ -1582,10 +2062,22 @@ mod tests {
             "mode": "map",
             "ir_revision": 10,
             "nodes": [
-                { "path": "src/auth.rs", "name": "auth.rs" },
-                { "path": "src/db.rs", "name": "db.rs" }
+                { "path": "src/auth.rs", "name": "auth.rs", "out": 1, "in": 0 },
+                { "path": "src/db.rs", "name": "db.rs", "out": 0, "in": 1 }
             ],
-            "edges": []
+            "edges": [
+                { "from": "src/auth.rs", "to": "src/db.rs", "links": 1, "guessed": 0 }
+            ],
+            "totals": {
+                "files": 2,
+                "links": 1,
+                "read": 1,
+                "guessed": 0,
+                "symbols": 12,
+                "relations": 18,
+                "nodes": 2,
+                "edges": 1
+            }
         });
 
         // Identical revision without changed files skips reload.
@@ -1595,53 +2087,184 @@ mod tests {
             "revision": 10
         }));
         assert_eq!(
-            plan_sse_graph_refresh(&same_rev, Some(2), Some(0), &map_view, &base_state),
+            plan_sse_graph_refresh(&same_rev, Some(2), Some(1), &map_view, &base_state),
             SseRefreshMode::SkipAlreadyCurrent
         );
 
-        // Incremental changed_files with unchanged counts qualifies for targeted patch.
+        // Incremental changed_files sets u64 `changed: 1` (compatible with render/mod.rs `.as_u64()`)
+        // and subsequent deltas clear stale flags on untouched plain-map nodes.
         let inc = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
             "revision": 11,
             "nodes": 2,
-            "edges": 0,
+            "edges": 1,
             "changed_files": ["src/auth.rs"]
         }));
         assert_eq!(
-            plan_sse_graph_refresh(&inc, Some(2), Some(0), &map_view, &base_state),
+            plan_sse_graph_refresh(&inc, Some(2), Some(1), &map_view, &base_state),
             SseRefreshMode::TargetedPatch
         );
         let mut patched_view = map_view.clone();
         let patched_n = apply_sse_delta_patch_to_view(&mut patched_view, &inc);
-        assert_eq!(patched_n, 1);
+        assert!(patched_n >= 1);
         assert_eq!(patched_view["ir_revision"], json!(11));
-        assert_eq!(patched_view["nodes"][0]["changed"], json!(true));
+        assert_eq!(patched_view["nodes"][0]["changed"], json!(1));
         assert!(patched_view["nodes"][1]["changed"].is_null());
 
-        // Removals, count changes, schema updates, or aggregate modes fall back to FullReload.
-        let count_changed = crate::graph::extract_sse_delta_payload(&json!({
+        let inc2 = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
             "revision": 12,
+            "nodes": 2,
+            "edges": 1,
+            "changed_files": ["src/db.rs"]
+        }));
+        apply_sse_delta_patch_to_view(&mut patched_view, &inc2);
+        assert_eq!(
+            patched_view["nodes"][0]["changed"],
+            json!(0),
+            "stale changed flag on src/auth.rs must reset cleanly"
+        );
+        assert_eq!(patched_view["nodes"][1]["changed"], json!(1));
+
+        // Safe node + edge removal decrements view totals (files/links/read) without conflating IR counts.
+        let removed_safe = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "nodes": 1,
+            "edges": 0,
+            "removed_files": ["src/db.rs"],
+            "changed_files": ["src/auth.rs"]
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(&removed_safe, Some(2), Some(1), &map_view, &base_state),
+            SseRefreshMode::TargetedPatch
+        );
+        let mut removed_patched = map_view.clone();
+        let rem_cnt = apply_sse_delta_patch_to_view(&mut removed_patched, &removed_safe);
+        assert!(rem_cnt >= 2);
+        assert_eq!(removed_patched["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(removed_patched["edges"].as_array().unwrap().len(), 0);
+        assert_eq!(removed_patched["nodes"][0]["out"], json!(0));
+        assert_eq!(removed_patched["totals"]["files"], json!(1));
+        assert_eq!(removed_patched["totals"]["links"], json!(0));
+        assert_eq!(removed_patched["totals"]["read"], json!(0));
+        assert_eq!(removed_patched["totals"]["nodes"], json!(1));
+        assert_eq!(removed_patched["totals"]["edges"], json!(0));
+        assert_eq!(removed_patched["totals"]["symbols"], json!(1));
+        assert_eq!(removed_patched["totals"]["relations"], json!(0));
+
+        // Scoped views receiving out-of-scope global IR deltas update symbols/relations ONLY,
+        // preserving view-level `files`/`links`/`nodes`/`edges`.
+        let scoped_state = json!({ "scope": "src/auth" });
+        let out_of_scope_counts = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 13,
+            "nodes": 400,
+            "edges": 800,
+            "changed_files": ["packages/billing/invoice.ts"]
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(
+                &out_of_scope_counts,
+                Some(390),
+                Some(780),
+                &map_view,
+                &scoped_state
+            ),
+            SseRefreshMode::TargetedPatch
+        );
+        let mut scoped_patched = map_view.clone();
+        apply_sse_delta_patch_to_view(&mut scoped_patched, &out_of_scope_counts);
+        assert_eq!(scoped_patched["totals"]["symbols"], json!(400));
+        assert_eq!(scoped_patched["totals"]["relations"], json!(800));
+        assert_eq!(scoped_patched["totals"]["files"], json!(2));
+        assert_eq!(scoped_patched["totals"]["links"], json!(1));
+
+        // Scoped folder view receiving removed_files for a child inside a collapsed folder must
+        // request FullReload in planner AND cleanly decrement/drop folders if patched directly.
+        let scoped_folder_view = json!({
+            "mode": "map",
+            "scope": "src",
+            "ir_revision": 10,
+            "nodes": [
+                { "path": "src/nested", "name": "nested", "folder": true, "files": 2, "out": 1, "in": 0 },
+                { "path": "src/single", "name": "single", "folder": true, "files": 1, "out": 0, "in": 1 }
+            ],
+            "edges": [
+                { "from": "src/nested", "to": "src/single", "links": 2, "guessed": 1 }
+            ],
+            "totals": { "files": 3, "links": 2, "read": 1, "guessed": 1, "symbols": 20, "relations": 30 }
+        });
+        let child_removed_only = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 14,
+            "removed_files": ["src/single/only.rs"],
+            "changed_files": []
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(
+                &child_removed_only,
+                Some(20),
+                Some(30),
+                &scoped_folder_view,
+                &json!({ "scope": "src" })
+            ),
+            SseRefreshMode::FullReload
+        );
+        let mut folder_patched = scoped_folder_view.clone();
+        apply_sse_delta_patch_to_view(&mut folder_patched, &child_removed_only);
+        assert_eq!(folder_patched["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(folder_patched["nodes"][0]["path"], "src/nested");
+        assert_eq!(folder_patched["edges"].as_array().unwrap().len(), 0);
+        assert_eq!(folder_patched["totals"]["files"], json!(2));
+        assert_eq!(folder_patched["totals"]["links"], json!(0));
+        assert_eq!(folder_patched["totals"]["read"], json!(0));
+        assert_eq!(folder_patched["totals"]["guessed"], json!(0));
+
+        // Unscoped brand-new nodes, removing focused node, or aggregate modes still trigger FullReload.
+        let count_changed_unloaded = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 14,
             "nodes": 3,
             "edges": 1,
             "changed_files": ["src/auth.rs"]
         }));
         assert_eq!(
-            plan_sse_graph_refresh(&count_changed, Some(2), Some(0), &map_view, &base_state),
+            plan_sse_graph_refresh(
+                &count_changed_unloaded,
+                Some(2),
+                Some(1),
+                &map_view,
+                &base_state
+            ),
             SseRefreshMode::FullReload
         );
 
-        let removed = crate::graph::extract_sse_delta_payload(&json!({
+        let focus_view = json!({
+            "mode": "file",
+            "ir_revision": 10,
+            "focus": { "path": "src/old.rs" },
+            "nodes": [
+                { "path": "src/old.rs", "name": "old.rs" },
+                { "path": "src/auth.rs", "name": "auth.rs" }
+            ],
+            "edges": []
+        });
+        let removed_focus = crate::graph::extract_sse_delta_payload(&json!({
             "state": "ready",
             "reason": "incremental_update",
-            "revision": 12,
+            "revision": 15,
             "removed_files": ["src/old.rs"],
-            "changed_files": ["src/auth.rs"]
+            "changed_files": []
         }));
         assert_eq!(
-            plan_sse_graph_refresh(&removed, Some(2), Some(0), &map_view, &base_state),
+            plan_sse_graph_refresh(&removed_focus, Some(2), Some(0), &focus_view, &base_state),
             SseRefreshMode::FullReload
         );
 
@@ -1654,5 +2277,65 @@ mod tests {
             plan_sse_graph_refresh(&inc, Some(2), Some(0), &layers_view, &base_state),
             SseRefreshMode::FullReload
         );
+    }
+
+    #[test]
+    fn system_service_surfaces_match_member_graph_id_for_sse_invalidation() {
+        m::set(
+            "system-graph-status",
+            json!({
+                "project_id": "proj-sys",
+                "services": {
+                    "api": { "service": "api", "graph_id": "proj-api", "state": "ready" },
+                    "worker": { "service": "worker", "graph_id": "proj-worker", "state": "ready" }
+                }
+            }),
+        );
+        let api_scope = GraphTargetScope::SystemService {
+            project_id: "proj-sys".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "api".to_owned(),
+            services: vec!["api".to_owned(), "worker".to_owned()],
+            run_id: None,
+            run_title: None,
+            launches: Vec::new(),
+        };
+        m::set(SYSTEM_EMBEDDED_SURFACE.scope_model_key, api_scope.to_json());
+        m::set(
+            SYSTEM_EMBEDDED_SURFACE.changes_key,
+            json!({"data": {"files": []}}),
+        );
+
+        assert!(surface_matches_live_project(
+            SYSTEM_EMBEDDED_SURFACE,
+            "proj-api",
+            "proj-other"
+        ));
+        assert!(!surface_matches_live_project(
+            SYSTEM_EMBEDDED_SURFACE,
+            "proj-worker",
+            "proj-other"
+        ));
+        invalidate_surface_analysis_caches_for_live_project("proj-api", "proj-other");
+        assert!(m::data(SYSTEM_EMBEDDED_SURFACE.changes_key).is_null());
+
+        let sys_root_scope = GraphTargetScope::SystemService {
+            project_id: "proj-sys".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "__system__".to_owned(),
+            services: vec!["api".to_owned(), "worker".to_owned()],
+            run_id: None,
+            run_title: None,
+            launches: Vec::new(),
+        };
+        m::set(
+            SYSTEM_CHANGE_SURFACE.scope_model_key,
+            sys_root_scope.to_json(),
+        );
+        assert!(surface_matches_live_project(
+            SYSTEM_CHANGE_SURFACE,
+            "proj-api",
+            "proj-other"
+        ));
     }
 }

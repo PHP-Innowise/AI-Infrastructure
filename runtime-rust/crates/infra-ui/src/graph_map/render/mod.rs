@@ -14,6 +14,42 @@ pub struct DenseNodeExtraSpec {
     pub dim: bool,
 }
 
+/// Per-view boolean modes needed to lazily render a single dense node `<button>` on demand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DenseRenderModeFlags {
+    pub layered_view: bool,
+    pub opened: bool,
+    pub followed: bool,
+    pub pathed: bool,
+    pub shared: bool,
+    pub cycle_view: bool,
+    pub pattern_view: bool,
+    pub scenario: bool,
+    pub cycles: bool,
+    pub named: bool,
+    pub pattern_rings: bool,
+}
+
+/// Compact precomputed overlay/geometry seed for lazy dense node DOM materialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DenseNodeDomSeed {
+    pub index: usize,
+    pub placed: Placed,
+    pub flow: (u64, u64),
+    pub blast: Option<(u64, f64)>,
+    pub change_status: Option<String>,
+    pub impact: Option<&'static str>,
+    pub chosen: bool,
+    pub selected: bool,
+    pub lit: bool,
+    pub pinned: bool,
+    pub roving: bool,
+    pub focus_target: bool,
+    pub on_traced_path: bool,
+    pub any_traced_path: bool,
+    pub shared_path_mark: bool,
+}
+
 /// Canvas markup plus resolved plane size and live focus overlay coordinates.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderedCanvas {
@@ -29,10 +65,32 @@ pub struct RenderedCanvas {
     pub dense_scene: Option<graph_viewport::canvas2d::DenseScene>,
     pub dense_meta: Option<graph_viewport::canvas2d::DenseSceneMeta>,
     pub dense_node_htmls: Vec<String>,
+    pub dense_node_seeds: Vec<Option<DenseNodeDomSeed>>,
+    pub dense_render_modes: DenseRenderModeFlags,
     pub dense_extra_specs: Vec<Option<DenseNodeExtraSpec>>,
     pub node_keys: Vec<String>,
     pub pairs: Vec<(usize, usize)>,
     pub node_labels: Vec<String>,
+}
+
+impl RenderedCanvas {
+    /// Lazily formats the DOM `<button>` markup for `idx` when needed (roving focus or mount).
+    #[allow(dead_code)]
+    pub fn materialize_dense_node_html(&self, view: &V, idx: usize) -> Option<String> {
+        if let Some(existing) = self.dense_node_htmls.get(idx).filter(|s| !s.is_empty()) {
+            return Some(existing.clone());
+        }
+        let seed = self.dense_node_seeds.get(idx)?.as_ref()?;
+        let nodes = m::array(&view["nodes"]);
+        let node = nodes.get(idx)?;
+        Some(render_dense_node_dom_html(
+            view,
+            node,
+            seed,
+            self.dense_render_modes,
+            false,
+        ))
+    }
 }
 
 pub(super) fn build_path_index(items: &[V]) -> HashMap<&str, usize> {
@@ -53,10 +111,10 @@ pub(super) fn lookup_path_index(items: &[V], map: &HashMap<&str, usize>, key: &V
     }
 }
 /// Scale thresholds beyond which non-essential marks and offscreen details are simplified.
-pub const LARGE_GRAPH_NODE_THRESHOLD: usize = 80;
-pub const LARGE_GRAPH_EDGE_THRESHOLD: usize = 160;
-pub const DENSE_GRAPH_NODE_THRESHOLD: usize = 180;
-pub const DENSE_GRAPH_EDGE_THRESHOLD: usize = 400;
+pub const LARGE_GRAPH_NODE_THRESHOLD: usize = 24;
+pub const LARGE_GRAPH_EDGE_THRESHOLD: usize = 60;
+pub const DENSE_GRAPH_NODE_THRESHOLD: usize = 32;
+pub const DENSE_GRAPH_EDGE_THRESHOLD: usize = 80;
 
 /// Scale classification for detail/culling optimizations on large dependency graphs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -996,7 +1054,7 @@ pub fn canvas_with_overlays(
             ""
         };
         hidden_wires.push(hidden);
-        if against {
+        if against && !is_dense {
             html.push_str(&format!(
                 "<path class=\"graph-map-violation-halo\"{edge_state_attr} data-ends=\"{from} {to}\" d=\"{}\"/>",
                 wire.path,
@@ -1122,47 +1180,50 @@ pub fn canvas_with_overlays(
         }
         // What stands at the middle of a link: a word of a pattern, what a
         // change did to it, or, on a link that passes layers and carries
-        // no word, a chevron that says which way it runs.
-        let mut worded = false;
-        if pattern_view && !layered_view {
-            if let Some((tie, (x, y))) = edge["tie"]
-                .as_str()
-                .zip(middle(&wire.path).and_then(|mid| place_tie(&mut placed_ties, mid)))
-            {
+        // no word, a chevron that says which way it runs. In dense mode
+        // Canvas2D draws edges and badges directly so SVG mark strings stay unallocated.
+        if !is_dense {
+            let mut worded = false;
+            if pattern_view && !layered_view {
+                if let Some((tie, (x, y))) = edge["tie"]
+                    .as_str()
+                    .zip(middle(&wire.path).and_then(|mid| place_tie(&mut placed_ties, mid)))
+                {
+                    worded = true;
+                    marks.push_str(&format!(
+                        "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
+                        escape(pattern_family.as_deref().unwrap_or("design")),
+                        escape(&short_tie(tie)),
+                    ));
+                }
+            }
+            if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
                 worded = true;
                 marks.push_str(&format!(
-                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
-                    escape(pattern_family.as_deref().unwrap_or("design")),
-                    escape(&short_tie(tie)),
+                    "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
+                    count(links)
+                ));
+            } else if let Some((diff, (x, y))) = edge_diff
+                .filter(|diff| matches!(*diff, "added" | "removed"))
+                .zip(middle(&wire.path))
+            {
+                worded = true;
+                let symbol = if diff == "added" { "+" } else { "-" };
+                marks.push_str(&format!(
+                    "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
                 ));
             }
-        }
-        if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
-            worded = true;
-            marks.push_str(&format!(
-                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
-                count(links)
-            ));
-        } else if let Some((diff, (x, y))) = edge_diff
-            .filter(|diff| matches!(*diff, "added" | "removed"))
-            .zip(middle(&wire.path))
-        {
-            worded = true;
-            let symbol = if diff == "added" { "+" } else { "-" };
-            marks.push_str(&format!(
-                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
-            ));
-        }
-        if !worded
-            && passes_layers(&wire.path)
-            && (!scale_tier.elide_non_essential_marks() || against || lit((from, to)))
-        {
-            if let Some((x, y, angle)) = halfway(&wire.path) {
-                marks.push_str(&format!(
-                    "<path class=\"graph-map-edge-chevron{state}{}\" data-ends=\"{from} {to}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{hidden_attr} transform=\"translate({x:.1} {y:.1}) rotate({angle:.0})\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>",
-                    if against { " graph-map-edge-against" } else { "" },
-                    kinds.held(),
-                ));
+            if !worded
+                && passes_layers(&wire.path)
+                && (!scale_tier.elide_non_essential_marks() || against || lit((from, to)))
+            {
+                if let Some((x, y, angle)) = halfway(&wire.path) {
+                    marks.push_str(&format!(
+                        "<path class=\"graph-map-edge-chevron{state}{}\" data-ends=\"{from} {to}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{hidden_attr} transform=\"translate({x:.1} {y:.1}) rotate({angle:.0})\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>",
+                        if against { " graph-map-edge-against" } else { "" },
+                        kinds.held(),
+                    ));
+                }
             }
         }
     }
@@ -1240,16 +1301,18 @@ pub fn canvas_with_overlays(
             } else {
                 ""
             };
-            html.push_str(&format!(
-                "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} -> {} ({label} · {kind})</title></path>",
-                arrow_marker_suffix(kind, false),
-                escape(&from_name),
-                escape(&to_name),
-            ));
-            if let Some((mx, my)) = middle(&d) {
-                marks.push_str(&format!(
-                    "<text class=\"graph-map-edge-mark\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" x=\"{mx:.1}\" y=\"{my:.1}\">{mark_symbol}</text>"
+            if !is_dense {
+                html.push_str(&format!(
+                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} -> {} ({label} · {kind})</title></path>",
+                    arrow_marker_suffix(kind, false),
+                    escape(&from_name),
+                    escape(&to_name),
                 ));
+                if let Some((mx, my)) = middle(&d) {
+                    marks.push_str(&format!(
+                        "<text class=\"graph-map-edge-mark\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" x=\"{mx:.1}\" y=\"{my:.1}\">{mark_symbol}</text>"
+                    ));
+                }
             }
         };
         if let Some(sel_idx) = lookup.selected_idx {
@@ -1338,7 +1401,9 @@ pub fn canvas_with_overlays(
             }
         }
     }
-    html.push_str(&marks);
+    if !is_dense && !marks.is_empty() {
+        html.push_str(&marks);
+    }
     // Over each link lies a wider one that cannot be seen and is easy to
     // hit: selecting a link looks into it. They lie over all the links, so
     // none of them is hidden under a link drawn later. A link between two
@@ -1390,8 +1455,26 @@ pub fn canvas_with_overlays(
         ));
     }
     let blast = blast_marks(view, &nodes);
+    let dense_render_modes = DenseRenderModeFlags {
+        layered_view,
+        opened,
+        followed,
+        pathed,
+        shared,
+        cycle_view,
+        pattern_view,
+        scenario,
+        cycles,
+        named,
+        pattern_rings: m::yes(&view["pattern"]["rings"]),
+    };
     let mut dense_nodes = Vec::new();
     let mut dense_node_htmls = if is_dense {
+        Vec::with_capacity(nodes.len())
+    } else {
+        Vec::new()
+    };
+    let mut dense_node_seeds = if is_dense {
         Vec::with_capacity(nodes.len())
     } else {
         Vec::new()
@@ -1417,6 +1500,7 @@ pub fn canvas_with_overlays(
             if !cone.contains(&index) {
                 if is_dense {
                     dense_node_htmls.push(String::new());
+                    dense_node_seeds.push(None);
                     dense_extra_specs.push(None);
                 }
                 continue;
@@ -1424,9 +1508,29 @@ pub fn canvas_with_overlays(
         }
         let is_pinned = pinned_set.contains(&index);
         let mut skip_offscreen_dom = false;
+        let is_on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
+        let any_traced = overlay.path_nodes.is_some_and(|pn| !pn.is_empty());
+        let lit_here = near(index);
+        let dom_seed = DenseNodeDomSeed {
+            index,
+            placed: placed.clone(),
+            flow: flow[index],
+            blast: blast[index],
+            change_status: node_change_statuses[index].clone(),
+            impact: impact_lookup
+                .as_ref()
+                .and_then(|lookup| lookup.node_impact(&nodes, index)),
+            chosen: chosen == Some(index),
+            selected,
+            lit: lit_here,
+            pinned: is_pinned,
+            roving: active_roving == index,
+            focus_target: focus_overlay.nodes.contains(&index),
+            on_traced_path: is_on_traced,
+            any_traced_path: any_traced,
+            shared_path_mark: !shared_edges.is_empty() && lit_here,
+        };
         if is_dense {
-            let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
-            let lit_here = near(index);
             dense_nodes.push(graph_viewport::canvas2d::DenseNodeSpec {
                 index,
                 x: placed.x,
@@ -1435,23 +1539,20 @@ pub fn canvas_with_overlays(
                 h: BOX_HEIGHT,
                 label: m::text(node, "name"),
                 role: resolved_member_kind(node).to_owned(),
-                selected: chosen == Some(index),
-                lit: lit_here || on_traced,
-                dim: (selected && !lit_here)
-                    || (overlay
-                        .path_nodes
-                        .is_some_and(|pn| !pn.is_empty() && !on_traced)),
+                selected: dom_seed.chosen,
+                lit: lit_here || is_on_traced,
+                dim: (selected && !lit_here) || (any_traced && !is_on_traced),
                 changed: node["changed"].as_u64().unwrap_or(0) > 0
-                    || node_change_statuses[index].is_some(),
+                    || dom_seed.change_status.is_some(),
                 pinned: is_pinned,
                 failed: node["suspect"].as_u64().is_some(),
             });
             if let Some(bounds) = overlay.viewport_bounds {
-                let is_important = chosen == Some(index)
+                let is_important = dom_seed.chosen
                     || is_pinned
                     || index == active_roving
                     || node["suspect"].as_u64().is_some()
-                    || overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
+                    || is_on_traced;
                 if !is_important
                     && !rect_intersects_viewport(
                         placed.x - 120.0,
@@ -1467,543 +1568,55 @@ pub fn canvas_with_overlays(
         }
         let folder = m::yes(&node["folder"]);
         let symbol = m::yes(&node["symbol"]);
-        let line = node["line"].as_u64().unwrap_or(0);
-        let (uses, used) = (
-            node["out"].as_u64().unwrap_or(0),
-            node["in"].as_u64().unwrap_or(0),
-        );
-        let mut label = format!(
-            "{}, {}",
-            m::text(node, "name"),
-            if symbol {
-                match line {
-                    0 => what(node),
-                    line => format!("{}, line {line}", what(node)),
-                }
-            } else if m::yes(&node["module"]) {
-                format!(
-                    "module, {}",
-                    plural(
-                        node["within"].as_u64().unwrap_or(0),
-                        "internal link",
-                        "internal links"
-                    )
-                )
-            } else if folder {
-                format!(
-                    "{}, {}",
-                    if m::yes(&node["layer"]) {
-                        "layer"
-                    } else {
-                        "folder"
-                    },
-                    plural(node["files"].as_u64().unwrap_or(0), "file", "files")
-                )
-            } else {
-                "file".to_owned()
-            }
-        );
-        label.push_str(&format!(
-            ", uses others through {}, is used through {}",
-            plural(uses, "link", "links"),
-            plural(used, "link", "links")
-        ));
-        let cycle = placed.cycle && cycles;
-        // The whole project says more than the picture: a box is part of
-        // a circle of files also where the rest of the circle is not drawn.
-        let circle = &node["circle"];
-        if let Some(told) = circle_told(circle, folder) {
-            label.push_str(&told);
-        } else if cycle {
-            label.push_str(", part of a cycle");
-        }
-        let circle_attr = match (circle.is_object(), m::yes(&circle["leaves"])) {
-            (true, true) => " data-circle=\"through\"",
-            (true, false) => " data-circle=\"inside\"",
-            _ => "",
-        };
-        // Where it stands among the changes the failing tests reach.
-        let suspect = node["suspect"]["rank"].as_u64();
-        if let Some(rank) = suspect {
-            label.push_str(&match node["suspect"]["files"].as_u64() {
-                Some(files) => format!(
-                    ", holds {} the failing tests reach, the first ranked {rank}",
-                    plural(files, "changed file", "changed files")
-                ),
-                None => format!(", ranked {rank} among the changes by the failing tests"),
-            });
-        }
-        // What a change to the selected place leaves here.
-        let blast_attr = match blast[index] {
-            Some((hop, left)) => {
-                label.push_str(&format!(
-                    ", a change to the selected place reaches it in {}, {} % of it",
-                    plural(hop, "link", "links"),
-                    (left * 100.0).round() as u64
-                ));
-                format!(" data-blast=\"{hop}\"")
-            }
-            None => String::new(),
-        };
-        // Of a path, a box that lies on a longer way only.
-        let detour_attr = if m::yes(&node["detour"]) {
-            label.push_str(", on a longer way only");
-            " data-detour=\"true\""
-        } else {
-            ""
-        };
-        let lit = near(index);
-        let path_mark = if !shared_edges.is_empty() && lit {
-            " data-shared-path=\"true\""
-        } else {
-            ""
-        };
-        // What a run opened: a file itself, a folder by its files.
-        let run_opened = match (&node["opened"], node["opened"].as_u64()) {
-            (_, Some(files)) => {
-                label.push_str(&format!(
-                    ", the run opened {} in it",
-                    plural(files, "file", "files")
-                ));
-                Some(count(files))
-            }
-            (seen, None) if m::yes(seen) => {
-                label.push_str(", opened by the run");
-                Some(String::new())
-            }
-            _ => None,
-        };
-        let run_mark = if run_opened.is_some() {
-            " data-run-opened=\"true\""
-        } else {
-            ""
-        };
-        let pressed = if shared || pattern_view {
-            format!(" aria-pressed=\"{}\"", chosen == Some(index))
-        } else {
-            String::new()
-        };
-        // Where followed links start, where a path starts and ends, or
-        // which the two places are that share the rest.
-        let (start, end) = (
-            m::yes(&node["start"]),
-            (pathed || shared) && m::yes(&node["end"]),
-        );
-        if start {
-            label.push_str(if shared {
-                ", the first of the two places"
-            } else if pathed {
-                ", the path starts here"
-            } else if cycle_view {
-                ", the cycle starts and ends here"
-            } else if pattern_view {
-                ", the pattern is named after it"
-            } else if scenario {
-                ", scenario starting point"
-            } else {
-                ", the links are followed from here"
-            });
-        }
-        if end {
-            label.push_str(if shared {
-                ", the second of the two places"
-            } else {
-                ", the path ends here"
-            });
-        }
-        // What the two share: what both use, or what uses both.
-        let both = shared && node["shares"].is_array();
-        if both {
-            label.push_str(if above(view) {
-                ", uses both"
-            } else {
-                ", both use it"
-            });
-        }
-        let changed = node["changed"].as_u64().unwrap_or(0);
-        // What a file around an opened one is to it, or what a place of a
-        // change map is to the change.
-        let mark = if opened || symbol {
-            let mut mark = match node["role"].as_str() {
-                Some("uses") => ", uses this file",
-                Some("used") => ", used by this file",
-                Some("both") => ", uses this file and is used by it",
-                _ => "",
-            }
-            .to_owned();
-            if let Some(status) = node["status"].as_str() {
-                mark.push_str(&format!(", {}", happened(status)));
-            }
-            // A type whose own lines stand as they were can still hold
-            // methods the change touched.
-            match node["touched"].as_u64() {
-                Some(inside) if symbol && inside > 0 => {
-                    mark.push_str(&format!(", {} changed inside", count(inside)));
-                }
-                _ => {}
-            }
-            mark
-        } else {
-            match (changed, node["status"].as_str(), node["role"].as_str()) {
-                (0, _, Some("affected")) => ", uses the change".to_owned(),
-                (0, _, Some("needed")) => ", used by the change".to_owned(),
-                (0, _, Some("both")) => ", uses the change and is used by it".to_owned(),
-                (0, ..) => String::new(),
-                (_, Some(status), _) => format!(", {}", happened(status)),
-                _ => format!(
-                    ", {} inside",
-                    plural(changed, "changed file", "changed files")
-                ),
-            }
-        };
-        label.push_str(&mark);
-        // What a part is in the pattern that is drawn, or in how many found
-        // patterns a place of any other picture takes part.
-        if let Some(role) = node["role"].as_str().filter(|_| pattern_view) {
-            label.push_str(&format!(", {role} in the pattern"));
-        }
-        let patterns = node["patterns"].as_u64().unwrap_or(0);
-        if patterns > 0 {
-            label.push_str(&format!(
-                ", {} {}",
-                if symbol { "part of" } else { "holds parts of" },
-                plural(patterns, "found pattern", "found patterns")
-            ));
-        }
-        if node["shell_read"].is_number() {
-            label.push_str(", read via shell");
-        }
         let kind = resolved_member_kind(node);
-        // A folder opens to its files, a file to what it holds. Among
-        // followed links, on a path and in what two places share a box is
-        // only selected: opening it would leave them.
-        let opens = !scenario
-            && !followed
-            && !pathed
-            && !shared
-            && !cycle_view
-            && !pattern_view
-            && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
-        // A symbol lies in the open file, or, among followed symbols, in
-        // the file it says.
-        let home = match node["file"].as_str() {
-            Some(file) => file.to_owned(),
-            None => m::text(view, "scope"),
-        };
-        let (node_action, node_payload) = if scenario {
-            (
-                "graph-map-scenario-open",
-                json!({
-                    "file": node["file"].as_str().or(node["path"].as_str()),
-                    "path": node["path"], "symbol": symbol
-                }),
-            )
-        } else {
-            ("graph-map-node", node["path"].clone())
-        };
         let node_vis = node["visibility"]
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        if let Some(vis) = node_vis {
-            label.push_str(&format!(", visibility {vis}"));
-        }
-        let title = match (symbol, line) {
-            (true, 0) => format!("{} · {home}", m::text(node, "name")),
-            (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
-            // A layer is no place of the project: it has a name, no path.
-            _ if m::yes(&node["layer"]) || m::yes(&node["module"]) => m::text(node, "name"),
-            _ => m::text(node, "path"),
+        let line = node["line"].as_u64().unwrap_or(0);
+        let home = match node["file"].as_str() {
+            Some(file) => file.to_owned(),
+            None => m::text(view, "scope"),
         };
-        let title = if let Some(vis) = node_vis {
-            format!("{title} · {vis}")
+        let node_payload = if scenario {
+            json!({
+                "file": node["file"].as_str().or(node["path"].as_str()),
+                "path": node["path"], "symbol": symbol
+            })
         } else {
-            title
+            node["path"].clone()
         };
-        let node_vis_attr = node_vis
-            .and_then(|v| normalize_visibility(Some(v)))
-            .map(|(bucket, _, _)| format!(" data-visibility=\"{bucket}\""))
-            .unwrap_or_default();
-        let node_vis_pill = visibility_pill_html(node_vis, true);
-        let arch_color = layer_color(&node["architecture_layer"]);
-        let arch_layer_id = if arch_color.is_some() {
-            m::text(&node["architecture_layer"], "id")
-        } else if layered_view {
-            let path = m::text(node, "path");
-            path.strip_prefix("layer:").unwrap_or(&path).to_owned()
+        let node_action = if scenario {
+            "graph-map-scenario-open"
         } else {
-            String::new()
+            "graph-map-node"
         };
-        let layer_color_value = arch_color
-            .clone()
-            .or_else(|| layered_view.then(|| layer_accent(index as u64)));
-        let architecture = match (arch_color.is_some(), layered_view, &layer_color_value) {
-            (true, _, Some(color)) => {
-                label.push_str(&format!(
-                    ", layer {}",
-                    m::text(&node["architecture_layer"], "name")
-                ));
-                format!(
-                    " data-architecture-layer=\"true\" data-arch-layer-id=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
-                    escape(&arch_layer_id),
-                    placed.x,
-                    placed.y
-                )
-            }
-            (false, true, Some(color)) => format!(
-                " data-layer=\"true\" data-arch-layer-id=\"{}\" data-layer-order=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
-                escape(&arch_layer_id),
-                index + 1,
-                placed.x,
-                placed.y
-            ),
-            _ => String::new(),
-        };
-        let position = if architecture.is_empty() {
-            format!(" style=\"left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
-        } else {
-            architecture
-        };
-        let position = match blast[index] {
-            Some((_, left)) => {
-                position.replacen(" style=\"", &format!(" style=\"--blast:{left:.2};"), 1)
-            }
-            None => position,
-        };
-        let mut pattern_node_attrs = String::new();
-        if patterns > 0 {
-            pattern_node_attrs.push_str(" data-has-patterns=\"true\"");
-            if let Some(found_family) = pattern_family_of(view, &m::text(node, "path")) {
-                pattern_node_attrs.push_str(&format!(" data-pattern-family=\"{found_family}\""));
-            }
-        } else if !layered_view {
-            if let Some(family) = &pattern_family {
-                pattern_node_attrs
-                    .push_str(&format!(" data-pattern-family=\"{}\"", escape(family)));
-                if let Some(role) = node["role"].as_str() {
-                    pattern_node_attrs
-                        .push_str(&format!(" data-pattern-role=\"{}\"", escape(role)));
-                }
-            }
-        }
-        let prefix_badge = if layered_view {
-            let badge = if m::yes(&view["pattern"]["rings"]) && index == 0 {
-                "◎".to_owned()
-            } else {
-                format!("{}", index + 1)
-            };
-            format!("<span class=\"graph-map-layer-order\" aria-hidden=\"true\">{badge}</span>")
-        } else if arch_color.is_some() {
-            "<span class=\"graph-map-node-layer\" aria-hidden=\"true\"></span>".to_owned()
-        } else {
-            String::new()
-        };
-        let node_change_status = node_change_statuses[index].as_deref();
-        let node_change_attr = node_change_status
-            .map(|status| format!(" data-change-status=\"{}\"", escape(status)))
-            .unwrap_or_default();
-        let node_impact_attr = impact_lookup
-            .as_ref()
-            .and_then(|lookup| lookup.node_impact(&nodes, index))
-            .map(|impact| format!(" data-impact=\"{impact}\""))
-            .unwrap_or_default();
-        let (out, into) = flow[index];
-        let focus_target_attr = if focus_overlay.nodes.contains(&index) {
-            " data-focus-target=\"true\""
-        } else {
-            ""
-        };
-        let node_path_attr = {
-            let p = m::text(node, "path");
-            if p.is_empty() {
-                String::new()
-            } else {
-                format!(" data-path=\"{}\"", escape(&p))
-            }
-        };
-        // A second line for a picture drawn large: through how many links
-        // the box is used and uses others, and where it lies.
-        let place = if m::yes(&node["layer"]) || m::yes(&node["module"]) {
-            String::new()
-        } else if symbol {
-            let file = home.rsplit('/').next().unwrap_or(&home);
-            match line {
-                0 => file.to_owned(),
-                line => format!("{file}:{line}"),
-            }
-        } else if folder {
-            plural(node["files"].as_u64().unwrap_or(0), "file", "files")
-        } else {
-            m::text(node, "path")
-                .rsplit_once('/')
-                .map(|(folder, _)| folder.to_owned())
-                .unwrap_or_default()
-        };
-        let detail = [
-            if uses + used > 0 {
-                format!("{}→ →{}", count(used), count(uses))
-            } else {
-                String::new()
-            },
-            place,
-        ]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-        let mut secondary_badges: Vec<String> = Vec::new();
-        if !node_vis_pill.is_empty() {
-            secondary_badges.push(node_vis_pill);
-        }
-        if pattern_view && !layered_view && start {
-            secondary_badges.push(
-                "<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>".to_owned(),
-            );
-        }
-        if cycle || circle.is_object() {
-            // A folder says how many of its files are part of circles.
-            let held = circle["files"]
-                .as_u64()
-                .filter(|_| folder)
-                .map(count)
-                .unwrap_or_default();
-            secondary_badges.push(format!(
-                "<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>"
-            ));
-        }
-        if patterns > 0 {
-            secondary_badges.push(format!(
-                "<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆{}</span>",
-                if patterns > 1 {
-                    count(patterns)
-                } else {
-                    String::new()
-                }
-            ));
-        }
-        if let Some(files) = &run_opened {
-            secondary_badges.push(format!(
-                "<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉{files}</span>"
-            ));
-        }
-        if let Some(rank) = suspect {
-            secondary_badges.push(format!(
-                "<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span>"
-            ));
-        }
-        let (badge_attrs, badges_strip) = build_node_badges_strip(&secondary_badges);
-        let pin_attr = if is_pinned {
-            " data-pinned=\"true\""
-        } else {
-            ""
-        };
-        let roving_tabindex = if active_roving == index { "0" } else { "-1" };
-        let is_on_traced_path = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
-        let dim_node = (selected && !lit)
-            || (overlay
-                .path_nodes
-                .is_some_and(|pn| !pn.is_empty() && !is_on_traced_path));
-        let is_semantic =
-            m::text(node, "node_kind") == "semantic" || m::text(node, "path").starts_with("sem:");
-        let semantic_attr = if is_semantic {
-            " data-semantic=\"true\""
-        } else {
-            ""
-        };
-        let mut node_buf = format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{semantic_attr}{}{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
-            payload(&node_payload),
-            escape(if is_semantic && kind.is_empty() { "semantic" } else { kind }),
-            opened && !symbol,
-            changed > 0,
-            chosen == Some(index),
-            dim_node,
-            cycle,
-            leaning(out, into),
-            out > 0,
-            into > 0,
-            if lit || is_on_traced_path {
-                " data-lit=\"true\" data-select-lit=\"true\""
-            } else {
-                ""
-            },
-            if end { " data-end=\"true\"" } else { "" },
-            if both { " data-shared=\"true\"" } else { "" },
-            if is_on_traced_path {
-                " data-shared-path=\"true\""
-            } else {
-                ""
-            },
-            escape(&title),
-            escape(&label),
-            match letter(kind) {
-                "" => String::new(),
-                letter => format!(
-                    "<span class=\"graph-map-node-kind\" aria-hidden=\"true\">{letter}</span>"
-                ),
-            },
-            if named {
-                format!("<bdi>{}</bdi>", escape(&m::text(node, "name")))
-            } else {
-                escape(&m::text(node, "name"))
-            },
-        );
-        if changed > 0 {
-            // A changed file carries Git's letter and a folder how many
-            // changed. So does a symbol: the letter where its own lines
-            // changed, else how many symbols changed inside it.
-            let pill_kind = node_change_status
-                .filter(|s| matches!(*s, "created" | "modified" | "deleted" | "renamed"))
-                .map(str::to_owned)
-                .or_else(|| {
-                    node["status"]
-                        .as_str()
-                        .map(normalize_change_status)
-                        .filter(|s| {
-                            matches!(s.as_str(), "created" | "modified" | "deleted" | "renamed")
-                        })
-                })
-                .unwrap_or_else(|| "modified".to_owned());
-            let pill_text = match node["status"].as_str() {
-                Some(status) => escape(status),
-                None if symbol => count(node["touched"].as_u64().unwrap_or(0)),
-                None if node_change_status.is_some() && changed == 1 && !folder => {
-                    change_status_letter(node_change_status.unwrap_or("")).to_owned()
-                }
-                None => count(changed),
-            };
-            node_buf.push_str(&format!(
-                "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{pill_text}</span>",
-                escape(&pill_kind),
-            ));
-        } else if let Some(status) = node_change_status {
-            let (badge, _) = change_status_badge(status);
-            if !badge.is_empty() {
-                node_buf.push_str(&format!(
-                    "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{badge}</span>",
-                    escape(status)
-                ));
-            }
-        } else if folder {
-            node_buf.push_str(&format!(
-                "<span class=\"graph-map-node-count\" aria-hidden=\"true\">{}</span>",
-                count(node["files"].as_u64().unwrap_or(0))
-            ));
-        }
-        // The second line is the last of what a box holds: it is laid out
-        // under the rest, and only where the picture is drawn large.
-        if !detail.is_empty() {
-            node_buf.push_str(&format!(
-                "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
-                escape(&detail)
-            ));
-        }
-        if !blast_attr.is_empty() {
-            node_buf.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
-        }
-        node_buf.push_str(&badges_strip);
-        node_buf.push_str("</button>");
         if is_dense {
+            let cycle = placed.cycle && cycles;
+            let circle = &node["circle"];
+            let suspect = node["suspect"]["rank"].as_u64();
+            let is_semantic = m::text(node, "node_kind") == "semantic"
+                || m::text(node, "path").starts_with("sem:");
+            let arch_color = layer_color(&node["architecture_layer"]);
+            let arch_layer_id = if arch_color.is_some() {
+                m::text(&node["architecture_layer"], "id")
+            } else if layered_view {
+                let path = m::text(node, "path");
+                path.strip_prefix("layer:").unwrap_or(&path).to_owned()
+            } else {
+                String::new()
+            };
+            let base_title = match (symbol, line) {
+                (true, 0) => format!("{} · {home}", m::text(node, "name")),
+                (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
+                _ if m::yes(&node["layer"]) || m::yes(&node["module"]) => m::text(node, "name"),
+                _ => m::text(node, "path"),
+            };
+            let title = if let Some(vis) = node_vis {
+                format!("{base_title} · {vis}")
+            } else {
+                base_title
+            };
             let blast_tag = blast[index]
                 .map(|(hop, _)| format!("{hop}h"))
                 .unwrap_or_default();
@@ -2028,9 +1641,7 @@ pub fn canvas_with_overlays(
                 _ => m::text(node, "path"),
             };
             if !arch_layer_id.is_empty() {
-                dense_meta
-                    .layer_of_node
-                    .insert(index, arch_layer_id.clone());
+                dense_meta.layer_of_node.insert(index, arch_layer_id);
             }
             dense_meta.nodes.insert(
                 index,
@@ -2048,11 +1659,13 @@ pub fn canvas_with_overlays(
                     in_cycle: cycle || circle.is_object(),
                     blast_tag,
                     badge_text,
-                    tooltip: title.clone(),
+                    tooltip: title,
                     file_line,
                 },
             );
-            dense_node_htmls.push(node_buf.clone());
+            // Defer HTML string allocation until roving focus or viewport mount needs it.
+            dense_node_htmls.push(String::new());
+            dense_node_seeds.push(Some(dom_seed.clone()));
             let has_extras = followed
                 || !far[index].0.is_empty()
                 || !far[index].1.is_empty()
@@ -2071,6 +1684,7 @@ pub fn canvas_with_overlays(
         if skip_offscreen_dom {
             continue;
         }
+        let node_buf = render_dense_node_dom_html(view, node, &dom_seed, dense_render_modes, false);
         html.push_str(&node_buf);
         html.push_str(&node_extras_html_for_node(
             view,
@@ -2248,11 +1862,551 @@ pub fn canvas_with_overlays(
         dense_scene,
         dense_meta: is_dense.then_some(dense_meta),
         dense_node_htmls,
+        dense_node_seeds,
+        dense_render_modes,
         dense_extra_specs,
         node_keys,
         pairs,
         node_labels,
     }
+}
+
+/// Formats one interactive `<button class="graph-map-node">` HTML element for either
+/// initial mount or lazy on-demand mounting during pan / roving keyboard focus.
+pub(in crate::graph_map) fn render_dense_node_dom_html(
+    view: &V,
+    node: &V,
+    seed: &DenseNodeDomSeed,
+    modes: DenseRenderModeFlags,
+    force_tabindex_zero: bool,
+) -> String {
+    let DenseRenderModeFlags {
+        layered_view,
+        opened,
+        followed,
+        pathed,
+        shared,
+        cycle_view,
+        pattern_view,
+        scenario,
+        cycles,
+        named,
+        pattern_rings,
+    } = modes;
+    let index = seed.index;
+    let placed = &seed.placed;
+    let folder = m::yes(&node["folder"]);
+    let symbol = m::yes(&node["symbol"]);
+    let line = node["line"].as_u64().unwrap_or(0);
+    let (uses, used) = (
+        node["out"].as_u64().unwrap_or(0),
+        node["in"].as_u64().unwrap_or(0),
+    );
+    let mut label = format!(
+        "{}, {}",
+        m::text(node, "name"),
+        if symbol {
+            match line {
+                0 => what(node),
+                line => format!("{}, line {line}", what(node)),
+            }
+        } else if m::yes(&node["module"]) {
+            format!(
+                "module, {}",
+                plural(
+                    node["within"].as_u64().unwrap_or(0),
+                    "internal link",
+                    "internal links"
+                )
+            )
+        } else if folder {
+            format!(
+                "{}, {}",
+                if m::yes(&node["layer"]) {
+                    "layer"
+                } else {
+                    "folder"
+                },
+                plural(node["files"].as_u64().unwrap_or(0), "file", "files")
+            )
+        } else {
+            "file".to_owned()
+        }
+    );
+    label.push_str(&format!(
+        ", uses others through {}, is used through {}",
+        plural(uses, "link", "links"),
+        plural(used, "link", "links")
+    ));
+    let cycle = placed.cycle && cycles;
+    let circle = &node["circle"];
+    if let Some(told) = circle_told(circle, folder) {
+        label.push_str(&told);
+    } else if cycle {
+        label.push_str(", part of a cycle");
+    }
+    let circle_attr = match (circle.is_object(), m::yes(&circle["leaves"])) {
+        (true, true) => " data-circle=\"through\"",
+        (true, false) => " data-circle=\"inside\"",
+        _ => "",
+    };
+    let suspect = node["suspect"]["rank"].as_u64();
+    if let Some(rank) = suspect {
+        label.push_str(&match node["suspect"]["files"].as_u64() {
+            Some(files) => format!(
+                ", holds {} the failing tests reach, the first ranked {rank}",
+                plural(files, "changed file", "changed files")
+            ),
+            None => format!(", ranked {rank} among the changes by the failing tests"),
+        });
+    }
+    let blast_attr = match seed.blast {
+        Some((hop, left)) => {
+            label.push_str(&format!(
+                ", a change to the selected place reaches it in {}, {} % of it",
+                plural(hop, "link", "links"),
+                (left * 100.0).round() as u64
+            ));
+            format!(" data-blast=\"{hop}\"")
+        }
+        None => String::new(),
+    };
+    let detour_attr = if m::yes(&node["detour"]) {
+        label.push_str(", on a longer way only");
+        " data-detour=\"true\""
+    } else {
+        ""
+    };
+    let path_mark = if seed.shared_path_mark {
+        " data-shared-path=\"true\""
+    } else {
+        ""
+    };
+    let run_opened = match (&node["opened"], node["opened"].as_u64()) {
+        (_, Some(files)) => {
+            label.push_str(&format!(
+                ", the run opened {} in it",
+                plural(files, "file", "files")
+            ));
+            Some(count(files))
+        }
+        (seen, None) if m::yes(seen) => {
+            label.push_str(", opened by the run");
+            Some(String::new())
+        }
+        _ => None,
+    };
+    let run_mark = if run_opened.is_some() {
+        " data-run-opened=\"true\""
+    } else {
+        ""
+    };
+    let pressed = if shared || pattern_view {
+        format!(" aria-pressed=\"{}\"", seed.chosen)
+    } else {
+        String::new()
+    };
+    let (start, end) = (
+        m::yes(&node["start"]),
+        (pathed || shared) && m::yes(&node["end"]),
+    );
+    if start {
+        label.push_str(if shared {
+            ", the first of the two places"
+        } else if pathed {
+            ", the path starts here"
+        } else if cycle_view {
+            ", the cycle starts and ends here"
+        } else if pattern_view {
+            ", the pattern is named after it"
+        } else if scenario {
+            ", scenario starting point"
+        } else {
+            ", the links are followed from here"
+        });
+    }
+    if end {
+        label.push_str(if shared {
+            ", the second of the two places"
+        } else {
+            ", the path ends here"
+        });
+    }
+    let both = shared && node["shares"].is_array();
+    if both {
+        label.push_str(if above(view) {
+            ", uses both"
+        } else {
+            ", both use it"
+        });
+    }
+    let changed = node["changed"].as_u64().unwrap_or(0);
+    let mark = if opened || symbol {
+        let mut mark = match node["role"].as_str() {
+            Some("uses") => ", uses this file",
+            Some("used") => ", used by this file",
+            Some("both") => ", uses this file and is used by it",
+            _ => "",
+        }
+        .to_owned();
+        if let Some(status) = node["status"].as_str() {
+            mark.push_str(&format!(", {}", happened(status)));
+        }
+        match node["touched"].as_u64() {
+            Some(inside) if symbol && inside > 0 => {
+                mark.push_str(&format!(", {} changed inside", count(inside)));
+            }
+            _ => {}
+        }
+        mark
+    } else {
+        match (changed, node["status"].as_str(), node["role"].as_str()) {
+            (0, _, Some("affected")) => ", uses the change".to_owned(),
+            (0, _, Some("needed")) => ", used by the change".to_owned(),
+            (0, _, Some("both")) => ", uses the change and is used by it".to_owned(),
+            (0, ..) => String::new(),
+            (_, Some(status), _) => format!(", {}", happened(status)),
+            _ => format!(
+                ", {} inside",
+                plural(changed, "changed file", "changed files")
+            ),
+        }
+    };
+    label.push_str(&mark);
+    if let Some(role) = node["role"].as_str().filter(|_| pattern_view) {
+        label.push_str(&format!(", {role} in the pattern"));
+    }
+    let patterns = node["patterns"].as_u64().unwrap_or(0);
+    if patterns > 0 {
+        label.push_str(&format!(
+            ", {} {}",
+            if symbol { "part of" } else { "holds parts of" },
+            plural(patterns, "found pattern", "found patterns")
+        ));
+    }
+    if node["shell_read"].is_number() {
+        label.push_str(", read via shell");
+    }
+    let kind = resolved_member_kind(node);
+    let opens = !scenario
+        && !followed
+        && !pathed
+        && !shared
+        && !cycle_view
+        && !pattern_view
+        && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
+    let home = match node["file"].as_str() {
+        Some(file) => file.to_owned(),
+        None => m::text(view, "scope"),
+    };
+    let (node_action, node_payload) = if scenario {
+        (
+            "graph-map-scenario-open",
+            json!({
+                "file": node["file"].as_str().or(node["path"].as_str()),
+                "path": node["path"], "symbol": symbol
+            }),
+        )
+    } else {
+        ("graph-map-node", node["path"].clone())
+    };
+    let node_vis = node["visibility"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(vis) = node_vis {
+        label.push_str(&format!(", visibility {vis}"));
+    }
+    let title = match (symbol, line) {
+        (true, 0) => format!("{} · {home}", m::text(node, "name")),
+        (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
+        _ if m::yes(&node["layer"]) || m::yes(&node["module"]) => m::text(node, "name"),
+        _ => m::text(node, "path"),
+    };
+    let title = if let Some(vis) = node_vis {
+        format!("{title} · {vis}")
+    } else {
+        title
+    };
+    let node_vis_attr = node_vis
+        .and_then(|v| normalize_visibility(Some(v)))
+        .map(|(bucket, _, _)| format!(" data-visibility=\"{bucket}\""))
+        .unwrap_or_default();
+    let node_vis_pill = visibility_pill_html(node_vis, true);
+    let arch_color = layer_color(&node["architecture_layer"]);
+    let arch_layer_id = if arch_color.is_some() {
+        m::text(&node["architecture_layer"], "id")
+    } else if layered_view {
+        let path = m::text(node, "path");
+        path.strip_prefix("layer:").unwrap_or(&path).to_owned()
+    } else {
+        String::new()
+    };
+    let layer_color_value = arch_color
+        .clone()
+        .or_else(|| layered_view.then(|| layer_accent(index as u64)));
+    let architecture = match (arch_color.is_some(), layered_view, &layer_color_value) {
+        (true, _, Some(color)) => {
+            label.push_str(&format!(
+                ", layer {}",
+                m::text(&node["architecture_layer"], "name")
+            ));
+            format!(
+                " data-architecture-layer=\"true\" data-arch-layer-id=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
+                escape(&arch_layer_id),
+                placed.x,
+                placed.y
+            )
+        }
+        (false, true, Some(color)) => format!(
+            " data-layer=\"true\" data-arch-layer-id=\"{}\" data-layer-order=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
+            escape(&arch_layer_id),
+            index + 1,
+            placed.x,
+            placed.y
+        ),
+        _ => String::new(),
+    };
+    let position = if architecture.is_empty() {
+        format!(" style=\"left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
+    } else {
+        architecture
+    };
+    let position = match seed.blast {
+        Some((_, left)) => {
+            position.replacen(" style=\"", &format!(" style=\"--blast:{left:.2};"), 1)
+        }
+        None => position,
+    };
+    let pattern_family = pattern_view
+        .then(|| m::text(&view["pattern"], "family"))
+        .filter(|family| !family.is_empty());
+    let mut pattern_node_attrs = String::new();
+    if patterns > 0 {
+        pattern_node_attrs.push_str(" data-has-patterns=\"true\"");
+        if let Some(found_family) = pattern_family_of(view, &m::text(node, "path")) {
+            pattern_node_attrs.push_str(&format!(" data-pattern-family=\"{found_family}\""));
+        }
+    } else if !layered_view {
+        if let Some(family) = &pattern_family {
+            pattern_node_attrs.push_str(&format!(" data-pattern-family=\"{}\"", escape(family)));
+            if let Some(role) = node["role"].as_str() {
+                pattern_node_attrs.push_str(&format!(" data-pattern-role=\"{}\"", escape(role)));
+            }
+        }
+    }
+    let prefix_badge = if layered_view {
+        let badge = if pattern_rings && index == 0 {
+            "◎".to_owned()
+        } else {
+            format!("{}", index + 1)
+        };
+        format!("<span class=\"graph-map-layer-order\" aria-hidden=\"true\">{badge}</span>")
+    } else if arch_color.is_some() {
+        "<span class=\"graph-map-node-layer\" aria-hidden=\"true\"></span>".to_owned()
+    } else {
+        String::new()
+    };
+    let node_change_status = seed.change_status.as_deref();
+    let node_change_attr = node_change_status
+        .map(|status| format!(" data-change-status=\"{}\"", escape(status)))
+        .unwrap_or_default();
+    let node_impact_attr = seed
+        .impact
+        .map(|impact| format!(" data-impact=\"{impact}\""))
+        .unwrap_or_default();
+    let (out, into) = seed.flow;
+    let focus_target_attr = if seed.focus_target {
+        " data-focus-target=\"true\""
+    } else {
+        ""
+    };
+    let node_path_attr = {
+        let p = m::text(node, "path");
+        if p.is_empty() {
+            String::new()
+        } else {
+            format!(" data-path=\"{}\"", escape(&p))
+        }
+    };
+    let place = if m::yes(&node["layer"]) || m::yes(&node["module"]) {
+        String::new()
+    } else if symbol {
+        let file = home.rsplit('/').next().unwrap_or(&home);
+        match line {
+            0 => file.to_owned(),
+            line => format!("{file}:{line}"),
+        }
+    } else if folder {
+        plural(node["files"].as_u64().unwrap_or(0), "file", "files")
+    } else {
+        m::text(node, "path")
+            .rsplit_once('/')
+            .map(|(folder, _)| folder.to_owned())
+            .unwrap_or_default()
+    };
+    let detail = [
+        if uses + used > 0 {
+            format!("{}→ →{}", count(used), count(uses))
+        } else {
+            String::new()
+        },
+        place,
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let mut secondary_badges: Vec<String> = Vec::new();
+    if !node_vis_pill.is_empty() {
+        secondary_badges.push(node_vis_pill);
+    }
+    if pattern_view && !layered_view && start {
+        secondary_badges
+            .push("<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>".to_owned());
+    }
+    if cycle || circle.is_object() {
+        let held = circle["files"]
+            .as_u64()
+            .filter(|_| folder)
+            .map(count)
+            .unwrap_or_default();
+        secondary_badges.push(format!(
+            "<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>"
+        ));
+    }
+    if patterns > 0 {
+        secondary_badges.push(format!(
+            "<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆{}</span>",
+            if patterns > 1 {
+                count(patterns)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if let Some(files) = &run_opened {
+        secondary_badges.push(format!(
+            "<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉{files}</span>"
+        ));
+    }
+    if let Some(rank) = suspect {
+        secondary_badges.push(format!(
+            "<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span>"
+        ));
+    }
+    let (badge_attrs, badges_strip) = build_node_badges_strip(&secondary_badges);
+    let pin_attr = if seed.pinned {
+        " data-pinned=\"true\""
+    } else {
+        ""
+    };
+    let roving_tabindex = if force_tabindex_zero || seed.roving {
+        "0"
+    } else {
+        "-1"
+    };
+    let dim_node = (seed.selected && !seed.lit) || (seed.any_traced_path && !seed.on_traced_path);
+    let is_semantic =
+        m::text(node, "node_kind") == "semantic" || m::text(node, "path").starts_with("sem:");
+    let semantic_attr = if is_semantic {
+        " data-semantic=\"true\""
+    } else {
+        ""
+    };
+    let mut node_buf = format!(
+        "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{semantic_attr}{}{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
+        payload(&node_payload),
+        escape(if is_semantic && kind.is_empty() {
+            "semantic"
+        } else {
+            kind
+        }),
+        opened && !symbol,
+        changed > 0,
+        seed.chosen,
+        dim_node,
+        cycle,
+        leaning(out, into),
+        out > 0,
+        into > 0,
+        if seed.lit || seed.on_traced_path {
+            " data-lit=\"true\" data-select-lit=\"true\""
+        } else {
+            ""
+        },
+        if end { " data-end=\"true\"" } else { "" },
+        if both { " data-shared=\"true\"" } else { "" },
+        if seed.on_traced_path {
+            " data-shared-path=\"true\""
+        } else {
+            ""
+        },
+        escape(&title),
+        escape(&label),
+        match letter(kind) {
+            "" => String::new(),
+            letter => format!(
+                "<span class=\"graph-map-node-kind\" aria-hidden=\"true\">{letter}</span>"
+            ),
+        },
+        if named {
+            format!("<bdi>{}</bdi>", escape(&m::text(node, "name")))
+        } else {
+            escape(&m::text(node, "name"))
+        },
+    );
+    if changed > 0 {
+        let pill_kind = node_change_status
+            .filter(|s| matches!(*s, "created" | "modified" | "deleted" | "renamed"))
+            .map(str::to_owned)
+            .or_else(|| {
+                node["status"]
+                    .as_str()
+                    .map(normalize_change_status)
+                    .filter(|s| {
+                        matches!(s.as_str(), "created" | "modified" | "deleted" | "renamed")
+                    })
+            })
+            .unwrap_or_else(|| "modified".to_owned());
+        let pill_text = match node["status"].as_str() {
+            Some(status) => escape(status),
+            None if symbol => count(node["touched"].as_u64().unwrap_or(0)),
+            None if node_change_status.is_some() && changed == 1 && !folder => {
+                change_status_letter(node_change_status.unwrap_or("")).to_owned()
+            }
+            None => count(changed),
+        };
+        node_buf.push_str(&format!(
+            "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{pill_text}</span>",
+            escape(&pill_kind),
+        ));
+    } else if let Some(status) = node_change_status {
+        let (badge, _) = change_status_badge(status);
+        if !badge.is_empty() {
+            node_buf.push_str(&format!(
+                "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{badge}</span>",
+                escape(status)
+            ));
+        }
+    } else if folder {
+        node_buf.push_str(&format!(
+            "<span class=\"graph-map-node-count\" aria-hidden=\"true\">{}</span>",
+            count(node["files"].as_u64().unwrap_or(0))
+        ));
+    }
+    if !detail.is_empty() {
+        node_buf.push_str(&format!(
+            "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
+            escape(&detail)
+        ));
+    }
+    if !blast_attr.is_empty() {
+        node_buf.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
+    }
+    node_buf.push_str(&badges_strip);
+    node_buf.push_str("</button>");
+    node_buf
 }
 
 #[allow(clippy::too_many_arguments)]

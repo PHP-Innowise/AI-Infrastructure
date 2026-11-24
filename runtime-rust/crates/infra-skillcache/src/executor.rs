@@ -79,8 +79,6 @@ struct Runner<'a> {
     record_changes: bool,
     /// Replay only: the diagnostics of every failure, by plan index.
     failures: Vec<Value>,
-    /// Safe step-level memoization keyed by `(program_digest, input_digest)` for read-only helpers.
-    step_memo: BTreeMap<(String, String), Map<String, Value>>,
 }
 
 fn is_instruction(step: &Step) -> bool {
@@ -270,6 +268,32 @@ fn workspace_listing_limited(
     Some(entries)
 }
 
+fn hash_workspace_listing(root: &Path, entries: &[WorkspaceEntry]) -> String {
+    let mut material = String::new();
+    for (path, len, modified, digest) in entries {
+        let rel = path
+            .strip_prefix(root)
+            .ok()
+            .and_then(Path::to_str)
+            .unwrap_or("");
+        let ns = modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        let dig = digest.as_deref().unwrap_or("-");
+        material.push_str(&format!("{rel}\0{len}\0{ns}\0{dig}\n"));
+    }
+    sha256(material.as_bytes())
+}
+
+fn workspace_memo_sha(root: &Path, allowlist: &[String]) -> Option<String> {
+    let entries = workspace_snapshot_for_changes_with(root, allowlist)?;
+    Some(hash_workspace_listing(root, &entries))
+}
+
+fn memo_storage_key(program_digest: &str, input_digest: &str) -> String {
+    format!("{program_digest}:{input_digest}")
+}
+
 impl<'a> Runner<'a> {
     fn open(session: &'a Session<'a>, state: RunState) -> Result<Self, Refusal> {
         Ok(Self {
@@ -281,8 +305,16 @@ impl<'a> Runner<'a> {
             check_read_only: true,
             record_changes: true,
             failures: Vec::new(),
-            step_memo: BTreeMap::new(),
         })
+    }
+    fn sync_step_memo_workspace(&mut self) -> Option<String> {
+        let allowlist = &self.session.package.capsule.capabilities.allow_ignored;
+        let current = workspace_memo_sha(self.session.workspace, allowlist);
+        if current.is_none() || self.state.step_memo_workspace_sha != current {
+            self.state.step_memo.clear();
+            self.state.step_memo_workspace_sha = current.clone();
+        }
+        current
     }
     fn save(&self) -> Result<(), Refusal> {
         Ok(self.state.save(self.session.state_file)?)
@@ -577,11 +609,17 @@ impl<'a> Runner<'a> {
             let memo_key = prog_digest
                 .as_ref()
                 .zip(input_digest.as_ref())
-                .map(|(p, i)| (p.clone(), i.clone()));
+                .map(|(p, i)| memo_storage_key(p, i));
+            let ws_sha_before = if program.read_only && memo_key.is_some() {
+                self.sync_step_memo_workspace()
+            } else {
+                None
+            };
             let memo_hit = if attempt == 1
+                && ws_sha_before.is_some()
                 && let Some(key) = &memo_key
             {
-                self.step_memo.get(key).cloned()
+                self.state.step_memo.get(key).cloned()
             } else {
                 None
             };
@@ -634,7 +672,8 @@ impl<'a> Runner<'a> {
                     || !changed_files.is_empty()
                     || (before.is_some() && after != before)
                 {
-                    self.step_memo.clear();
+                    self.state.step_memo.clear();
+                    self.state.step_memo_workspace_sha = None;
                 }
                 let checked = match outcome {
                     tool::Outcome::Completed(completed)
@@ -662,9 +701,16 @@ impl<'a> Runner<'a> {
                     if !memoized
                         && program.read_only
                         && let Some(key) = memo_key
-                        && self.step_memo.len() < crate::capsule::PLAN_STEPS
+                        && self.state.step_memo.len() < crate::capsule::PLAN_STEPS
+                        && let Some(ws_sha) = ws_sha_before.or_else(|| {
+                            workspace_memo_sha(
+                                self.session.workspace,
+                                &self.session.package.capsule.capabilities.allow_ignored,
+                            )
+                        })
                     {
-                        self.step_memo.insert(key, completed.result.clone());
+                        self.state.step_memo_workspace_sha = Some(ws_sha);
+                        self.state.step_memo.insert(key, completed.result.clone());
                     }
                     for output in &program.outputs {
                         let dest = step_outputs.and_then(|m| m.get(output)).unwrap_or(output);
@@ -724,7 +770,6 @@ impl<'a> Runner<'a> {
                 return Ok(self.complete());
             };
             if is_instruction(step) {
-                self.step_memo.clear();
                 let (indexes, names) = self.instruction_steps(index);
                 self.state.awaiting = Awaiting::Steps {
                     step_indexes: indexes.clone(),
@@ -921,6 +966,9 @@ impl<'a> Runner<'a> {
         self.advance(None)
     }
     fn resume(&mut self, supplied: Option<&Value>) -> Reply {
+        if !self.state.step_memo.is_empty() {
+            let _ = self.sync_step_memo_workspace();
+        }
         match self.state.awaiting.clone() {
             Awaiting::Running {
                 step_index,

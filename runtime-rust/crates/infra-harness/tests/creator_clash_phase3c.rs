@@ -1182,6 +1182,24 @@ esac
             json!({"usd": 0.50, "tokens": Value::Null, "seconds": 30}),
             2,
         );
+        type RecordedPrompts = Arc<std::sync::Mutex<Vec<(Option<String>, String)>>>;
+        struct ClashPromptRecordingAdapter {
+            seen: RecordedPrompts,
+        }
+        impl LaunchAdapter for ClashPromptRecordingAdapter {
+            fn adapt(
+                &self,
+                input: &Launch,
+                command: infra_host::provider::PreparedCommand,
+            ) -> infra_harness::Result<infra_host::provider::PreparedCommand> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((input.session.clone(), input.prompt.clone()));
+                Ok(command)
+            }
+        }
+        let captured_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cost_sid = cost_session["id"].as_str().unwrap().to_owned();
         let mut cycle1 = Cycle {
             store: fx.store.clone(),
@@ -1191,8 +1209,10 @@ esac
                 ("claude".into(), p_script.clone()),
                 ("codex".into(), c_script.clone()),
             ]),
-            context: String::new(),
-            adapter: Arc::new(PassThroughAdapter),
+            context: "CLASH_INIT_CONTEXT_TAG API_SECRET=clash_leak_999".into(),
+            adapter: Arc::new(ClashPromptRecordingAdapter {
+                seen: Arc::clone(&captured_prompts),
+            }),
         };
         // Wait: challenger uses `codex` in `clash` config, which in `RunCost` treats `provider != "claude"`
         // as reporting own cost. Let's ALSO patch `clash.challenger` in memory to `"claude"` in Cycle
@@ -1265,6 +1285,7 @@ esac
             .await
             .unwrap();
         assert_eq!(state1["outcome"], "converged");
+        assert_eq!(state1["deterministic_pre_verification"]["evaluated"], true);
         // Cycle 1 turns: p(0.04), c(0.03), p(0.09-0.04=0.05), c(0.05-0.03=0.02) => total 0.14.
         assert_eq!(state1["turns"][0]["cost_usd"], 0.04);
         assert_eq!(state1["turns"][1]["cost_usd"], 0.03);
@@ -1284,8 +1305,10 @@ esac
             session: reloaded_for_c2,
             launch: base_launch(&fx, "claude"),
             executables: BTreeMap::from([("claude".into(), dual_claude)]),
-            context: String::new(),
-            adapter: Arc::new(PassThroughAdapter),
+            context: "CLASH_RESUME_SHOULD_NOT_APPEND".into(),
+            adapter: Arc::new(ClashPromptRecordingAdapter {
+                seen: Arc::clone(&captured_prompts),
+            }),
         };
         let state2 = cycle2
             .drive(
@@ -1299,6 +1322,21 @@ esac
             .unwrap();
         assert_eq!(state2["cycle"], 2);
         assert_eq!(state2["outcome"], "converged");
+        let seen_prompts = captured_prompts.lock().unwrap().clone();
+        assert_eq!(seen_prompts.len(), 6);
+        assert!(
+            seen_prompts[0].0.is_none() && seen_prompts[0].1.contains("CLASH_INIT_CONTEXT_TAG")
+        );
+        assert!(!seen_prompts[0].1.contains("clash_leak_999"));
+        assert!(
+            seen_prompts[1].0.is_none() && seen_prompts[1].1.contains("CLASH_INIT_CONTEXT_TAG")
+        );
+        for (sess, text) in &seen_prompts[2..] {
+            assert!(sess.is_some());
+            assert!(!text.contains("CLASH_INIT_CONTEXT_TAG"), "{text}");
+            assert!(!text.contains("CLASH_RESUME_SHOULD_NOT_APPEND"), "{text}");
+            assert!(!text.contains("clash_leak_999"), "{text}");
+        }
         // Cycle 2 turns: p(0.12-0.09=0.03), c(0.07-0.05=0.02) => cycle 2 cost 0.05!
         let turns2 = state2["turns"].as_array().unwrap();
         assert_eq!(turns2[turns2.len() - 2]["cost_usd"], 0.03);

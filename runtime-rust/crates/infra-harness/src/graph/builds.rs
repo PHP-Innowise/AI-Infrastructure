@@ -275,12 +275,13 @@ impl Graphs {
         root: &Path,
         delta: &crate::graph_ir::IrUpdateDelta,
     ) {
-        let _ = crate::system_graph::SystemGraphDomain::invalidate_summary_cache_for_ir_delta(
-            &self.store.state,
-            project,
-            root,
-            delta,
-        );
+        let _ =
+            crate::system_graph::SystemGraphDomain::invalidate_summary_cache_and_notify_for_ir_delta(
+                &self.store,
+                project,
+                root,
+                delta,
+            );
         self.notify_skillcache_ir_paths(
             project,
             &delta.changed_paths,
@@ -288,6 +289,9 @@ impl Graphs {
             delta.ir_revision,
         );
         let _ = crate::sdd::on_ir_paths_updated(&self.store, project, root, delta);
+        let _ = crate::results::on_ir_paths_updated(&self.store, project, root, delta);
+        let _ = crate::clash::on_ir_paths_updated(&self.store, project, root, delta);
+        let _ = crate::services::on_ir_paths_updated(&self.store, project, root, delta);
     }
 
     fn enrich_bus_delta(
@@ -415,6 +419,7 @@ impl Graphs {
                     && d.removed_files.is_empty()
                     && d.re_resolved_files.is_empty()
                     && !d.manifest_changed
+                    && !d.reexport_changed
             })
             && self.maps.latest_live_ir_index(project).is_some()
         {
@@ -446,7 +451,7 @@ impl Graphs {
         let incremental_index = if !is_sync_delta
             && let Some(ref delta) = delta
             && let Some(prev_index) = self.maps.latest_live_ir_index(project)
-            && let Some(ir_delta) = ir.export_ir_delta_for_files(delta)?
+            && let Some(ir_delta) = ir.export_ir_delta_for_files_with_root(Some(root), delta)?
         {
             let shared_delta = Arc::new(ir_delta.clone());
             prev_index
@@ -900,6 +905,7 @@ impl Graphs {
             || !bus_delta.incoming_caller_files.is_empty()
             || bus_delta.manifest_changed
             || bus_delta.semantic_changed
+            || bus_delta.reexport_changed
         {
             bus_delta.ir_revision = rev;
             self.emit_ir_invalidation_bus(project, root, &bus_delta);
@@ -1009,6 +1015,7 @@ impl Graphs {
             || !delta.incoming_caller_files.is_empty()
             || delta.manifest_changed
             || delta.semantic_changed
+            || delta.reexport_changed
         {
             delta.ir_revision = rev;
             self.emit_ir_invalidation_bus(project, root, &delta);
@@ -1364,7 +1371,7 @@ mod ir_bus_tests {
         let sid = store::id();
         db.execute(
             "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
-             VALUES(?1,'SDD Disabled',?2,?3,'claude','plan','sdd',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+             VALUES(?1,'SDD Disabled',?2,?3,'claude','plan','sdd',0,'running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
             rusqlite::params![
                 sid,
                 pid,
@@ -1486,6 +1493,167 @@ mod ir_bus_tests {
             "stale",
             "full build_native must emit invalidation bus for changed paths and callers"
         );
+        graphs.close();
+    }
+
+    #[test]
+    fn emit_ir_invalidation_bus_invalidates_results_and_clash_precheck_caches() {
+        use std::sync::atomic::AtomicBool;
+        struct BusResultsBackend {
+            project: PathBuf,
+            op: Arc<tokio::sync::Mutex<()>>,
+            stop: Arc<AtomicBool>,
+        }
+        impl crate::results::ResultsBackend for BusResultsBackend {
+            fn workspace(&self, _: &Value) -> crate::Result<PathBuf> {
+                Ok(self.project.clone())
+            }
+            fn idle(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn enqueue_check(&self, _: &str, _: &str, _: &str) -> crate::Result<String> {
+                Ok("chk".into())
+            }
+            fn operation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+                self.op.clone()
+            }
+            fn history_session_ids(&self, _: &Value) -> crate::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+            fn shutdown_cancel(&self) -> Arc<AtomicBool> {
+                self.stop.clone()
+            }
+            fn result_context(&self, _: &Value) -> crate::Result<infra_core::RuntimeContext> {
+                Ok(infra_core::RuntimeContext::new(
+                    infra_core::Roots::installed(&self.project)?,
+                    "local",
+                    "governed",
+                )?)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.php"), "<?php function a() {}\n").unwrap();
+        std::fs::write(root.join("src/b.php"), "<?php function b() {}\n").unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let reg = store.register(&root).unwrap();
+        let pid = reg["id"].as_str().unwrap().to_owned();
+        let results = crate::results::Results::new(
+            store.clone(),
+            Arc::new(BusResultsBackend {
+                project: root.clone(),
+                op: Arc::new(tokio::sync::Mutex::new(())),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .unwrap();
+
+        let env_extra = BTreeMap::new();
+        let cap = crate::results::Capture {
+            output: "ok".into(),
+            exit_code: Some(0),
+            reason: None,
+            seconds: 0.01,
+        };
+        let argv_a = vec!["php".into(), "-l".into(), "src/a.php".into()];
+        let argv_b = vec!["php".into(), "-l".into(), "src/b.php".into()];
+        results
+            .store_cached_check(
+                &argv_a,
+                &env_extra,
+                "snap-bus",
+                &root,
+                "php -l src/a.php",
+                false,
+                &cap,
+            )
+            .unwrap();
+        results
+            .store_cached_check(
+                &argv_b,
+                &env_extra,
+                "snap-bus",
+                &root,
+                "php -l src/b.php",
+                false,
+                &cap,
+            )
+            .unwrap();
+
+        let root_canon = infra_core::fs::canonicalize(&root).unwrap();
+        {
+            let db = store.connection().unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS precheck_receipt_cache(
+                    cache_key TEXT PRIMARY KEY,
+                    record_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_used_at INTEGER NOT NULL,
+                    cwd TEXT NOT NULL DEFAULT '',
+                    project_id TEXT NOT NULL DEFAULT '',
+                    ir_revision INTEGER,
+                    scoped_files_json TEXT
+                );",
+            )
+            .unwrap();
+            for (key, scoped) in [("pk-a", "[\"src/a.php\"]"), ("pk-b", "[\"src/b.php\"]")] {
+                db.execute(
+                    "INSERT INTO precheck_receipt_cache(
+                        cache_key, record_json, updated_at, last_used_at, cwd, project_id, ir_revision, scoped_files_json
+                     ) VALUES (?1, '{\"ok\":true}', 1, 1, ?2, ?3, 1, ?4)",
+                    rusqlite::params![key, root_canon.to_string_lossy().as_ref(), pid, scoped],
+                )
+                .unwrap();
+            }
+        }
+
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        let delta = crate::graph_ir::IrUpdateDelta {
+            ir_revision: 9,
+            changed_paths: vec!["src/a.php".into()],
+            ..Default::default()
+        };
+        graphs.emit_ir_invalidation_bus(&pid, &root, &delta);
+
+        assert!(
+            results
+                .cached_check(
+                    &argv_a,
+                    &env_extra,
+                    "snap-bus",
+                    &root,
+                    "php -l src/a.php",
+                    false
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            results
+                .cached_check(
+                    &argv_b,
+                    &env_extra,
+                    "snap-bus",
+                    &root,
+                    "php -l src/b.php",
+                    false
+                )
+                .unwrap()
+                .is_some()
+        );
+        let db = store.connection().unwrap();
+        let remaining: Vec<String> = db
+            .prepare("SELECT cache_key FROM precheck_receipt_cache ORDER BY cache_key")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(remaining, vec!["pk-b"]);
         graphs.close();
     }
 }

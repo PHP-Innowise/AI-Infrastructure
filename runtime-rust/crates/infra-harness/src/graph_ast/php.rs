@@ -156,6 +156,11 @@ fn walk_php(
             if param_types.is_empty() {
                 param_types = fallback_param_types;
             }
+            let class_route_prefix = if decl_kind == "class" {
+                extract_php_class_route_prefix(node, ctx.source)
+            } else {
+                None
+            };
             emit_php_attributes(ctx, node, Some(&name), &param_types);
 
             if !name.is_empty() {
@@ -182,6 +187,9 @@ fn walk_php(
                         ctx.push_inheritance(&name, &p, "implements", line, ctx.text(ifaces));
                     }
                 }
+                let attr_prefix_mark = class_route_prefix
+                    .as_deref()
+                    .map(|p| ctx.push_attr_route_prefix(p));
                 class_stack.push((decl_kind.to_owned(), name));
                 if let Some(body) = body_node {
                     walk_php(
@@ -195,6 +203,9 @@ fn walk_php(
                     );
                 }
                 class_stack.pop();
+                if let Some(mark) = attr_prefix_mark {
+                    ctx.truncate_attr_route_prefixes(mark);
+                }
                 if class_stack.is_empty() {
                     this_props.clear();
                 }
@@ -530,6 +541,8 @@ fn walk_php(
                 let str_args = args_node
                     .map(|a| all_string_arg_texts(a, ctx.source))
                     .unwrap_or_default();
+                let group_prefixes =
+                    extract_php_route_group_prefixes(Some(scope), &mem_txt, args_node, ctx.source);
                 let chain_txt = node.parent().map_or(evidence, |p| ctx.text(p));
                 emit_semantic_from_call(
                     ctx,
@@ -564,6 +577,25 @@ fn walk_php(
                     line,
                     evidence: clip_str(evidence, 160),
                 });
+                if !group_prefixes.is_empty()
+                    && let Some(args) = args_node
+                {
+                    let mark = ctx.push_call_route_prefix("");
+                    for pref in &group_prefixes {
+                        let _ = ctx.push_call_route_prefix(pref);
+                    }
+                    walk_php(
+                        ctx,
+                        args,
+                        depth + 1,
+                        class_stack,
+                        fn_depth,
+                        this_props,
+                        var_types,
+                    );
+                    ctx.truncate_call_route_prefixes(mark);
+                    return;
+                }
             }
         }
         "member_call_expression" | "nullsafe_member_call_expression" => {
@@ -580,6 +612,8 @@ fn walk_php(
                 let str_args = args_node
                     .map(|a| all_string_arg_texts(a, ctx.source))
                     .unwrap_or_default();
+                let group_prefixes =
+                    extract_php_route_group_prefixes(Some(obj), &mem_txt, args_node, ctx.source);
                 emit_semantic_from_call(
                     ctx,
                     Some(obj_txt),
@@ -609,6 +643,34 @@ fn walk_php(
                         line,
                         evidence: clip_str(evidence, 160),
                     });
+                }
+                if !group_prefixes.is_empty()
+                    && let Some(args) = args_node
+                {
+                    walk_php(
+                        ctx,
+                        obj,
+                        depth + 1,
+                        class_stack,
+                        fn_depth,
+                        this_props,
+                        var_types,
+                    );
+                    let mark = ctx.push_call_route_prefix("");
+                    for pref in &group_prefixes {
+                        let _ = ctx.push_call_route_prefix(pref);
+                    }
+                    walk_php(
+                        ctx,
+                        args,
+                        depth + 1,
+                        class_stack,
+                        fn_depth,
+                        this_props,
+                        var_types,
+                    );
+                    ctx.truncate_call_route_prefixes(mark);
+                    return;
                 }
             }
         }
@@ -899,6 +961,204 @@ fn collect_php_param_type_names(params_node: Node<'_>, source: &str) -> Vec<Stri
         .collect()
 }
 
+fn extract_php_route_attr_path(params: Node<'_>, source: &str) -> Option<String> {
+    let mut positional: Option<String> = None;
+    let mut saw_argument = false;
+    let mut stack = vec![params];
+    while let Some(cur) = stack.pop() {
+        if cur.kind() == "argument" {
+            saw_argument = true;
+            let name_node = cur
+                .child_by_field_name("name")
+                .or_else(|| cur.named_child(0).filter(|c| c.kind() == "name"));
+            if let Some(name_n) = name_node {
+                let arg_name = node_text(name_n, source).trim().to_ascii_lowercase();
+                if matches!(
+                    arg_name.as_str(),
+                    "path" | "prefix" | "value" | "uri" | "url"
+                ) && let Some(val) = all_string_arg_texts(cur, source)
+                    .into_iter()
+                    .map(|s| s.trim().to_owned())
+                    .find(|s| !s.is_empty())
+                {
+                    return Some(val);
+                }
+            } else if positional.is_none() {
+                let expr = cur.named_child(0).unwrap_or(cur);
+                if is_string_kind(expr.kind())
+                    && let Some(val) = unquote_literal(node_text(expr, source))
+                {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        positional = Some(trimmed.to_owned());
+                    }
+                }
+            }
+            continue;
+        }
+        for i in (0..cur.child_count()).rev() {
+            if let Some(ch) = cur.child(i) {
+                stack.push(ch);
+            }
+        }
+    }
+    if positional.is_some() || saw_argument {
+        positional
+    } else {
+        all_string_arg_texts(params, source)
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .find(|s| !s.is_empty())
+    }
+}
+
+fn is_php_route_attr_short(short_lower: &str) -> bool {
+    matches!(
+        short_lower,
+        "route"
+            | "requestmapping"
+            | "path"
+            | "getmapping"
+            | "httpget"
+            | "get"
+            | "postmapping"
+            | "httppost"
+            | "post"
+            | "putmapping"
+            | "httpput"
+            | "put"
+            | "deletemapping"
+            | "httpdelete"
+            | "delete"
+            | "patchmapping"
+            | "httppatch"
+            | "patch"
+    )
+}
+
+fn extract_php_class_route_prefix(node: Node<'_>, source: &str) -> Option<String> {
+    let attr_list = node.child_by_field_name("attributes")?;
+    let mut stack = vec![attr_list];
+    while let Some(cur) = stack.pop() {
+        if cur.kind() == "attribute" {
+            let attr_text = node_text(cur, source);
+            let attr_name = cur
+                .child(0)
+                .map(|n| node_text(n, source))
+                .unwrap_or(attr_text);
+            let short = attr_name
+                .rsplit(['\\', ':', '.'])
+                .next()
+                .unwrap_or(attr_name)
+                .trim_start_matches(['@', '#'])
+                .to_ascii_lowercase();
+            if matches!(
+                short.as_str(),
+                "route" | "requestmapping" | "path" | "controller"
+            ) && let Some(params) = cur.child_by_field_name("parameters")
+                && let Some(path) = extract_php_route_attr_path(params, source)
+            {
+                return Some(path);
+            }
+            continue;
+        }
+        for i in (0..cur.child_count()).rev() {
+            if let Some(ch) = cur.child(i) {
+                stack.push(ch);
+            }
+        }
+    }
+    None
+}
+
+fn extract_php_route_group_prefixes(
+    receiver: Option<Node<'_>>,
+    callee: &str,
+    args_node: Option<Node<'_>>,
+    source: &str,
+) -> Vec<String> {
+    if !callee.eq_ignore_ascii_case("group") {
+        return Vec::new();
+    }
+    let mut chain_prefixes = Vec::new();
+    let mut looks_like_route_chain = false;
+    let mut cursor = receiver;
+    while let Some(cur) = cursor {
+        match cur.kind() {
+            "member_call_expression" | "nullsafe_member_call_expression" => {
+                if let Some(name_n) = cur.child_by_field_name("name") {
+                    let m = node_text(name_n, source).trim();
+                    if m.eq_ignore_ascii_case("prefix")
+                        && let Some(a) = cur.child_by_field_name("arguments")
+                        && let Some(p) = first_string_arg_text(a, source)
+                    {
+                        chain_prefixes.push(p);
+                        looks_like_route_chain = true;
+                    }
+                }
+                cursor = cur.child_by_field_name("object");
+            }
+            "scoped_call_expression" => {
+                if let (Some(sc), Some(name_n)) = (
+                    cur.child_by_field_name("scope"),
+                    cur.child_by_field_name("name"),
+                ) {
+                    let sc_low = node_text(sc, source).trim().to_ascii_lowercase();
+                    let m = node_text(name_n, source).trim();
+                    if sc_low.contains("route") {
+                        looks_like_route_chain = true;
+                    }
+                    if m.eq_ignore_ascii_case("prefix")
+                        && let Some(a) = cur.child_by_field_name("arguments")
+                        && let Some(p) = first_string_arg_text(a, source)
+                    {
+                        chain_prefixes.push(p);
+                        looks_like_route_chain = true;
+                    }
+                }
+                break;
+            }
+            _ => {
+                let txt = node_text(cur, source).trim().to_ascii_lowercase();
+                if txt.contains("route") || txt == "$this" || txt == "$app" {
+                    looks_like_route_chain = true;
+                }
+                break;
+            }
+        }
+    }
+    chain_prefixes.reverse();
+
+    if looks_like_route_chain && let Some(args) = args_node {
+        for i in 0..args.named_child_count() {
+            if let Some(arg) = args.named_child(i) {
+                let expr = if arg.kind() == "argument" {
+                    arg.named_child(0).unwrap_or(arg)
+                } else {
+                    arg
+                };
+                if expr.kind() == "array_creation_expression" {
+                    for el in children_by_kind(expr, "array_element_initializer") {
+                        let txt = node_text(el, source);
+                        if let Some((k, v)) = txt.split_once("=>")
+                            && unquote_literal(k.trim())
+                                .is_some_and(|key| key.eq_ignore_ascii_case("prefix"))
+                            && let Some(p) = unquote_literal(v.trim())
+                        {
+                            chain_prefixes.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if looks_like_route_chain {
+        chain_prefixes
+    } else {
+        Vec::new()
+    }
+}
+
 fn emit_php_attributes(
     ctx: &mut ExtractCtx<'_>,
     node: Node<'_>,
@@ -913,9 +1173,23 @@ fn emit_php_attributes(
         if cur.kind() == "attribute" {
             let attr_text = ctx.text(cur);
             let attr_name = cur.child(0).map(|n| ctx.text(n)).unwrap_or(attr_text);
+            let short_lower = attr_name
+                .rsplit(['\\', ':', '.'])
+                .next()
+                .unwrap_or(attr_name)
+                .trim_start_matches(['@', '#'])
+                .to_ascii_lowercase();
             let strs = cur
                 .child_by_field_name("parameters")
-                .map(|p| all_string_arg_texts(p, ctx.source))
+                .map(|p| {
+                    if is_php_route_attr_short(&short_lower) {
+                        extract_php_route_attr_path(p, ctx.source)
+                            .into_iter()
+                            .collect()
+                    } else {
+                        all_string_arg_texts(p, ctx.source)
+                    }
+                })
                 .unwrap_or_default();
             emit_semantic_from_attribute(
                 ctx,
@@ -1289,6 +1563,40 @@ fn kebab_to_studly(raw: &str) -> String {
     out
 }
 
+fn find_masked_blade_close(bytes: &[u8], start: usize, close_delim: &[u8]) -> Option<usize> {
+    let mut j = start;
+    let mut quote: Option<u8> = None;
+    let mut inner_depth = 0usize;
+    while j < bytes.len() {
+        if let Some(q) = quote {
+            if bytes[j] == b'\\' {
+                j = (j + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[j] == q {
+                quote = None;
+            }
+            j += 1;
+            continue;
+        }
+        if matches!(bytes[j], b'\'' | b'"' | b'`') {
+            quote = Some(bytes[j]);
+            j += 1;
+            continue;
+        }
+        if inner_depth == 0 && bytes[j..].starts_with(close_delim) {
+            return Some(j + close_delim.len());
+        }
+        if bytes[j] == b'{' {
+            inner_depth += 1;
+        } else if bytes[j] == b'}' && inner_depth > 0 {
+            inner_depth -= 1;
+        }
+        j += 1;
+    }
+    None
+}
+
 fn mask_blade_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
@@ -1303,7 +1611,63 @@ fn mask_blade_comments(source: &str) -> String {
         rest = &after[end..];
     }
     out.push_str(rest);
-    out
+
+    // Also mask escaped Blade JS/Alpine expressions (`@{{ ... }}` and `@{!! ... !!}`)
+    // so neither inline PHP extraction nor regex scanners misattribute them as PHP calls.
+    // Respect `@@{{` / `@@{!!` escaped `@` parity (even `@` counts stay live PHP),
+    // string quotes, and balanced nested `{ ... }` braces.
+    let bytes = out.as_bytes();
+    let mut masked = String::with_capacity(out.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'@' {
+            let mut at_count = 0usize;
+            while i + at_count < bytes.len() && bytes[i + at_count] == b'@' {
+                at_count += 1;
+            }
+            let after_at = i + at_count;
+            let close_delim = if bytes[after_at..].starts_with(b"{{") {
+                Some(b"}}".as_slice())
+            } else if bytes[after_at..].starts_with(b"{!!") {
+                Some(b"!!}".as_slice())
+            } else {
+                None
+            };
+            if let Some(delim) = close_delim {
+                if at_count.is_multiple_of(2) {
+                    for _ in 0..at_count {
+                        masked.push('@');
+                    }
+                    i = after_at;
+                    continue;
+                }
+                for _ in 0..(at_count - 1) {
+                    masked.push('@');
+                }
+                let esc_start = after_at - 1;
+                let expr_start = after_at + delim.len();
+                if let Some(end) = find_masked_blade_close(bytes, expr_start, delim) {
+                    for ch in out[esc_start..end].chars() {
+                        masked.push(if ch == '\n' { '\n' } else { ' ' });
+                    }
+                    i = end;
+                    continue;
+                }
+                masked.push('@');
+                i = after_at;
+                continue;
+            }
+            for _ in 0..at_count {
+                masked.push('@');
+            }
+            i = after_at;
+            continue;
+        }
+        let ch = out[i..].chars().next().unwrap();
+        masked.push(ch);
+        i += ch.len_utf8();
+    }
+    masked
 }
 
 struct BladeRegexes {
@@ -1382,6 +1746,118 @@ fn line_at_byte(src: &str, byte_offset: usize) -> u32 {
 
 fn is_escaped_blade_directive(src: &str, at_offset: usize) -> bool {
     at_offset > 0 && src.as_bytes().get(at_offset - 1) == Some(&b'@')
+}
+
+fn extract_blade_inline_exprs(masked: &str) -> Vec<(u32, String)> {
+    let bytes = masked.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let is_escaped_open = i > 0 && bytes[i - 1] == b'@';
+        let (close_delim, open_len) = if !is_escaped_open
+            && bytes[i..].starts_with(b"{{")
+            && !bytes[i..].starts_with(b"{{--")
+        {
+            (b"}}".as_slice(), 2usize)
+        } else if !is_escaped_open && bytes[i..].starts_with(b"{!!") {
+            (b"!!}".as_slice(), 3usize)
+        } else {
+            i += 1;
+            continue;
+        };
+        let expr_start = i + open_len;
+        let mut cursor = expr_start;
+        let mut quote: Option<u8> = None;
+        let mut escaped = false;
+        let mut found_end = None;
+        while cursor < bytes.len() {
+            let b = bytes[cursor];
+            if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == q {
+                    quote = None;
+                }
+                cursor += 1;
+                continue;
+            }
+            if b == b'\'' || b == b'"' {
+                quote = Some(b);
+                cursor += 1;
+                continue;
+            }
+            if bytes[cursor..].starts_with(close_delim) {
+                found_end = Some(cursor);
+                break;
+            }
+            cursor += 1;
+        }
+        if let Some(end) = found_end {
+            let body = masked[expr_start..end].trim();
+            if !body.is_empty() {
+                out.push((line_at_byte(masked, expr_start), body.to_owned()));
+            }
+            i = end + close_delim.len();
+        } else {
+            i = expr_start;
+        }
+    }
+    out
+}
+
+fn forward_blade_php_snippet(
+    ctx: &mut ExtractCtx<'_>,
+    body: &str,
+    base_line: u32,
+    ensure_stmt: bool,
+) {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let wrapped = if ensure_stmt && !trimmed.ends_with(';') && !trimmed.ends_with('}') {
+        format!("<?php\n{trimmed};\n")
+    } else {
+        format!("<?php\n{trimmed}\n")
+    };
+    if let Some(sub) = parse_file_ir("__blade_inline__.php", &wrapped) {
+        let line_shift = base_line.saturating_sub(2);
+        for mut decl in sub.declarations {
+            decl.start_line = decl.start_line.saturating_add(line_shift);
+            decl.end_line = decl.end_line.saturating_add(line_shift);
+            ctx.push_decl(
+                &decl.entity.kind,
+                &decl.entity.name,
+                decl.entity.parent.filter(|p| p != "__blade_inline__.php"),
+                decl.start_line,
+                decl.end_line,
+                decl.visibility,
+                decl.modifiers,
+                decl.signature,
+                decl.params_signature,
+                decl.body_fingerprint,
+            );
+        }
+        for mut imp in sub.imports {
+            imp.line = imp.line.saturating_add(line_shift);
+            ctx.push_import(imp);
+        }
+        for mut r in sub.calls_and_refs {
+            r.line = r.line.saturating_add(line_shift);
+            ctx.push_ref(r);
+        }
+        for sem in sub.semantic_edges {
+            ctx.push_semantic(
+                &sem.kind,
+                sem.target,
+                sem.source_symbol,
+                sem.line.saturating_add(line_shift),
+                &sem.evidence,
+            );
+        }
+    }
 }
 
 pub(super) fn extract_blade(ctx: &mut ExtractCtx<'_>, root: Node<'_>) {
@@ -1662,54 +2138,26 @@ pub(super) fn extract_blade(ctx: &mut ExtractCtx<'_>, root: Node<'_>) {
     }
     for cap in re.php_block.captures_iter(&masked) {
         let inner_m = cap.get(1).unwrap();
-        let body = inner_m.as_str();
-        if body.trim().is_empty() {
-            continue;
-        }
-        let base_line = line_at_byte(&masked, inner_m.start());
-        let wrapped = format!("<?php\n{body}\n");
-        if let Some(sub) = parse_file_ir("__blade_inline__.php", &wrapped) {
-            let line_shift = base_line.saturating_sub(2);
-            for mut decl in sub.declarations {
-                decl.start_line = decl.start_line.saturating_add(line_shift);
-                decl.end_line = decl.end_line.saturating_add(line_shift);
-                ctx.push_decl(
-                    &decl.entity.kind,
-                    &decl.entity.name,
-                    decl.entity.parent.filter(|p| p != "__blade_inline__.php"),
-                    decl.start_line,
-                    decl.end_line,
-                    decl.visibility,
-                    decl.modifiers,
-                    decl.signature,
-                    decl.params_signature,
-                    decl.body_fingerprint,
-                );
-            }
-            for mut imp in sub.imports {
-                imp.line = imp.line.saturating_add(line_shift);
-                ctx.push_import(imp);
-            }
-            for mut r in sub.calls_and_refs {
-                r.line = r.line.saturating_add(line_shift);
-                ctx.push_ref(r);
-            }
-            for sem in sub.semantic_edges {
-                ctx.push_semantic(
-                    &sem.kind,
-                    sem.target,
-                    sem.source_symbol,
-                    sem.line.saturating_add(line_shift),
-                    &sem.evidence,
-                );
-            }
-        }
+        forward_blade_php_snippet(
+            ctx,
+            inner_m.as_str(),
+            line_at_byte(&masked, inner_m.start()),
+            false,
+        );
+    }
+    for (base_line, body) in extract_blade_inline_exprs(&masked) {
+        forward_blade_php_snippet(ctx, &body, base_line, true);
     }
 }
 
 pub(super) fn collect_blade_identifiers(source: &str, out: &mut BTreeSet<String>) {
     let masked = mask_blade_comments(source);
     let re = blade_regexes();
+    for (_, expr_body) in extract_blade_inline_exprs(&masked) {
+        for m in re.ident.find_iter(&expr_body) {
+            out.insert(m.as_str().to_owned());
+        }
+    }
     for cap in re.view_dir.captures_iter(&masked) {
         for m in re.ident.find_iter(&cap[2]) {
             out.insert(m.as_str().to_owned());

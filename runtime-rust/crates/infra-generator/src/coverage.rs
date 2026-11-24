@@ -792,12 +792,32 @@ pub fn detect_pre_scan_surfaces(target: &Path) -> Value {
     .into_iter()
     .filter(|name| target.join(name).is_file())
     .collect();
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "surface_count": surfaces.len(),
         "surfaces": surfaces,
         "manifests": manifests,
         "diagnostics": items.iter().map(|d| &d.code).collect::<Vec<_>>(),
-    })
+    });
+    if let Ok(manifest) = crate::ownership::load_manifest(target)
+        && manifest
+            .get("dependency_manifests")
+            .is_some_and(Value::is_object)
+        && let Ok(pre_gen) = partition_pre_generation_batches(target, &manifest, None)
+    {
+        result["pre_generation_partition"] = pre_gen;
+    }
+    result
+}
+
+/// Filters skill/agent batches pre-generation against per-surface `ArtifactDependencyManifest`
+/// records in `.infra-manifest.json` so `infra-update` skips unchanged batches and always
+/// invalidates dependent slices on composer/package manifest or watched-glob changes.
+pub fn partition_pre_generation_batches(
+    target: &Path,
+    manifest: &Value,
+    changed_paths: Option<&[String]>,
+) -> Result<Value> {
+    crate::ownership::partition_pre_generation_batches(target, manifest, changed_paths)
 }
 
 /// Filters staged update slices against `.infra-manifest.json` validation stamps so

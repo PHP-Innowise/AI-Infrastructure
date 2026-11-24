@@ -21,6 +21,7 @@ pub const EXAMPLES_BYTES: usize = 1024 * 1024;
 pub const BINDING_BYTES: usize = 4 * 1024;
 pub const TEXT_CHARS: usize = 4000;
 pub const DESCRIPTION_CHARS: usize = 600;
+pub const BINDING_PATTERN_CHARS: usize = 256;
 pub const PROGRAMS: usize = 32;
 /// `steps` and `verification` together.
 pub const PLAN_STEPS: usize = 64;
@@ -169,13 +170,46 @@ impl BindingType {
     }
 }
 
+/// Where a binding's value comes from before control is handed to the agent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BindingOrigin {
+    #[default]
+    Request,
+    WorkspacePath,
+    RouteArg,
+    PromptRegex,
+}
+
+impl BindingOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::WorkspacePath => "workspace_path",
+            Self::RouteArg => "route_arg",
+            Self::PromptRegex => "prompt_regex",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "request" => Some(Self::Request),
+            "workspace_path" => Some(Self::WorkspacePath),
+            "route_arg" => Some(Self::RouteArg),
+            "prompt_regex" => Some(Self::PromptRegex),
+            _ => None,
+        }
+    }
+}
+
 /// A value known before control is handed to the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Binding {
     pub name: String,
     pub kind: BindingType,
-    pub origin: String,
+    pub origin: BindingOrigin,
     pub description: Option<String>,
+    pub pattern: Option<String>,
+    pub default: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -867,9 +901,15 @@ impl SkillCapsule {
                     let mut value = Map::new();
                     value.insert("name".into(), binding.name.clone().into());
                     value.insert("type".into(), binding.kind.as_str().into());
-                    value.insert("origin".into(), binding.origin.clone().into());
+                    value.insert("origin".into(), binding.origin.as_str().into());
                     if let Some(description) = &binding.description {
                         value.insert("description".into(), description.clone().into());
+                    }
+                    if let Some(pattern) = &binding.pattern {
+                        value.insert("pattern".into(), pattern.clone().into());
+                    }
+                    if let Some(default) = &binding.default {
+                        value.insert("default".into(), default.clone());
                     }
                     Value::Object(value)
                 })
@@ -1159,13 +1199,27 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
     {
         for (index, item) in items.iter().enumerate() {
             let at = format!("bindings[{index}]");
-            let Some(binding) =
-                reader.object(item, &at, &["name", "type", "origin", "description"])
-            else {
+            let Some(binding) = reader.object(
+                item,
+                &at,
+                &[
+                    "name",
+                    "type",
+                    "origin",
+                    "description",
+                    "pattern",
+                    "default",
+                ],
+            ) else {
                 continue;
             };
             let name = reader.required_text(binding, "name", &at, 64);
             let description = reader.optional_text(binding, "description", &at, DESCRIPTION_CHARS);
+            let pattern = reader.optional_text(binding, "pattern", &at, BINDING_PATTERN_CHARS);
+            let default = binding
+                .get("default")
+                .filter(|value| !value.is_null())
+                .cloned();
             let kind = match binding.get("type").and_then(Value::as_str) {
                 Some("string") => Some(BindingType::String),
                 Some("path") => Some(BindingType::Path),
@@ -1181,13 +1235,17 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
                     None
                 }
             };
-            let origin = match binding.get("origin").and_then(Value::as_str) {
-                Some("request") => Some("request".to_string()),
-                _ => {
+            let origin = match binding
+                .get("origin")
+                .and_then(Value::as_str)
+                .and_then(BindingOrigin::parse)
+            {
+                Some(origin) => Some(origin),
+                None => {
                     reader.refuse(
                         "invalid_value",
                         &join(&at, "origin"),
-                        "`origin` is `request`: a binding is a value the request states.",
+                        "`origin` is `request`, `workspace_path`, `route_arg` or `prompt_regex`.",
                     );
                     None
                 }
@@ -1207,6 +1265,8 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
                     kind,
                     origin,
                     description,
+                    pattern,
+                    default,
                 });
             }
         }

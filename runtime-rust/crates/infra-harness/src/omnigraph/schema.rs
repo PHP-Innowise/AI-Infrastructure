@@ -551,7 +551,7 @@ pub(crate) const GQ_LIST_FILE_EDGES: &str = r#"query list_file_edges($project_id
         $e.line_start as line_start,
         $e.line_end as line_end
     }
-    limit 2000
+    limit 10000
 }"#;
 
 pub(crate) const GQ_LIST_ATOM_RELATIONS: &str = r#"query list_atom_relations($project_id: String) {
@@ -832,6 +832,12 @@ pub(crate) const GQ_LINK_MENTIONS_SYMBOL: &str = r#"query link_mentions_symbol(
         to: $fqn,
         role: $role
     }
+}"#;
+
+/// An atom's touched files shrank or emptied: clear prior `TouchesFile` edges
+/// before writing the updated set.
+pub(crate) const GQ_CLEAR_ATOM_FILES: &str = r#"query clear_atom_files($atom_id: String) {
+    delete TouchesFile where @src = $atom_id
 }"#;
 
 /// An atom whose text changed names other declarations: its old mentions go

@@ -264,6 +264,11 @@ fn the_compile_rules_carry_a_version_and_a_schema() {
     );
     let schema = compile_rules::response_schema();
     assert_eq!(schema["required"], serde_json::json!(["form", "capsule"]));
+    let caps_props = &schema["properties"]["capsule"]["properties"]["capabilities"]["properties"];
+    assert_eq!(
+        caps_props["allow_ignored"],
+        serde_json::json!({"type": "array", "items": {"type": "string"}})
+    );
     for rule in [
         "Path pruning",
         "Binding lifting",
@@ -272,6 +277,7 @@ fn the_compile_rules_carry_a_version_and_a_schema() {
     ] {
         assert!(compile_rules::INSTRUCTIONS.contains(rule), "{rule}");
     }
+    assert!(compile_rules::INSTRUCTIONS.contains("allow_ignored"));
     assert!(compile_rules::TEXTUAL_TEMPLATE.contains("## Steps"));
 }
 

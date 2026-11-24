@@ -88,6 +88,7 @@ struct MockGraphState {
     commits: BTreeMap<String, MockCommit>,
     commit_order: Vec<String>,
     next_seq: u64,
+    mutation_counts: BTreeMap<String, usize>,
 }
 
 impl MockGraphState {
@@ -126,6 +127,7 @@ impl MockGraphState {
             commits,
             commit_order: vec!["c-0001".into()],
             next_seq: 2,
+            mutation_counts: BTreeMap::new(),
         }
     }
 
@@ -617,6 +619,7 @@ async fn mock_mutate(
     let params = &body["params"];
     let qtext = body["query"].as_str().unwrap_or("");
     let qname = body["name"].as_str().unwrap_or("mutate").to_string();
+    *st.mutation_counts.entry(qname.clone()).or_insert(0) += 1;
     let mut changes = Vec::new();
     let mut nodes = 0usize;
     let mut edges = 0usize;
@@ -744,6 +747,15 @@ async fn mock_mutate(
         props["target_id"] = json!(dst);
         snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
         edges += 1;
+    } else if qname == "clear_atom_files"
+        || (qtext.contains("delete TouchesFile") && !qtext.contains("delete ContextAtom"))
+    {
+        // As `GQ_CLEAR_ATOM_FILES`: the atom's touched-file edges only.
+        let aid = params["atom_id"].as_str().unwrap_or("");
+        let before = snap.touches_file.len();
+        snap.touches_file
+            .retain(|_, props| props["source_id"].as_str() != Some(aid));
+        edges += before - snap.touches_file.len();
     } else if qname == "clear_atom_symbols"
         || (qtext.contains("delete MentionsSymbol") && !qtext.contains("delete ContextAtom"))
     {
@@ -866,7 +878,19 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
             .collect(),
         "list_published_edges" => snap.published_by.values().cloned().collect(),
         "list_consumed_edges" => snap.consumed_by.values().cloned().collect(),
-        "list_file_edges" => snap.touches_file.values().cloned().collect(),
+        "list_file_edges" => snap
+            .touches_file
+            .values()
+            .filter(|edge| {
+                pid.is_empty()
+                    || snap
+                        .atoms
+                        .get(edge["source_id"].as_str().unwrap_or(""))
+                        .is_some_and(match_proj)
+            })
+            .take(2000)
+            .cloned()
+            .collect(),
         "list_atom_relations" => snap.relates_to.values().cloned().collect(),
         "list_session_follows" => snap.session_follows.values().cloned().collect(),
         "file_context" => {
@@ -1591,11 +1615,23 @@ async fn mock_load_json(
 }
 
 async fn spawn_mock_omnigraph(token: &str) -> (String, tokio::task::JoinHandle<()>) {
+    let (url, _state, handle) = spawn_mock_omnigraph_with_state(token).await;
+    (url, handle)
+}
+
+async fn spawn_mock_omnigraph_with_state(
+    token: &str,
+) -> (
+    String,
+    Arc<Mutex<MockGraphState>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let state = Arc::new(Mutex::new(MockGraphState::new(
+        schema::HARNESS_GRAPH_ID,
+        token,
+    )));
     let srv = MockServer {
-        state: Arc::new(Mutex::new(MockGraphState::new(
-            schema::HARNESS_GRAPH_ID,
-            token,
-        ))),
+        state: Arc::clone(&state),
     };
     let app = Router::new()
         .route("/healthz", get(mock_healthz))
@@ -1634,7 +1670,7 @@ async fn spawn_mock_omnigraph(token: &str) -> (String, tokio::task::JoinHandle<(
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), state, handle)
 }
 
 // ---------------------------------------------------------------------------
@@ -3907,9 +3943,27 @@ async fn http_omnigraph_sync_knowledge_and_promote_end_to_end() {
     assert_eq!(sync_res["ok"], true);
     assert_eq!(sync_res["branch"], "knowledge/canonical");
     assert_eq!(sync_res["synced"], 2);
+    assert_eq!(sync_res["mutated_atoms"], 2);
+    assert_eq!(sync_res["skipped_atoms"], 0);
+    assert_eq!(sync_res["skipped_files"], 0);
     assert_eq!(sync_res["brain_count"], 1);
     assert_eq!(sync_res["memory_count"], 1);
     assert_eq!(sync_res["skipped"], 2);
+
+    // Repeating sync-knowledge with identical records must skip redundant atom/file mutations.
+    let (status2, sync_res2) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sync-knowledge",
+            Some(json!({ "project_id": fx.project_id })),
+            true,
+        )
+        .await;
+    assert_eq!(status2, 200, "{sync_res2}");
+    assert_eq!(sync_res2["synced"], 2);
+    assert_eq!(sync_res2["mutated_atoms"], 0);
+    assert_eq!(sync_res2["skipped_atoms"], 2);
+    assert_eq!(sync_res2["skipped_files"], 2);
 
     let (status, canon_graph) = fx
         .http(
@@ -5287,6 +5341,17 @@ async fn http_delivery_preview_annotates_memory_warnings_and_risk_callers_inner(
         .await;
     assert_eq!(status, 200, "{del_state}");
     let snapshot_id = del_state["snapshot_id"].as_str().unwrap().to_owned();
+    let (status_repeat, del_repeat) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/delivery"),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status_repeat, 200, "{del_repeat}");
+    assert_eq!(del_repeat["snapshot_id"], snapshot_id);
+    assert_eq!(del_repeat["files"], del_state["files"]);
 
     // 1. preview_commit attaches memory_warnings + risk_callers.
     let (status, commit_prev) = fx
@@ -5466,5 +5531,298 @@ async fn http_save_memory_validates_used_memory_paths() {
     assert_eq!(saved["ok"], true, "{saved}");
     assert_eq!(saved["used_memory"], json!(["src/auth/jwt.rs"]));
 
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn omnigraph_sync_canonical_knowledge_skips_unchanged_atoms_and_files_over_wire() {
+    let (mock_url, mock_state, mock_task) = spawn_mock_omnigraph_with_state("tok-ledger").await;
+    let fx = HarnessFixture::new(None).await;
+    fs::create_dir_all(fx.project_path.join("src")).unwrap();
+    fs::write(fx.project_path.join("src/a.rs"), "pub fn alpha() {}\n").unwrap();
+    fs::write(fx.project_path.join("src/b.rs"), "pub fn beta() {}\n").unwrap();
+    fs::write(
+        fx.project_path.join("src/b_extra.rs"),
+        "pub fn beta_extra() {}\n",
+    )
+    .unwrap();
+
+    fx.omnigraph
+        .connect_external(
+            &mock_url,
+            Some("tok-ledger"),
+            Some(schema::HARNESS_GRAPH_ID),
+        )
+        .await
+        .unwrap();
+
+    let mut items = vec![
+        json!({
+            "atom_id": "ledger-atom-a",
+            "kind": "finding",
+            "title": "Alpha invariant",
+            "summary": "Alpha stays pure.",
+            "body": "Calls alpha().",
+            "files": ["src/a.rs"],
+            "origin_layer": "memory-bank",
+            "authority": "verified",
+            "verified": true,
+        }),
+        json!({
+            "atom_id": "ledger-atom-b",
+            "kind": "finding",
+            "title": "Beta invariant",
+            "summary": "Beta stays pure v1.",
+            "body": "Calls beta().",
+            "files": ["src/b.rs"],
+            "origin_layer": "memory-bank",
+            "authority": "verified",
+            "verified": true,
+        }),
+    ];
+
+    // 1. Initial sync writes both atoms and their 2 file links.
+    let r1 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r1["synced"], 2);
+    assert_eq!(r1["mutated_atoms"], 2);
+    assert_eq!(r1["skipped_atoms"], 0);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts.get("upsert_atom").copied().unwrap_or(0),
+            2
+        );
+        assert_eq!(
+            st.mutation_counts.get("upsert_file").copied().unwrap_or(0),
+            2
+        );
+        assert_eq!(
+            st.mutation_counts
+                .get("link_touches_file")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    // 2. Identical re-sync skips ALL atom and file GraphQL mutations on the wire.
+    let r2 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r2["synced"], 2);
+    assert_eq!(r2["mutated_atoms"], 0);
+    assert_eq!(r2["skipped_atoms"], 2);
+    assert_eq!(r2["skipped_files"], 2);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts.get("upsert_atom").copied().unwrap_or(0),
+            2
+        );
+        assert_eq!(
+            st.mutation_counts.get("upsert_file").copied().unwrap_or(0),
+            2
+        );
+        assert_eq!(
+            st.mutation_counts
+                .get("link_touches_file")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    // 3. Changing only atom-b summary (same files) mutates only atom-b (`+1 upsert_atom`, `+0` files).
+    items[1]["summary"] = json!("Beta stays pure v2.");
+    let r3 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r3["synced"], 2);
+    assert_eq!(r3["mutated_atoms"], 1);
+    assert_eq!(r3["skipped_atoms"], 1);
+    assert_eq!(r3["skipped_files"], 2);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts.get("upsert_atom").copied().unwrap_or(0),
+            3
+        );
+        assert_eq!(
+            st.mutation_counts.get("upsert_file").copied().unwrap_or(0),
+            2
+        );
+        assert_eq!(
+            st.mutation_counts
+                .get("link_touches_file")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    // 4. Adding a file to atom-b (same summary) skips `upsert_atom` (`+0`) and mutates only the new file edge (`+1`).
+    items[1]["files"] = json!(["src/b.rs", "src/b_extra.rs"]);
+    let r4 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r4["synced"], 2);
+    assert_eq!(r4["mutated_atoms"], 0);
+    assert_eq!(r4["skipped_atoms"], 2);
+    assert_eq!(r4["skipped_files"], 1);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts.get("upsert_atom").copied().unwrap_or(0),
+            3
+        );
+        assert_eq!(
+            st.mutation_counts.get("upsert_file").copied().unwrap_or(0),
+            3
+        );
+        assert_eq!(
+            st.mutation_counts
+                .get("link_touches_file")
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+    }
+
+    // 5. Shrinking `files` deletes stale `TouchesFile` edge via `clear_atom_files`, and clearing to `[]` removes the rest.
+    items[1]["files"] = json!(["src/b.rs"]);
+    let r5 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r5["synced"], 2);
+    assert_eq!(r5["mutated_atoms"], 0);
+    assert_eq!(r5["skipped_files"], 1);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+    }
+    let fetched_shrunk = fx
+        .omnigraph
+        .fetch_atom_with_files(&fx.project_id, "ledger-atom-b", Some("knowledge/canonical"))
+        .await
+        .unwrap();
+    assert_eq!(fetched_shrunk["files"], json!(["src/b.rs"]));
+
+    items[1]["files"] = json!([]);
+    let r6 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r6["synced"], 2);
+    assert_eq!(r6["mutated_atoms"], 0);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+    let fetched_empty = fx
+        .omnigraph
+        .fetch_atom_with_files(&fx.project_id, "ledger-atom-b", Some("knowledge/canonical"))
+        .await
+        .unwrap();
+    assert_eq!(fetched_empty["files"], json!([]));
+
+    // Identical re-sync with `[]` skips both atom & file mutations without extra clears.
+    let r7 = fx
+        .omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    assert_eq!(r7["skipped_atoms"], 2);
+    assert_eq!(r7["skipped_files"], 2);
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    // 6. Seed >2000 TouchesFile edges sorting lexicographically before `zzz-atom` so `list_file_edges`
+    // truncates at 2000; `export_branch` expansion must still find and clear shrunk `zzz-atom` edges.
+    items.push(json!({
+        "atom_id": "zzz-atom",
+        "kind": "finding",
+        "title": "Tail atom",
+        "summary": "Beyond 2000 edges.",
+        "body": "Tail atom body.",
+        "files": ["src/a.rs", "src/b.rs"],
+        "origin_layer": "memory-bank",
+        "authority": "verified",
+        "verified": true,
+    }));
+    fx.omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    {
+        let mut st = mock_state.lock().unwrap();
+        let head_cid = st.branches["knowledge/canonical"].head_commit.clone();
+        let snap = &mut st.commits.get_mut(&head_cid).unwrap().snapshot;
+        for i in 0..2005 {
+            let aid = format!("aaa-pad-{i:04}");
+            let path = format!("src/pad_{i:04}.rs");
+            snap.atoms.insert(
+                aid.clone(),
+                json!({ "atom_id": aid, "project_id": fx.project_id, "origin_layer": "memory-bank" }),
+            );
+            snap.touches_file.insert(
+                format!("{aid}->{path}"),
+                json!({ "source_id": aid, "target_id": path, "access": "referenced" }),
+            );
+        }
+    }
+    items[2]["files"] = json!(["src/a.rs"]);
+    fx.omnigraph
+        .sync_canonical_knowledge(&fx.project_id, &items)
+        .await
+        .unwrap();
+    {
+        let st = mock_state.lock().unwrap();
+        assert_eq!(
+            st.mutation_counts
+                .get("clear_atom_files")
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+        let head_cid = &st.branches["knowledge/canonical"].head_commit;
+        let snap = &st.commits[head_cid].snapshot;
+        assert!(snap.touches_file.contains_key("zzz-atom->src/a.rs"));
+        assert!(!snap.touches_file.contains_key("zzz-atom->src/b.rs"));
+    }
+
+    mock_task.abort();
     fx.shutdown().await;
 }

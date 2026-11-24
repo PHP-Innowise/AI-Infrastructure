@@ -283,7 +283,7 @@ impl SessionStore {
    CREATE TABLE IF NOT EXISTS memory_result_attempts(session_id TEXT NOT NULL,generation TEXT NOT NULL,binding TEXT NOT NULL,PRIMARY KEY(session_id,generation));
    CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,digest TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS harness_settings(name TEXT PRIMARY KEY,value TEXT NOT NULL);
-   CREATE TABLE IF NOT EXISTS native_fleet_runs(thread_id TEXT PRIMARY KEY,state TEXT NOT NULL,stage TEXT NOT NULL,decision INTEGER,import_id TEXT,revision INTEGER NOT NULL DEFAULT 1);
+   CREATE TABLE IF NOT EXISTS native_fleet_runs(thread_id TEXT PRIMARY KEY,state TEXT NOT NULL,stage TEXT NOT NULL,decision INTEGER,import_id TEXT,revision INTEGER NOT NULL DEFAULT 1,project_id TEXT NOT NULL DEFAULT '',project_path TEXT NOT NULL DEFAULT '');
    CREATE TABLE IF NOT EXISTS native_fleet_tasks(thread_id TEXT NOT NULL,task_id TEXT NOT NULL,lens TEXT NOT NULL,ordinal INTEGER NOT NULL,status TEXT NOT NULL,input TEXT NOT NULL,output TEXT,error TEXT,PRIMARY KEY(thread_id,task_id));
    CREATE TABLE IF NOT EXISTS native_checkpoint_imports(import_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,checkpoint_id TEXT NOT NULL,source_digest TEXT NOT NULL,created_at TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS harness_generations(session_id TEXT PRIMARY KEY,generation TEXT NOT NULL);")?;
@@ -319,10 +319,26 @@ impl SessionStore {
             ("omnigraph", "TEXT"),
             ("permissions", "TEXT"),
             ("skillcache", "TEXT"),
+            ("skillcache_thin_formatter", "INTEGER"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
                     "ALTER TABLE sessions ADD COLUMN {name} {definition}"
+                ))?;
+            }
+        }
+        let fleet_columns = {
+            let mut q = db.prepare("PRAGMA table_info(native_fleet_runs)")?;
+            q.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<BTreeSet<_>, _>>()?
+        };
+        for (name, definition) in [
+            ("project_id", "TEXT NOT NULL DEFAULT ''"),
+            ("project_path", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !fleet_columns.contains(name) {
+                db.execute_batch(&format!(
+                    "ALTER TABLE native_fleet_runs ADD COLUMN {name} {definition}"
                 ))?;
             }
         }
@@ -881,11 +897,20 @@ impl SessionStore {
             "system_explain",
             "omnigraph",
             "skillcache",
+            "skillcache_thin_formatter",
         ] {
             if !options[key].is_null() {
+                let param = match &options[key] {
+                    Value::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
+                    Value::Number(n) if n.as_i64().is_some() => {
+                        rusqlite::types::Value::Integer(n.as_i64().unwrap_or_default())
+                    }
+                    Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+                    other => rusqlite::types::Value::Text(other.to_string()),
+                };
                 tx.execute(
                     &format!("UPDATE sessions SET {key}=?1 WHERE id=?2"),
-                    params![options[key].to_string(), sid],
+                    params![param, sid],
                 )?;
             }
         }
@@ -1155,6 +1180,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1232,6 +1258,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if map.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1290,6 +1317,7 @@ impl SessionStore {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if fields.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err(HarnessError::invalid("Unknown follow-up option."));
@@ -1554,6 +1582,12 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
     for key in ["project_context", "agents_enabled"] {
         let value = result.get(key).and_then(Value::as_i64).unwrap_or(0) != 0;
         result.insert(key.into(), value.into());
+    }
+    if let Some(n) = result
+        .get("skillcache_thin_formatter")
+        .and_then(Value::as_i64)
+    {
+        result.insert("skillcache_thin_formatter".into(), Value::Bool(n != 0));
     }
     for key in [
         "fleet",

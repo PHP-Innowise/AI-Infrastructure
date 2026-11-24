@@ -11,6 +11,7 @@ use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 pub const REVIEW_PROFILE: &str = "pre-answer-memory-review-v1";
 pub const REVIEW_REASON: &str =
@@ -112,7 +113,16 @@ impl ReviewService {
         fs::atomic_json(path, value)
     }
     fn maintenance_image(&self, name: &str) -> Result<(String, String)> {
-        let pattern=regex::Regex::new(r"^(?:memory-bank/chunks/[^/]+|project-brain/dynamic/(?:findings|decisions)/[^/]+)\.md$").map_err(|_|RuntimeError::invalid("Invalid maintenance expression"))?;
+        static MAINTENANCE_RE: OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+            OnceLock::new();
+        let pattern = MAINTENANCE_RE
+            .get_or_init(|| {
+                regex::Regex::new(
+                    r"^(?:memory-bank/chunks/[^/]+|project-brain/dynamic/(?:findings|decisions)/[^/]+)\.md$",
+                )
+            })
+            .as_ref()
+            .map_err(|_| RuntimeError::invalid("Invalid maintenance expression"))?;
         if name.len() > 1024
             || name.contains('\\')
             || name
@@ -1420,4 +1430,38 @@ fn check_packet(packet: &Value, proposal: &Value) -> Result<()> {
         return Err(fail("semantic-review:incomplete-packet-records"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Roots;
+
+    #[test]
+    fn maintenance_image_validates_paths_with_cached_regex() {
+        let root = std::env::temp_dir().join(format!("infra-core-review-{}", uuid4()));
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/config")).unwrap();
+        std::fs::write(root.join("project-brain/config/runtime.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("memory-bank/chunks/MEM-20261123-00000001-a.md"),
+            "hello\r\n",
+        )
+        .unwrap();
+        let ctx =
+            RuntimeContext::new(Roots::installed(&root).unwrap(), "agent", "governed").unwrap();
+        let review = ReviewService::new(ctx);
+        let (text, digest) = review
+            .maintenance_image("memory-bank/chunks/MEM-20261123-00000001-a.md")
+            .unwrap();
+        assert_eq!(text, "hello\n");
+        assert_eq!(digest, result_store::sha(b"hello\n"));
+        assert!(
+            review
+                .maintenance_image("memory-bank/chunks/../x.md")
+                .is_err()
+        );
+        assert!(review.maintenance_image("docs/other.md").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -1,7 +1,21 @@
-use crate::common;
+use crate::{common, mirrors::check_receipts};
 use infra_core::{Result, RuntimeError, fs as safe};
 use serde_json::{Value, json};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{collections::BTreeMap, path::Path};
+
+#[cfg(test)]
+fn budget_measure_live_runs() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
+
+#[cfg(test)]
+fn budget_report_live_runs() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+    COUNT.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+}
 pub fn split<'a>(text: &'a str, path: &str) -> Result<(&'a str, &'a str)> {
     let first = text.find('\n').unwrap_or(text.len());
     if text[..first].trim() != "---" || first == text.len() {
@@ -101,9 +115,114 @@ fn listing(base: &Path, pattern: &str) -> Result<usize> {
     }
     Ok(count)
 }
+fn compute_edition_measure_sha(
+    base: &Path,
+    store: &mut check_receipts::TreeReceiptStore,
+    now_ns: i128,
+    dirty: &mut bool,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    let (agents_sha, _) =
+        check_receipts::hash_regular_file(&base.join("AGENTS.md"), store, now_ns, dirty)?;
+    parts.push(format!("AGENTS.md:{agents_sha}"));
+
+    let skills = base.join(".agents/skills");
+    for relative in common::walk(&skills).ok()? {
+        if relative.split('/').count() != 2 || !relative.ends_with("/SKILL.md") {
+            continue;
+        }
+        let file = common::under(&skills, &relative).ok()?;
+        let (sha, _) = check_receipts::hash_regular_file(&file, store, now_ns, dirty)?;
+        parts.push(format!("skill:{relative}:{sha}"));
+    }
+
+    for (sub, pattern) in [
+        (".claude/commands", "*.md"),
+        (".claude/agents", "*-agent.md"),
+    ] {
+        let dir = base.join(sub);
+        if !dir.is_dir() {
+            parts.push(format!("{sub}:absent"));
+            continue;
+        }
+        for relative in common::walk(&dir).ok()? {
+            if relative.contains('/') || !common::matches(pattern, &relative, true).ok()? {
+                continue;
+            }
+            let file = common::under(&dir, &relative).ok()?;
+            let (sha, _) = check_receipts::hash_regular_file(&file, store, now_ns, dirty)?;
+            parts.push(format!("{sub}:{relative}:{sha}"));
+        }
+    }
+    Some(common::sha256(parts.join("\n").as_bytes()))
+}
+
 pub fn measure(root: &Path, edition: &str) -> Result<Value> {
+    measure_with_options(root, edition, true, None).map(|(value, _)| value)
+}
+
+pub fn measure_with_options(
+    root: &Path,
+    edition: &str,
+    use_cache: bool,
+    cache_path: Option<&Path>,
+) -> Result<(Value, bool)> {
+    let effective_cache = use_cache && !check_receipts::is_cache_bypassed();
+    let receipt_path = effective_cache.then(|| {
+        cache_path.map(Path::to_path_buf).unwrap_or_else(|| {
+            check_receipts::default_receipt_path(root, "infra-tooling-receipts.json")
+        })
+    });
+    let mut store = receipt_path
+        .as_deref()
+        .map(check_receipts::load_store)
+        .unwrap_or_default();
+    let mut dirty = false;
+    let now_ns = check_receipts::now_unix_ns();
+    let (value, _hash, hit) = measure_with_store(
+        root,
+        edition,
+        effective_cache,
+        &mut store,
+        now_ns,
+        &mut dirty,
+    )?;
+    if effective_cache
+        && dirty
+        && let Some(path) = receipt_path.as_deref()
+    {
+        check_receipts::save_store(path, &store);
+    }
+    Ok((value, hit))
+}
+
+fn measure_with_store(
+    root: &Path,
+    edition: &str,
+    effective_cache: bool,
+    store: &mut check_receipts::TreeReceiptStore,
+    now_ns: i128,
+    dirty: &mut bool,
+) -> Result<(Value, Option<String>, bool)> {
     let edition = common::edition(edition)?;
     let base = root.join(edition);
+    let scope = format!("budget-measure:{edition}");
+    let measure_sha = if effective_cache {
+        compute_edition_measure_sha(&base, store, now_ns, dirty)
+    } else {
+        None
+    };
+    if effective_cache
+        && let Some(ref c_sha) = measure_sha
+        && let Some(cached) =
+            store.matches_report(&scope, c_sha, "budget-measure-v1", "budget-target")
+    {
+        return Ok((cached, Some(c_sha.clone()), true));
+    }
+
+    #[cfg(test)]
+    budget_measure_live_runs().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let policy = safe::read_regular(&base.join("AGENTS.md"))?;
     let skills = base.join(".agents/skills");
     let mut values = BTreeMap::from([
@@ -145,24 +264,63 @@ pub fn measure(root: &Path, edition: &str) -> Result<Value> {
         "agent_bytes",
         listing(&base.join(".claude/agents"), "*-agent.md")?,
     );
-    Ok(serde_json::to_value(values)?)
+    let measured = serde_json::to_value(values)?;
+    if effective_cache && let Some(ref c_sha) = measure_sha {
+        store.insert_report(
+            &scope,
+            c_sha.clone(),
+            "budget-measure-v1".into(),
+            "budget-target".into(),
+            Some(measured.clone()),
+        );
+        *dirty = true;
+    }
+    Ok((measured, measure_sha, false))
 }
 pub fn check(root: &Path, enforce: bool) -> Result<Value> {
     report(root, enforce, false)
 }
 pub fn report(root: &Path, enforce: bool, require_headroom: bool) -> Result<Value> {
-    let config = match common::read_json(&root.join("scripts/token_budget.json")) {
-        Ok(value) if value["editions"].is_object() => value,
-        Ok(_) if !enforce && !require_headroom => json!({"editions":{}}),
-        Ok(_) => return Err(RuntimeError::invalid("Context-budget editions are absent")),
-        Err(_) if !enforce && !require_headroom => json!({"editions":{}}),
-        Err(error) => return Err(error),
+    report_with_options(root, enforce, require_headroom, true, None).map(|(value, _)| value)
+}
+pub fn report_with_options(
+    root: &Path,
+    enforce: bool,
+    require_headroom: bool,
+    use_cache: bool,
+    cache_path: Option<&Path>,
+) -> Result<(Value, bool)> {
+    let effective_cache = use_cache && !check_receipts::is_cache_bypassed();
+    let receipt_path = effective_cache.then(|| {
+        cache_path.map(Path::to_path_buf).unwrap_or_else(|| {
+            check_receipts::default_receipt_path(root, "infra-tooling-receipts.json")
+        })
+    });
+    let mut store = receipt_path
+        .as_deref()
+        .map(check_receipts::load_store)
+        .unwrap_or_default();
+    let mut dirty = false;
+    let now_ns = check_receipts::now_unix_ns();
+    let budget_path = root.join("scripts/token_budget.json");
+    let rules_sha = if effective_cache {
+        (|| -> Option<String> {
+            let budget_sha = if budget_path.exists() {
+                check_receipts::hash_regular_file(&budget_path, &mut store, now_ns, &mut dirty)?.0
+            } else {
+                "absent".into()
+            };
+            Some(common::sha256(
+                format!("budget-report-v1\nenforce:{enforce}\nheadroom:{require_headroom}\nbudget:{budget_sha}")
+                    .as_bytes(),
+            ))
+        })()
+    } else {
+        None
     };
-    let ceilings = config["editions"]
-        .as_object()
-        .ok_or_else(|| RuntimeError::invalid("Context-budget editions are absent"))?;
+
     let mut measured = serde_json::Map::new();
-    let mut findings = Vec::new();
+    let mut measure_parts = Vec::new();
     for edition in common::EDITIONS {
         let label = if *edition == "Cms/wordpress" {
             "WordPress"
@@ -174,12 +332,67 @@ pub fn report(root: &Path, enforce: bool, require_headroom: bool) -> Result<Valu
                 "Budget edition is missing: {edition}"
             )));
         }
-        let actual = measure(root, edition)?;
-        let budget = ceilings.get(label).and_then(Value::as_object);
+        let (actual, ed_sha, _) = measure_with_store(
+            root,
+            edition,
+            effective_cache,
+            &mut store,
+            now_ns,
+            &mut dirty,
+        )?;
+        if let Some(sha) = ed_sha {
+            measure_parts.push(format!("{edition}:{sha}"));
+        } else {
+            measure_parts.clear();
+        }
+        measured.insert(label.to_string(), actual);
+    }
+
+    let report_tree_sha = (effective_cache && measure_parts.len() == common::EDITIONS.len())
+        .then(|| common::sha256(measure_parts.join("\n").as_bytes()));
+    let report_scope = format!("budget-report:{enforce}:{require_headroom}");
+    if effective_cache
+        && let (Some(c_sha), Some(r_sha)) = (&report_tree_sha, &rules_sha)
+        && let Some(cached) = store.matches_report(&report_scope, c_sha, r_sha, "budget-report")
+    {
+        if dirty && let Some(path) = receipt_path.as_deref() {
+            check_receipts::save_store(path, &store);
+        }
+        return Ok((cached, true));
+    }
+
+    #[cfg(test)]
+    budget_report_live_runs().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let config = match common::read_json(&budget_path) {
+        Ok(value) if value["editions"].is_object() => value,
+        Ok(_) if !enforce && !require_headroom => json!({"editions":{}}),
+        Ok(_) => return Err(RuntimeError::invalid("Context-budget editions are absent")),
+        Err(_) if !enforce && !require_headroom => json!({"editions":{}}),
+        Err(error) => return Err(error),
+    };
+    let ceilings = config["editions"]
+        .as_object()
+        .ok_or_else(|| RuntimeError::invalid("Context-budget editions are absent"))?;
+    let mut findings = Vec::new();
+    for (edition, label) in common::EDITIONS.iter().map(|e| {
+        (
+            *e,
+            if *e == "Cms/wordpress" {
+                "WordPress"
+            } else {
+                *e
+            },
+        )
+    }) {
+        let actual = &measured[label];
         if enforce {
-            let budget = budget.ok_or_else(|| {
-                RuntimeError::invalid(format!("Budget ceilings are missing: {edition}"))
-            })?;
+            let budget = ceilings
+                .get(label)
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    RuntimeError::invalid(format!("Budget ceilings are missing: {edition}"))
+                })?;
             for key in [
                 "agents_md_bytes",
                 "descriptor_bytes",
@@ -197,7 +410,6 @@ pub fn report(root: &Path, enforce: bool, require_headroom: bool) -> Result<Valu
                 }
             }
         }
-        measured.insert(label.to_string(), actual);
     }
     if enforce {
         for label in ceilings.keys() {
@@ -276,7 +488,130 @@ pub fn report(root: &Path, enforce: bool, require_headroom: bool) -> Result<Valu
             (totals.get(*key).copied().unwrap_or(0) as f64 / ratio).round_ties_even() as u64
         })
         .sum::<u64>();
-    Ok(
-        json!({"passed":findings.is_empty(),"editions":measured,"findings":findings,"enforced":enforce,"headroom":rows,"tokens":tokens,"startup_tokens":startup,"totals":totals,"total_startup_tokens":total_startup,"bytes_per_token":ratios,"ceilings":ceilings}),
-    )
+    let report = json!({"passed":findings.is_empty(),"editions":measured,"findings":findings,"enforced":enforce,"headroom":rows,"tokens":tokens,"startup_tokens":startup,"totals":totals,"total_startup_tokens":total_startup,"bytes_per_token":ratios,"ceilings":ceilings});
+    if effective_cache
+        && findings.is_empty()
+        && let (Some(c_sha), Some(r_sha)) = (report_tree_sha, rules_sha)
+    {
+        store.insert_report(
+            &report_scope,
+            c_sha,
+            r_sha,
+            "budget-report".into(),
+            Some(report.clone()),
+        );
+        dirty = true;
+    }
+    if effective_cache
+        && dirty
+        && let Some(path) = receipt_path.as_deref()
+    {
+        check_receipts::save_store(path, &store);
+    }
+    Ok((report, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_measure_and_report_share_tree_receipt_and_honor_strict_and_drifts() {
+        let dir = crate::temp::Temporary::new("infra-budget-receipt").unwrap();
+        let root = dir.path();
+        for ed in common::EDITIONS {
+            let base = root.join(ed);
+            std::fs::create_dir_all(base.join(".agents/skills/demo")).unwrap();
+            std::fs::create_dir_all(base.join(".claude/commands")).unwrap();
+            std::fs::create_dir_all(base.join(".claude/agents")).unwrap();
+            std::fs::write(base.join("AGENTS.md"), "# Policy\n").unwrap();
+            std::fs::write(
+                base.join(".agents/skills/demo/SKILL.md"),
+                "---\nname: demo\ndescription: Demo skill\n---\nBody\n",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        let mut ceilings = serde_json::Map::new();
+        for ed in common::EDITIONS {
+            let label = if *ed == "Cms/wordpress" {
+                "WordPress"
+            } else {
+                *ed
+            };
+            ceilings.insert(
+                label.into(),
+                json!({
+                    "agents_md_bytes": 1000,
+                    "descriptor_bytes": 1000,
+                    "command_bytes": 1000,
+                    "agent_bytes": 1000,
+                    "frontmatter_bytes": 1000,
+                    "body_bytes": 1000,
+                    "skills": 10,
+                }),
+            );
+        }
+        std::fs::write(
+            root.join("scripts/token_budget.json"),
+            serde_json::to_vec_pretty(&json!({"editions": ceilings})).unwrap(),
+        )
+        .unwrap();
+
+        let cache = root.join("budget-receipts.json");
+        let m_before = budget_measure_live_runs().load(std::sync::atomic::Ordering::Relaxed);
+        let r_before = budget_report_live_runs().load(std::sync::atomic::Ordering::Relaxed);
+
+        let (r1, hit1) = report_with_options(root, true, true, true, Some(&cache)).unwrap();
+        assert!(!hit1);
+        assert_eq!(r1["passed"], true);
+        assert_eq!(
+            budget_measure_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            m_before + common::EDITIONS.len()
+        );
+        assert_eq!(
+            budget_report_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            r_before + 1
+        );
+
+        let (r2, hit2) = report_with_options(root, true, true, true, Some(&cache)).unwrap();
+        assert!(hit2);
+        assert_eq!(r2, r1);
+        assert_eq!(
+            budget_measure_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            m_before + common::EDITIONS.len()
+        );
+        assert_eq!(
+            budget_report_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            r_before + 1
+        );
+
+        let (strict_r, hit3) = check_receipts::with_cache_bypass(true, || {
+            report_with_options(root, true, true, true, Some(&cache))
+        })
+        .unwrap();
+        assert!(!hit3);
+        assert_eq!(strict_r, r1);
+        assert_eq!(
+            budget_measure_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            m_before + 2 * common::EDITIONS.len()
+        );
+
+        // Editing one edition invalidates only that edition's measure & the aggregate report.
+        std::fs::write(
+            root.join("PHP Core/AGENTS.md"),
+            "# Policy with extra content\n",
+        )
+        .unwrap();
+        let (r4, hit4) = report_with_options(root, true, true, true, Some(&cache)).unwrap();
+        assert!(!hit4);
+        assert_eq!(
+            budget_measure_live_runs().load(std::sync::atomic::Ordering::Relaxed),
+            m_before + 2 * common::EDITIONS.len() + 1
+        );
+        assert_ne!(
+            r4["editions"]["PHP Core"]["agents_md_bytes"],
+            r1["editions"]["PHP Core"]["agents_md_bytes"]
+        );
+    }
 }

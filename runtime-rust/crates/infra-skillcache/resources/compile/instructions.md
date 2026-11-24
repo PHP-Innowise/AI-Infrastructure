@@ -28,9 +28,13 @@ files in this folder and return one structured answer.
 2. **Binding lifting.** Replace every value that belongs to this instance of
    the request — a path, a name, a number, a date — by a named binding. A value
    the request states before any tool runs is a `bindings` entry with
-   `"origin": "request"`. A value an instruction step works out is listed in
-   that step's `produces`. The content of a file is never a binding: bind its
-   path and let a program read it.
+   `"origin": "request"`, or for deterministic warm extraction without an LLM
+   use `"workspace_path"` (workspace-relative path matched from the request or
+   optional regex `pattern`), `"route_arg"` (command argument with optional
+   `pattern`), or `"prompt_regex"` (bounded capture regex `pattern`), plus an
+   optional typed `"default"`. A value an instruction step works out is listed
+   in that step's `produces`. The content of a file is never a binding: bind
+   its path and let a program read it.
 3. **Region fusion.** Merge each run of consecutive deterministic calls into
    one program. A program ends where judgment is needed — that part stays a
    written `instruction` step — or where the plan ends. Prefer few programs
@@ -87,6 +91,12 @@ files in this folder and return one structured answer.
 - A program in `verification` has `"read_only": true` and changes nothing.
 - `capabilities.network` is `required` only when the trace shows the kept
   calls using the network; otherwise `none`.
+- `capabilities.allow_ignored` is an optional list of safe default-ignored
+  workspace entry names (e.g., `dist`, `build`, `node_modules`, `vendor`,
+  `.venv`, `.next`) to include in workspace diffing when the trace's kept
+  programs legitimately read or produce them. Always-ignored names (`.git`,
+  `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`),
+  `.` / `..`, and paths containing `/` or `\` are forbidden.
 - An instruction's `source` points at the skill passage it comes from.
 - `mu.description` and the step texts describe parameters, never this
   instance: no observed value appears anywhere in the capsule.
@@ -105,8 +115,11 @@ files in this folder and return one structured answer.
 - On failure it exits non-zero with a short reason on standard error.
 - With `--check` it tests itself without task files and without the network,
   then prints `{"status": "complete", "result": {}}`.
-- Environment variables whose names contain `KEY`, `TOKEN` or `PASSWORD` are
-  removed before it starts. It asks no questions and waits for no input.
+- Environment variables whose names match credential, connection-string, or
+  secret-store patterns (`KEY`, `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`,
+  `PASSWD`, `AUTH`, `DATABASE_URL`, `_URI`, `DSN`, `PGPASS`, `JWT`, `BEARER`,
+  `COOKIE`, `PRIVATE_KEY`, `KUBECONFIG`, `NETRC`, `DOCKER_CONFIG`) are removed
+  before it starts. It asks no questions and waits for no input.
 - Use only the declared runtimes and their standard libraries, plus what the
   trace shows installed and used.
 

@@ -24,7 +24,7 @@ use compile::{EnqueueCompileFn, Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -34,9 +34,12 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-/// Compilations and requalifications waiting or active across projects.
+/// Interactive compilations waiting or active across projects.
 /// Different projects run concurrently under separate project locks.
 const WAITING: usize = 8;
+/// Background IR requalifications run under their own semaphore so heavy
+/// background invalidations never starve interactive compilations.
+const REQUALIFY_WAITING: usize = 8;
 
 enum Work {
     Compile(Job),
@@ -49,7 +52,8 @@ enum Work {
 
 struct WorkQueue {
     self_ref: std::sync::Weak<WorkQueue>,
-    slots: Arc<Semaphore>,
+    compile_slots: Arc<Semaphore>,
+    requalify_slots: Arc<Semaphore>,
     project_locks: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     requalifying: Arc<Mutex<BTreeSet<String>>>,
 }
@@ -58,7 +62,8 @@ impl WorkQueue {
     fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             self_ref: weak.clone(),
-            slots: Arc::new(Semaphore::new(WAITING)),
+            compile_slots: Arc::new(Semaphore::new(WAITING)),
+            requalify_slots: Arc::new(Semaphore::new(REQUALIFY_WAITING)),
             project_locks: Mutex::new(BTreeMap::new()),
             requalifying: Arc::new(Mutex::new(BTreeSet::new())),
         })
@@ -78,11 +83,22 @@ impl WorkQueue {
         if runtime.cancel.load(Ordering::Acquire) {
             return Err(HarnessError::unavailable("SkillCache is stopping."));
         }
-        let permit = self.slots.clone().try_acquire_owned().map_err(|_| {
-            HarnessError::conflict(
-                "The SkillCache queue is full; try again when a compilation has finished.",
-            )
-        })?;
+        let permit = match &work {
+            Work::Compile(_) => self.compile_slots.clone().try_acquire_owned().map_err(|_| {
+                HarnessError::conflict(
+                    "The SkillCache compilation queue is full; try again when a compilation has finished.",
+                )
+            })?,
+            Work::Requalify { .. } => self
+                .requalify_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    HarnessError::conflict(
+                        "The SkillCache requalification queue is full; try again when a requalification has finished.",
+                    )
+                })?,
+        };
         let project_id = match &work {
             Work::Compile(job) => job.project_id.clone(),
             Work::Requalify { project_id, .. } => project_id.clone(),
@@ -251,42 +267,76 @@ fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
         .collect()
 }
 
+fn infer_state_dir(capsule: &Value) -> Option<PathBuf> {
+    let artifact_dir = capsule["artifact_dir"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)?;
+    for anc in artifact_dir.ancestors() {
+        if anc.file_name().and_then(|n| n.to_str()) == Some("skillcache")
+            && let Some(parent) = anc.parent()
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    artifact_dir
+        .ancestors()
+        .nth(4)
+        .filter(|p| p.join("harness.db").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn manifest_has_hashed_path(manifest: &db::ArtifactDependencyManifest, rel_norm: &str) -> bool {
+    manifest.path_hashes.contains_key(".")
+        || manifest.path_hashes.contains_key(rel_norm)
+        || manifest
+            .path_hashes
+            .keys()
+            .any(|k| db::normalize_rel_path(k) == rel_norm)
+}
+
 /// Why an active capsule may no longer be used in `workspace`, if it may not:
 /// its skill, its environment, its rules or its package is not what it was
 /// qualified with.
 pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
+    staleness_in_state(None, capsule, workspace)
+}
+
+/// State-aware variant of [`staleness`] that also checks [`crate::graph_ir::GraphIrStore`]
+/// in `state` when evaluating `ArtifactDependencyManifest` `ir_revision` and `caller_files`.
+pub(crate) fn staleness_in_state(
+    state: Option<&Path>,
+    capsule: &Value,
+    workspace: &Path,
+) -> Option<String> {
+    staleness_for_warm_candidate_in_project(state, None, capsule, workspace, None)
+}
+
+/// Caller-project-aware variant of [`staleness_in_state`] for sibling worktree lookup.
+pub(crate) fn staleness_in_project(
+    state: Option<&Path>,
+    caller_project_id: Option<&str>,
+    capsule: &Value,
+    workspace: &Path,
+) -> Option<String> {
+    staleness_for_warm_candidate_in_project(state, caller_project_id, capsule, workspace, None)
+}
+
+/// Evaluates capsule staleness in `workspace` for `caller_project_id`, optionally
+/// resolving a matched tool-mirror `SKILL.md` path (`.claude`/`.agents`/`.cursor`)
+/// when the capsule's original mirror path is absent in a sibling worktree.
+pub(crate) fn staleness_for_warm_candidate_in_project(
+    state: Option<&Path>,
+    caller_project_id: Option<&str>,
+    capsule: &Value,
+    workspace: &Path,
+    matched_skill_path: Option<&str>,
+) -> Option<String> {
     if capsule["schema_version"].as_u64() != Some(infra_skillcache::SCHEMA_VERSION) {
         return Some("The capsule was written in another schema version.".into());
     }
     if capsule["compile_rules_version"].as_str() != Some(compile_rules::version().as_str()) {
         return Some("The compiler's rules changed since this capsule was compiled.".into());
-    }
-    if capsule["kind"] == "tool_chain" {
-        let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
-        if !manifest.path_hashes.is_empty() {
-            if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
-                return Some(
-                    "Watched workspace files changed since this tool-chain capsule was compiled."
-                        .into(),
-                );
-            }
-        } else if let Some(expected_tree) = capsule["tool_chain_tree_sha"]
-            .as_str()
-            .filter(|sha| !sha.is_empty())
-        {
-            match trace::workspace_tree_sha(workspace) {
-                Ok(now_tree) if now_tree == expected_tree => {}
-                Ok(_) => {
-                    return Some(
-                        "The workspace tree changed since this tool-chain capsule was compiled."
-                            .into(),
-                    );
-                }
-                Err(_) => {
-                    return Some("The workspace tree could not be fingerprinted.".into());
-                }
-            }
-        }
     }
     for skill in capsule["skill_files"]["skills"]
         .as_array()
@@ -294,10 +344,21 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
         .flatten()
     {
         let name = skill["name"].as_str().unwrap_or("");
-        let Some(folder) = skill["path"]
-            .as_str()
-            .and_then(|path| trace::skill_file(workspace, path))
-            .and_then(|file| file.parent().map(Path::to_path_buf))
+        let resolved_file = skill["path"].as_str().and_then(|path| {
+            trace::skill_file(workspace, path)
+                .filter(|p| p.is_file())
+                .or_else(|| {
+                    matched_skill_path.and_then(|mp| {
+                        let a = db::canonical_mirror_skill(path)?;
+                        let b = db::canonical_mirror_skill(mp)?;
+                        (a == b)
+                            .then(|| trace::skill_file(workspace, mp).filter(|p| p.is_file()))
+                            .flatten()
+                    })
+                })
+                .or_else(|| trace::skill_file(workspace, path))
+        });
+        let Some(folder) = resolved_file.and_then(|file| file.parent().map(Path::to_path_buf))
         else {
             return Some(format!("The skill `{name}` cannot be located."));
         };
@@ -330,6 +391,129 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
             Err(_) => return Some(format!("The skill `{name}` is not readable.")),
         }
     }
+    let kind = capsule["kind"].as_str().unwrap_or("skill");
+    let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+    if !manifest.path_hashes.is_empty() {
+        if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
+            return Some(if kind == "tool_chain" {
+                "Watched workspace files changed since this tool-chain capsule was compiled.".into()
+            } else {
+                "Watched workspace files changed since this capsule was compiled.".into()
+            });
+        }
+    } else if kind == "tool_chain"
+        && let Some(expected_tree) = capsule["tool_chain_tree_sha"]
+            .as_str()
+            .filter(|sha| !sha.is_empty())
+    {
+        match trace::workspace_tree_sha(workspace) {
+            Ok(now_tree) if now_tree == expected_tree => {}
+            Ok(_) => {
+                return Some(
+                    "The workspace tree changed since this tool-chain capsule was compiled.".into(),
+                );
+            }
+            Err(_) => {
+                return Some("The workspace tree could not be fingerprinted.".into());
+            }
+        }
+    }
+    let is_skill_path = |rel: &str| -> bool {
+        manifest
+            .skill_paths
+            .iter()
+            .any(|skill| db::path_matches(skill, rel))
+    };
+    if !manifest.path_hashes.contains_key(".") {
+        for rel in manifest
+            .manifest_files
+            .iter()
+            .chain(manifest.caller_files.iter())
+        {
+            let rel_norm = db::normalize_rel_path(rel);
+            if rel_norm.is_empty() || is_skill_path(&rel_norm) {
+                continue;
+            }
+            if !manifest_has_hashed_path(&manifest, &rel_norm)
+                && !workspace.join(&rel_norm).exists()
+            {
+                return Some(format!(
+                    "Watched dependency `{rel_norm}` is missing from workspace."
+                ));
+            }
+        }
+    }
+    let capsule_project_id = capsule["project_id"].as_str().unwrap_or("");
+    let project_id = caller_project_id
+        .filter(|pid| !pid.is_empty())
+        .unwrap_or(capsule_project_id);
+    let cross_project = !capsule_project_id.is_empty() && project_id != capsule_project_id;
+    if !project_id.is_empty() {
+        let resolved_state = state
+            .map(Path::to_path_buf)
+            .or_else(|| infer_state_dir(capsule));
+        let latest_ir = resolved_state
+            .as_deref()
+            .map(|s| latest_ir_revision(s, project_id))
+            .unwrap_or_else(|| cached_ir_revision(project_id));
+        if (cross_project && latest_ir > 0) || latest_ir > manifest.ir_revision {
+            let has_unhashed_structural_dep = manifest
+                .manifest_files
+                .iter()
+                .chain(manifest.caller_files.iter())
+                .chain(manifest.ast_selectors.iter())
+                .chain(manifest.route_selectors.iter())
+                .chain(manifest.table_selectors.iter())
+                .map(|p| db::normalize_rel_path(p))
+                .filter(|rel| !rel.is_empty() && !is_skill_path(rel))
+                .any(|rel| {
+                    !manifest_has_hashed_path(&manifest, &rel) && !workspace.join(&rel).is_dir()
+                });
+            if has_unhashed_structural_dep {
+                return Some(
+                    "Project IR revision advanced and watched dependencies lack matching path hashes."
+                        .into(),
+                );
+            }
+            if let Some(ref state_dir) = resolved_state
+                && let Ok(Some(ir)) =
+                    crate::graph_ir::GraphIrStore::open_readonly_cached(state_dir, project_id)
+            {
+                let mut targets = Vec::new();
+                for rel in manifest
+                    .caller_files
+                    .iter()
+                    .chain(manifest.ast_selectors.iter())
+                    .chain(manifest.route_selectors.iter())
+                    .chain(manifest.table_selectors.iter())
+                {
+                    let rel_norm = db::normalize_rel_path(rel);
+                    if !rel_norm.is_empty() && !targets.contains(&rel_norm) {
+                        targets.push(rel_norm);
+                    }
+                }
+                if !targets.is_empty()
+                    && let Ok(now_callers) = ir.incoming_caller_files_for_paths(&targets)
+                {
+                    for caller in now_callers {
+                        let caller_norm = db::normalize_rel_path(&caller);
+                        if caller_norm.is_empty() || is_skill_path(&caller_norm) {
+                            continue;
+                        }
+                        if !manifest
+                            .caller_files
+                            .iter()
+                            .any(|known| db::path_matches(known, &caller_norm))
+                        {
+                            return Some(format!(
+                                "New IR caller `{caller_norm}` depends on watched target files since compilation."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
     let runtimes = capsule["capabilities"]["runtimes"]
         .as_array()
         .into_iter()
@@ -351,15 +535,18 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
 
 #[derive(Clone)]
 struct CachedPackageMeta {
-    stats: Vec<(String, u64, u128)>,
+    stats: Vec<(String, u64, u128, u64)>,
     digest: String,
     read_only: bool,
+    last_used_tick: u64,
 }
 
 #[derive(Default)]
 struct PackageMetaCache {
     entries: HashMap<PathBuf, CachedPackageMeta>,
-    order: VecDeque<PathBuf>,
+    tick: u64,
+    #[cfg(test)]
+    disk_loads: HashMap<PathBuf, usize>,
 }
 
 const MAX_PACKAGE_META_CACHE: usize = 256;
@@ -369,12 +556,25 @@ fn package_meta_cache() -> &'static Mutex<PackageMetaCache> {
     CACHE.get_or_init(|| Mutex::new(PackageMetaCache::default()))
 }
 
+fn metadata_inode(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
 fn stat_package_tree(
     root: &Path,
     dir: &Path,
     depth: usize,
     now_ns: u128,
-    stats: &mut Vec<(String, u64, u128)>,
+    stats: &mut Vec<(String, u64, u128, u64)>,
     racy_safe: &mut bool,
 ) -> bool {
     if depth > 8 {
@@ -408,12 +608,43 @@ fn stat_package_tree(
             if mtime_ns == 0 || now_ns.saturating_sub(mtime_ns) < db::RACY_NS {
                 *racy_safe = false;
             }
-            stats.push((rel_str, meta.len(), mtime_ns));
+            stats.push((rel_str, meta.len(), mtime_ns, metadata_inode(&meta)));
         } else {
             return false;
         }
     }
     true
+}
+
+fn insert_package_meta_cache(
+    canonical_warm: PathBuf,
+    stats: Vec<(String, u64, u128, u64)>,
+    digest: String,
+    read_only: bool,
+) {
+    if let Ok(mut guard) = package_meta_cache().lock() {
+        if !guard.entries.contains_key(&canonical_warm)
+            && guard.entries.len() >= MAX_PACKAGE_META_CACHE
+            && let Some(evicted) = guard
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used_tick)
+                .map(|(k, _)| k.clone())
+        {
+            guard.entries.remove(&evicted);
+        }
+        guard.tick = guard.tick.saturating_add(1);
+        let tick = guard.tick;
+        guard.entries.insert(
+            canonical_warm,
+            CachedPackageMeta {
+                stats,
+                digest,
+                read_only,
+                last_used_tick: tick,
+            },
+        );
+    }
 }
 
 fn cached_package_meta(
@@ -429,42 +660,63 @@ fn cached_package_meta(
     if stat_ok {
         stats.sort();
         if racy_safe
-            && let Ok(guard) = package_meta_cache().lock()
-            && let Some(cached) = guard.entries.get(&canonical_warm)
-            && cached.stats == stats
+            && let Ok(mut guard) = package_meta_cache().lock()
+            && guard
+                .entries
+                .get(&canonical_warm)
+                .is_some_and(|cached| cached.stats == stats)
         {
+            guard.tick = guard.tick.saturating_add(1);
+            let tick = guard.tick;
+            let cached = guard
+                .entries
+                .get_mut(&canonical_warm)
+                .expect("checked present");
+            cached.last_used_tick = tick;
             return Ok((cached.digest.clone(), cached.read_only));
         }
+    }
+    #[cfg(test)]
+    if let Ok(mut guard) = package_meta_cache().lock() {
+        *guard.disk_loads.entry(canonical_warm.clone()).or_insert(0) += 1;
     }
     let loaded = package::load(warm)?;
     let read_only = loaded.capsule.form == infra_skillcache::Form::Textual
         || loaded.capsule.programs.iter().all(|p| p.read_only);
     let digest = loaded.package_sha256;
-    if stat_ok
-        && racy_safe
-        && let Ok(mut guard) = package_meta_cache().lock()
-    {
-        if !guard.entries.contains_key(&canonical_warm) {
-            if guard.entries.len() >= MAX_PACKAGE_META_CACHE
-                && let Some(evicted) = guard.order.pop_front()
-            {
-                guard.entries.remove(&evicted);
-            }
-            guard.order.push_back(canonical_warm.clone());
-        }
-        guard.entries.insert(
-            canonical_warm,
-            CachedPackageMeta {
-                stats,
-                digest: digest.clone(),
-                read_only,
-            },
-        );
+    if stat_ok && racy_safe {
+        insert_package_meta_cache(canonical_warm, stats, digest.clone(), read_only);
     }
     Ok((digest, read_only))
 }
 
-pub(super) fn cached_package_digest(
+/// Seeds `package_meta_cache` when a caller has already loaded and verified `warm`
+/// and every file in `warm` has settled past `RACY_NS`.
+pub(crate) fn cache_package_meta_if_settled(warm: &Path, digest: &str, read_only: bool) {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    let now_ns = db::current_unix_ns();
+    let mut stats = Vec::new();
+    let mut racy_safe = true;
+    let stat_ok = std::fs::symlink_metadata(warm)
+        .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+        && stat_package_tree(warm, warm, 0, now_ns, &mut stats, &mut racy_safe);
+    if stat_ok && racy_safe {
+        stats.sort();
+        insert_package_meta_cache(canonical_warm, stats, digest.to_owned(), read_only);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn package_meta_disk_loads(warm: &Path) -> usize {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    package_meta_cache()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.disk_loads.get(&canonical_warm).copied())
+        .unwrap_or(0)
+}
+
+pub(crate) fn cached_package_digest(
     warm: &Path,
 ) -> std::result::Result<String, infra_core::RuntimeError> {
     cached_package_meta(warm).map(|(digest, _)| digest)
@@ -491,18 +743,25 @@ pub(super) fn record_ir_revision(project_id: &str, ir_revision: u64) {
     }
 }
 
-pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
-    if let Ok(guard) = ir_revisions().lock()
-        && let Some(&rev) = guard.get(project_id)
-        && rev > 0
-    {
-        return rev;
+pub(super) fn cached_ir_revision(project_id: &str) -> u64 {
+    if project_id.is_empty() {
+        return 0;
     }
-    crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
+    ir_revisions()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(project_id).copied())
+        .unwrap_or(0)
+}
+
+pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
+    let cached = cached_ir_revision(project_id);
+    let db_epoch = crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
         .ok()
         .flatten()
         .map(|ir| ir.current_write_epoch())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    cached.max(db_epoch)
 }
 
 #[derive(Clone)]
@@ -538,10 +797,7 @@ fn drain_pending_requalifies(runtime: &Arc<Runtime>, wq: &Arc<WorkQueue>) {
     let Ok(db) = runtime.store.connection() else {
         return;
     };
-    let Ok(rows) = db::list_pending_requalify(&db, WAITING as i64) else {
-        return;
-    };
-    let Ok(pending_compiles) = db::pending_compiles(&db) else {
+    let Ok(rows) = db::list_pending_requalify(&db, REQUALIFY_WAITING as i64) else {
         return;
     };
     for row in rows {
@@ -561,7 +817,7 @@ fn drain_pending_requalifies(runtime: &Arc<Runtime>, wq: &Arc<WorkQueue>) {
             if pending.contains(&row.capsule_id) {
                 continue;
             }
-            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+            if pending.len() >= REQUALIFY_WAITING {
                 break;
             }
             pending.insert(row.capsule_id.clone());
@@ -609,6 +865,98 @@ fn trigger_background_requalify(db: &rusqlite::Connection) {
     drain_pending_requalifies(&rt, &wq);
 }
 
+fn unpinned_trace_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(db::TRACE_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Enforces `db::CAPSULES_PER_PROJECT` LRU eviction on `project_id` and collects
+/// unpinned traces and snapshot directories on disk under the DB connection lock.
+pub(crate) fn gc_project_and_snapshots(store: &SessionStore, project_id: &str) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    let _ = db::enforce_project_capsule_cap(&db, project_id, db::CAPSULES_PER_PROJECT);
+    let _ = db::prune_unpinned_traces(&db, &unpinned_trace_cutoff());
+    if let Ok(kept) = db::trace_generations(&db) {
+        snapshot::collect(&store.state, &kept);
+    }
+}
+
+/// Sweeps orphaned capsule/qualification directories and unpinned traces/snapshots
+/// while holding the DB connection lock so concurrent `begin_capsule` / `save_trace` cannot race.
+pub(crate) fn collect_storage(store: &SessionStore) {
+    let Ok(db) = store.connection() else {
+        return;
+    };
+    let _ = db::prune_unpinned_traces(&db, &unpinned_trace_cutoff());
+    let known_capsules: Option<BTreeSet<String>> = db
+        .prepare("SELECT capsule_id FROM skillcache_capsules")
+        .ok()
+        .and_then(|mut q| {
+            q.query_map([], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.flatten().collect())
+        });
+    let kept = db::trace_generations(&db).ok();
+    if let Some(known) = known_capsules {
+        let capsules_root = store.state.join("skillcache/capsules");
+        for proj_entry in std::fs::read_dir(&capsules_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let proj_path = proj_entry.path();
+            if std::fs::symlink_metadata(&proj_path)
+                .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+            {
+                for cap_entry in std::fs::read_dir(&proj_path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let cap_path = cap_entry.path();
+                    if let Some(name) = cap_entry.file_name().to_str()
+                        && !name.starts_with('.')
+                        && !known.contains(name)
+                        && std::fs::symlink_metadata(&cap_path)
+                            .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+                    {
+                        package::release(&cap_path);
+                        let _ = std::fs::remove_dir_all(&cap_path);
+                    }
+                }
+                if std::fs::read_dir(&proj_path)
+                    .ok()
+                    .is_some_and(|mut d| d.next().is_none())
+                {
+                    let _ = std::fs::remove_dir(&proj_path);
+                }
+            }
+        }
+        let qual_root = store.state.join("skillcache/qualification");
+        for cap_entry in std::fs::read_dir(&qual_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let cap_path = cap_entry.path();
+            if let Some(name) = cap_entry.file_name().to_str()
+                && !name.starts_with('.')
+                && !known.contains(name)
+                && std::fs::symlink_metadata(&cap_path)
+                    .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+            {
+                package::release(&cap_path);
+                let _ = std::fs::remove_dir_all(&cap_path);
+            }
+        }
+    }
+    if let Some(kept) = kept {
+        snapshot::collect(&store.state, &kept);
+    }
+}
+
 impl SkillCacheDomain {
     pub fn new(
         store: SessionStore,
@@ -633,6 +981,7 @@ impl SkillCacheDomain {
             work,
             requalifying,
         };
+        collect_storage(&domain.runtime.store);
         register_requalify_hook(&domain.runtime, &domain.work);
         drain_pending_requalifies(&domain.runtime, &domain.work);
         domain
@@ -667,7 +1016,9 @@ impl SkillCacheDomain {
         let Ok(workspace) = project_path(&self.runtime.store, &capsule) else {
             return Ok(capsule);
         };
-        let Some(reason) = staleness(&capsule, &workspace) else {
+        let Some(reason) =
+            staleness_in_state(Some(&self.runtime.store.state), &capsule, &workspace)
+        else {
             return Ok(capsule);
         };
         let id = capsule["capsule_id"].as_str().unwrap_or("").to_string();
@@ -761,15 +1112,105 @@ impl SkillCacheDomain {
             })
             .into();
         detail["gates"] = db::gates(&db, capsule_id)?.into();
-        // What the Harness knows of the capsule's cost: what compiling it cost
-        // and how its warm turns went. What a reuse saves is not known here;
-        // a sealed evaluation measures it, and until then it is not a zero.
+        let compile_usd = compilation
+            .as_ref()
+            .and_then(|compile| compile["usage"]["cost_usd"].as_f64());
+        let source_gen = capsule["source_generation"].as_str().unwrap_or("");
+        let cold_usd: Option<f64> = if !source_gen.is_empty() {
+            let trace_cost =
+                db::trace(&db, source_gen)?.and_then(|t| t["usage"]["cost_usd"].as_f64());
+            if trace_cost.is_some() {
+                trace_cost
+            } else {
+                match db.query_row(
+                    "SELECT CAST(json_extract(usage, '$.cost_usd') AS REAL) FROM launches WHERE id=?1",
+                    [source_gen],
+                    |row| row.get::<_, Option<f64>>(0),
+                ) {
+                    Ok(cost) => cost,
+                    Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                        if msg.contains("no such table") =>
+                    {
+                        None
+                    }
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        } else {
+            None
+        };
+        let mut direct_dispatch_hits = 0i64;
+        let mut warm_costs = Vec::new();
+        let joined_sql = "SELECT r.outcome,
+                    CAST(json_extract(l.usage, '$.cost_usd') AS REAL),
+                    json_extract(l.settings, '$.skillcache.direct_dispatch')
+             FROM skillcache_runs r
+             LEFT JOIN launches l ON l.id = r.generation
+             WHERE r.capsule_id=?1
+               AND r.rowid>COALESCE((SELECT runs_reset_rowid FROM skillcache_capsules WHERE capsule_id=?1),0)";
+        match db.prepare(joined_sql) {
+            Ok(mut run_stmt) => {
+                let joined_runs = run_stmt.query_map([capsule_id], |row| {
+                    let outcome: String = row.get(0)?;
+                    let cost: Option<f64> = row.get(1)?;
+                    let is_direct_raw: Option<rusqlite::types::Value> = row.get(2)?;
+                    let is_direct = matches!(
+                        is_direct_raw,
+                        Some(rusqlite::types::Value::Integer(n)) if n != 0
+                    );
+                    Ok((outcome, cost, is_direct))
+                })?;
+                for item in joined_runs {
+                    let (outcome, cost, is_direct) = item?;
+                    if is_direct && outcome == "complete" {
+                        direct_dispatch_hits += 1;
+                    }
+                    if outcome == "complete"
+                        && let Some(c) = cost.or_else(|| is_direct.then_some(0.0))
+                    {
+                        warm_costs.push(c);
+                    }
+                }
+            }
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {}
+            Err(err) => return Err(err.into()),
+        }
+        let warm_avg_usd = if warm_costs.is_empty() {
+            None
+        } else {
+            let avg = warm_costs.iter().sum::<f64>() / warm_costs.len() as f64;
+            Some((avg * 1_000_000.0).round() / 1_000_000.0)
+        };
+        let saving_per_reuse_usd = match (cold_usd, warm_avg_usd) {
+            (Some(cold), Some(warm_avg)) => {
+                Some(((cold - warm_avg) * 1_000_000.0).round() / 1_000_000.0)
+            }
+            _ => None,
+        };
+        let breakeven_reuses = match (compile_usd, saving_per_reuse_usd) {
+            (Some(compile_cost), Some(_)) if compile_cost <= 0.0 => Some(0u64),
+            (Some(compile_cost), Some(saving)) if saving > 0.0 => {
+                let ratio = compile_cost / saving;
+                let adjusted = if (ratio - ratio.floor()).abs() < 1e-9 {
+                    ratio.floor()
+                } else {
+                    (ratio - 1e-9).ceil()
+                };
+                Some(adjusted.max(1.0) as u64)
+            }
+            _ => None,
+        };
         detail["amortization"] = json!({
-            "compile_usd": compilation.as_ref().and_then(|compile| compile["usage"]["cost_usd"].as_f64()),
+            "compile_usd": compile_usd,
+            "cold_usd": cold_usd,
+            "warm_avg_usd": warm_avg_usd,
             "warm_turns": runs,
             "warm_turns_total": total_runs,
-            "saving_per_reuse_usd": null,
-            "breakeven_reuses": null,
+            "direct_dispatch_hits": direct_dispatch_hits,
+            "deopt_count": deopts,
+            "saving_per_reuse_usd": saving_per_reuse_usd,
+            "breakeven_reuses": breakeven_reuses,
         });
         detail["compile"] = compilation.unwrap_or(Value::Null);
         detail["runs"] = json!({
@@ -839,6 +1280,7 @@ impl SkillCacheDomain {
             "retired",
             Some(reason),
         )?;
+        collect_storage(&self.runtime.store);
         self.runtime.publish(
             project_id,
             "retired",
@@ -857,8 +1299,6 @@ impl SkillCacheDomain {
         }
         let prior_status = capsule["status"].as_str().unwrap_or("active").to_owned();
         {
-            let db = self.runtime.store.connection()?;
-            let pending_compiles = db::pending_compiles(&db)?;
             let mut pending = self.requalifying.lock().map_err(|_| {
                 HarnessError::unavailable("SkillCache requalify state lock failed.")
             })?;
@@ -867,9 +1307,9 @@ impl SkillCacheDomain {
                     "This capsule is already being requalified.",
                 ));
             }
-            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+            if pending.len() >= REQUALIFY_WAITING {
                 return Err(HarnessError::conflict(
-                    "The SkillCache queue is full; try again when a compilation has finished.",
+                    "The SkillCache requalification queue is full; try again when a requalification has finished.",
                 ));
             }
             pending.insert(capsule_id.into());
@@ -916,7 +1356,8 @@ impl SkillCacheDomain {
         db::delete_capsule(&db, capsule_id)?;
         // The trace goes with the last capsule that was compiled from it.
         let shared: i64 = db.query_row(
-            "SELECT COUNT(*) FROM skillcache_capsules WHERE source_generation=?1",
+            "SELECT COUNT(*) FROM skillcache_capsules
+             WHERE source_generation=?1 AND status NOT IN ('failed','retired')",
             [&generation],
             |row| row.get(0),
         )?;
@@ -1020,6 +1461,55 @@ impl SkillCacheDomain {
             "retention": {"days": db::TRACE_DAYS, "per_session": db::TRACES_PER_SESSION},
         }))
     }
+    fn recompile(&self, project_id: &str, capsule_id: &str, body: &Value) -> Result<Value> {
+        if !body.is_null() && !crate::store::exact(body, &[], &["compiler"]) {
+            return Err(HarnessError::invalid(
+                "Recompile accepts an optional {\"compiler\": {\"provider\": \"claude\"|\"codex\", \"model\": ...}} body.",
+            ));
+        }
+        let compiler_override = (!body["compiler"].is_null())
+            .then(|| settings::validate_compiler(Some(&body["compiler"])))
+            .transpose()?;
+        let capsule = self.owned(project_id, capsule_id)?;
+        match enqueue_recompile_for_capsule_with(
+            &self.runtime,
+            &capsule,
+            compiler_override.as_ref(),
+        ) {
+            Ok(queued) => Ok(queued),
+            Err(error)
+                if error.status == 409
+                    && error.code == "conflict"
+                    && capsule_needs_fresh_trace(&capsule) =>
+            {
+                let reason = if capsule["needs_trace"] == true {
+                    "needs_trace"
+                } else {
+                    "template_needs_trace"
+                };
+                let skill_label = capsule["skill_name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("this skill");
+                Ok(json!({
+                    "status": 409,
+                    "code": "needs_trace",
+                    "needs_trace": true,
+                    "capsule_id": capsule_id,
+                    "project_id": project_id,
+                    "skill_name": capsule["skill_name"],
+                    "skill_path": capsule["skill_path"],
+                    "kind": capsule["kind"],
+                    "reason": reason,
+                    "error": error.message,
+                    "guidance": format!(
+                        "Run a cold observed turn using `{skill_label}` in this project to capture a fresh trace, then recompile."
+                    ),
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn project_path(store: &SessionStore, capsule: &Value) -> Result<PathBuf> {
@@ -1080,10 +1570,11 @@ impl Domain for SkillCacheDomain {
                 "skillcache.requalify" => {
                     self.requalify(parameter("project_id")?, parameter("capsule_id")?)?
                 }
-                "skillcache.recompile" => {
-                    let capsule = self.owned(parameter("project_id")?, parameter("capsule_id")?)?;
-                    enqueue_recompile_for_capsule(&self.runtime, &capsule)?
-                }
+                "skillcache.recompile" => self.recompile(
+                    parameter("project_id")?,
+                    parameter("capsule_id")?,
+                    &request["body"],
+                )?,
                 "skillcache.invalidate" => {
                     self.invalidate(parameter("project_id")?, parameter("capsule_id")?)?
                 }
@@ -1347,11 +1838,30 @@ pub(crate) fn maybe_enqueue_after_observe(
     }
 }
 
-/// Triggers recompilation from a fresh observed trace (when `needs_trace` is set)
+fn capsule_needs_fresh_trace(capsule: &Value) -> bool {
+    capsule["needs_trace"] == true
+        || capsule["source_session_id"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || capsule["source_generation"]
+            .as_str()
+            .is_none_or(str::is_empty)
+}
+
+/// Triggers recompilation from a fresh observed trace (when `needs_trace` is set
+/// or the capsule was admitted from a template without a project trace)
 /// or from the capsule's stored source trace otherwise.
 pub(crate) fn enqueue_recompile_for_capsule(
     runtime: &Arc<Runtime>,
     capsule: &Value,
+) -> Result<Value> {
+    enqueue_recompile_for_capsule_with(runtime, capsule, None)
+}
+
+pub(crate) fn enqueue_recompile_for_capsule_with(
+    runtime: &Arc<Runtime>,
+    capsule: &Value,
+    compiler_override: Option<&Value>,
 ) -> Result<Value> {
     let enqueuer = runtime
         .enqueuer
@@ -1360,12 +1870,20 @@ pub(crate) fn enqueue_recompile_for_capsule(
     let capsule_id = capsule["capsule_id"].as_str().unwrap_or("");
     let project_id = capsule["project_id"].as_str().unwrap_or("");
     let needs_trace = capsule["needs_trace"] == true;
-    let (session_id, generation) = if needs_trace {
+    let missing_source_trace = capsule["source_session_id"]
+        .as_str()
+        .is_none_or(str::is_empty)
+        || capsule["source_generation"]
+            .as_str()
+            .is_none_or(str::is_empty);
+    let (session_id, generation) = if needs_trace || missing_source_trace {
         let db = runtime.store.connection()?;
         let fresh = db::find_fresh_trace_after(&db, project_id, capsule)?.ok_or_else(|| {
-            HarnessError::conflict(
-                "This capsule deopted during a warm turn and needs a fresh observed trace before recompiling.",
-            )
+            HarnessError::conflict(if needs_trace {
+                "This capsule deopted during a warm turn and needs a fresh observed trace before recompiling."
+            } else {
+                "This template-admitted capsule has no project trace yet and needs a fresh observed trace before recompiling."
+            })
         })?;
         let sid = fresh["session_id"]
             .as_str()
@@ -1405,10 +1923,14 @@ pub(crate) fn enqueue_recompile_for_capsule(
     } else {
         None
     };
-    let queued =
-        enqueue_compile_for_trace(runtime, &session, &generation, None, eval_arm, &|job| {
-            enqueuer(runtime, job)
-        })?;
+    let queued = enqueue_compile_for_trace(
+        runtime,
+        &session,
+        &generation,
+        compiler_override,
+        eval_arm,
+        &|job| enqueuer(runtime, job),
+    )?;
     if needs_trace
         && !capsule_id.is_empty()
         && let Ok(db) = runtime.store.connection()
@@ -1506,16 +2028,15 @@ fn enqueue_compile_for_trace(
                 "This turn is already being compiled.",
             ));
         }
-        let pending_requalifies = runtime
-            .requalifying
-            .as_ref()
-            .and_then(|set| set.lock().ok())
-            .map_or(0i64, |set| set.len() as i64);
-        if db::pending_compiles(&db)? + pending_requalifies >= WAITING as i64 {
+        if db::pending_compiles(&db)? >= WAITING as i64 {
             return Err(HarnessError::conflict(
-                "The SkillCache queue is full; try again when a compilation has finished.",
+                "The SkillCache compilation queue is full; try again when a compilation has finished.",
             ));
         }
+        let compiler_provider = chosen["compiler"]["provider"]
+            .as_str()
+            .unwrap_or("claude")
+            .to_owned();
         db::begin_capsule(
             &db,
             &capsule_id,
@@ -1536,7 +2057,7 @@ fn enqueue_compile_for_trace(
             &project_id,
             session_id,
             generation,
-            "claude",
+            &compiler_provider,
             chosen["compiler"]["model"].as_str(),
             eval_arm.as_deref(),
         )?;
@@ -1548,6 +2069,10 @@ fn enqueue_compile_for_trace(
         generation: generation.into(),
         project_id: project_id.clone(),
         workspace,
+        provider: chosen["compiler"]["provider"]
+            .as_str()
+            .unwrap_or("claude")
+            .to_owned(),
         model: chosen["compiler"]["model"].as_str().map(String::from),
         eval_arm: eval_arm.clone(),
     };
@@ -2148,11 +2673,11 @@ mod tests {
             }
         }
 
-        // Saturate all WAITING = 8 queue slots so background requalify cannot grab a slot now.
+        // Saturate all background REQUALIFY_WAITING queue slots so background requalify cannot grab a slot now.
         let held = wq
-            .slots
+            .requalify_slots
             .clone()
-            .try_acquire_many_owned(WAITING as u32)
+            .try_acquire_many_owned(REQUALIFY_WAITING as u32)
             .unwrap();
         {
             let db = store.connection().unwrap();
@@ -2267,5 +2792,821 @@ mod tests {
                 .contains_key(&canon_warm)
         );
         let _ = package::remove(&warm);
+    }
+
+    #[test]
+    fn staleness_enforces_dependency_manifest_for_skill_and_toolchain_without_unrelated_false_positive()
+     {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("project");
+        let state = scratch.path().join("state");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join(".claude/skills/dep-check")).unwrap();
+        std::fs::write(
+            workspace.join(".claude/skills/dep-check/SKILL.md"),
+            "# Dep Check\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("composer.json"), "{\"name\":\"app\"}\n").unwrap();
+        std::fs::write(
+            workspace.join("src/Service.php"),
+            "<?php\nclass Service { public static function run() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("src/Unrelated.php"),
+            "<?php\nclass Unrelated { public function ping() { return 1; } }\n",
+        )
+        .unwrap();
+
+        let skill_dir = workspace.join(".claude/skills/dep-check");
+        let skill_tree = fingerprint::tree_sha256(&skill_dir).unwrap();
+        let store = SessionStore::open(&state).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&state, &project_id).unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        let base_rev = ir.current_write_epoch();
+
+        let artifact_dir = compile::artifact_dir(&store, &project_id, "cap-dep-skill", 1);
+        let warm_dir = artifact_dir.join("warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "dep-check", "description": "Check service"},
+            "source": {"skills": [{"name": "dep-check", "path": ".claude/skills/dep-check/SKILL.md", "tree_sha256": skill_tree.sha256}]}
+        }))
+        .unwrap();
+        let files = infra_skillcache::package::Files::new();
+        let pkg_sha = package::write_warm(&warm_dir, &cap, Some(b"# Dep Check\n"), &files).unwrap();
+        let env_fp = fingerprint::env_fingerprint(&fingerprint::runtime_versions(&[]));
+
+        let mut path_hashes = BTreeMap::new();
+        path_hashes.insert(
+            "composer.json".to_owned(),
+            trace::hash_workspace_target(&workspace.join("composer.json")),
+        );
+        path_hashes.insert(
+            "src/Service.php".to_owned(),
+            trace::hash_workspace_target(&workspace.join("src/Service.php")),
+        );
+        let manifest = db::ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/dep-check/SKILL.md".into()],
+            manifest_files: vec!["composer.json".into()],
+            ast_selectors: vec!["src/Service.php".into()],
+            caller_files: vec!["src/Service.php".into()],
+            ir_revision: base_rev,
+            verified_ns: 1,
+            path_hashes: path_hashes.clone(),
+            ..Default::default()
+        };
+        let mut capsule_row = json!({
+            "capsule_id": "cap-dep-skill",
+            "project_id": project_id,
+            "kind": "skill",
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "compile_rules_version": infra_skillcache::compile_rules::version(),
+            "env_fingerprint": env_fp,
+            "package_sha256": pkg_sha,
+            "artifact_dir": artifact_dir,
+            "capabilities": {"network": "none", "runtimes": []},
+            "skill_files": {
+                "skills": [{
+                    "name": "dep-check",
+                    "path": ".claude/skills/dep-check/SKILL.md",
+                    "tree_sha256": skill_tree.sha256,
+                    "taken_ns": skill_tree.taken_ns.to_string(),
+                    "files": skill_tree.files.iter().map(|f| json!({
+                        "path": f.path,
+                        "size": f.size,
+                        "mtime_ns": f.mtime_ns.to_string(),
+                    })).collect::<Vec<_>>(),
+                }]
+            },
+            "dependency_manifest": serde_json::to_value(&manifest).unwrap(),
+        });
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Editing an unrelated file bumps IR epoch, but must NOT falsely mark this capsule stale.
+        std::fs::write(
+            workspace.join("src/Unrelated.php"),
+            "<?php\nclass Unrelated { public function ping() { return 2; } }\n",
+        )
+        .unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        assert!(ir.current_write_epoch() > base_rev);
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Changing a watched manifest_file marks even a `Skill` capsule stale.
+        let orig_composer = std::fs::read(workspace.join("composer.json")).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{\"name\":\"changed\"}\n").unwrap();
+        assert!(staleness_in_state(Some(&state), &capsule_row, &workspace).is_some());
+        std::fs::write(workspace.join("composer.json"), orig_composer).unwrap();
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+
+        // Adding a new caller in GraphIR referencing `Service` invalidates `caller_files`.
+        std::fs::write(
+            workspace.join("src/Controller.php"),
+            "<?php\nclass Controller { public function call() { Service::run(); } }\n",
+        )
+        .unwrap();
+        ir.sync_workspace(&workspace).unwrap();
+        let reason = staleness_in_state(Some(&state), &capsule_row, &workspace)
+            .expect("new incoming caller in IR must mark Skill capsule stale");
+        assert!(
+            reason.contains("src/Controller.php"),
+            "unexpected stale reason: {reason}"
+        );
+
+        // ToolChain with path_hashes also enforces manifest_files/caller_files directly.
+        capsule_row["kind"] = json!("tool_chain");
+        capsule_row["skill_files"] = json!({});
+        let _ = std::fs::remove_file(workspace.join("src/Controller.php"));
+        ir.sync_workspace(&workspace).unwrap();
+        assert_eq!(
+            staleness_in_state(Some(&state), &capsule_row, &workspace),
+            None
+        );
+        std::fs::remove_file(workspace.join("composer.json")).unwrap();
+        assert!(staleness_in_state(Some(&state), &capsule_row, &workspace).is_some());
+
+        let _ = package::remove(&warm_dir);
+    }
+
+    #[tokio::test]
+    async fn work_queue_isolates_compile_and_requalify_semaphores_live_amortization_and_recompile()
+    {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("proj");
+        std::fs::create_dir_all(workspace.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(workspace.join(".claude/skills/pdf/SKILL.md"), "# PDF\n").unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude", "mode": "edit", "workflow": "native", "permissions": "auto"}),
+                "check pdf",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let domain =
+            SkillCacheDomain::new(store.clone(), providers, Arc::new(AtomicBool::new(false)));
+
+        // 1. Saturating requalify_slots MUST NOT block interactive compile_slots.
+        let held_req = domain
+            .work
+            .requalify_slots
+            .clone()
+            .try_acquire_many_owned(REQUALIFY_WAITING as u32)
+            .unwrap();
+        assert_eq!(domain.work.compile_slots.available_permits(), WAITING);
+        drop(held_req);
+
+        // 2. Template-admitted capsule without project trace returns structured 409 `needs_trace`.
+        {
+            let db = store.connection().unwrap();
+            let skill = json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)});
+            db::begin_capsule(&db, "cap-tpl", "", &project_id, "", "", &skill, None).unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-tpl",
+                    mu_name: "pdf-tpl",
+                    mu_description: "Template PDF",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no-tpl",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-tpl", "template", "").unwrap();
+        }
+        let tpl_res = domain
+            .execute(
+                "skillcache.recompile",
+                json!({"params": {"project_id": project_id, "capsule_id": "cap-tpl"}, "body": {}}),
+            )
+            .await
+            .unwrap();
+        let crate::services::Payload::Json(tpl_json) = tpl_res else {
+            panic!("expected JSON payload");
+        };
+        assert_eq!(tpl_json["status"], 409);
+        assert_eq!(tpl_json["code"], "needs_trace");
+        assert_eq!(tpl_json["needs_trace"], true);
+        assert_eq!(tpl_json["skill_name"], "pdf");
+
+        // 3. Adding a fresh observed trace lets template recompile succeed with Codex compiler override!
+        let g_fresh = "gen-fresh-codex";
+        {
+            let db = store.connection().unwrap();
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: g_fresh,
+                    session_id: &sid,
+                    provider: "claude",
+                    model: None,
+                    request: "check pdf",
+                    skill_refs: &json!([{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)}]),
+                    steps: &json!([{"kind": "tool", "name": "Read"}]),
+                    usage: &json!({"cost_usd": 0.12}),
+                    redaction: &json!({"admissible": true}),
+                },
+            )
+            .unwrap();
+        }
+        let queued_res = domain
+            .execute(
+                "skillcache.recompile",
+                json!({
+                    "params": {"project_id": project_id, "capsule_id": "cap-tpl"},
+                    "body": {"compiler": {"provider": "codex", "model": "gpt-5.3-codex"}}
+                }),
+            )
+            .await
+            .unwrap();
+        let crate::services::Payload::Json(queued_json) = queued_res else {
+            panic!("expected JSON payload");
+        };
+        assert_eq!(queued_json["status"], "queued");
+        let new_compile_id = queued_json["compile_id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            let comp = db::compile(&db, &new_compile_id).unwrap().unwrap();
+            assert_eq!(comp["provider"], "codex");
+            assert_eq!(comp["model"], "gpt-5.3-codex");
+        }
+
+        // 4. Live amortization joins skillcache_runs + launches + trace + compile costs.
+        {
+            let db = store.connection().unwrap();
+            let skill = json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)});
+            db::begin_capsule(
+                &db,
+                "cap-econ",
+                "cmp-econ",
+                &project_id,
+                &sid,
+                g_fresh,
+                &skill,
+                None,
+            )
+            .unwrap();
+            db::begin_compile(
+                &db,
+                "cmp-econ",
+                "cap-econ",
+                &project_id,
+                &sid,
+                g_fresh,
+                "claude",
+                None,
+                None,
+            )
+            .unwrap();
+            db::finish_compile(
+                &db,
+                "cmp-econ",
+                "completed",
+                1,
+                "ok",
+                &json!({"cost_usd": 0.20}),
+                &json!({}),
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-econ",
+                    mu_name: "pdf-econ",
+                    mu_description: "Econ PDF",
+                    form: "hybrid",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no-econ",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS launches(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    settings TEXT,
+                    context TEXT,
+                    receipt TEXT,
+                    usage TEXT
+                );",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO launches(id,session_id,kind,status,started_at,settings,usage) VALUES(?1,?2,'native','completed','2026-01-01T00:00:00Z',?3,?4)",
+                rusqlite::params![
+                    "g-direct-1",
+                    sid,
+                    json!({"skillcache": {"decision": "hit", "direct_dispatch": true}}).to_string(),
+                    json!({"cost_usd": 0.0}).to_string()
+                ],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO launches(id,session_id,kind,status,started_at,settings,usage) VALUES(?1,?2,'native','completed','2026-01-01T00:01:00Z',?3,?4)",
+                rusqlite::params![
+                    "g-warm-2",
+                    sid,
+                    json!({"skillcache": {"decision": "hit"}}).to_string(),
+                    json!({"cost_usd": 0.04}).to_string()
+                ],
+            )
+            .unwrap();
+            db::record_run(
+                &db,
+                &db::Run {
+                    generation: "g-direct-1",
+                    session_id: &sid,
+                    capsule_id: "cap-econ",
+                    provider: "claude",
+                    model: None,
+                    outcome: "complete",
+                    steps: &json!([]),
+                    deopts: 0,
+                },
+            )
+            .unwrap();
+            db::record_run(
+                &db,
+                &db::Run {
+                    generation: "g-warm-2",
+                    session_id: &sid,
+                    capsule_id: "cap-econ",
+                    provider: "claude",
+                    model: None,
+                    outcome: "complete",
+                    steps: &json!([]),
+                    deopts: 1,
+                },
+            )
+            .unwrap();
+        }
+        let got = domain.get(&project_id, "cap-econ").unwrap();
+        let amort = &got["amortization"];
+        assert_eq!(amort["compile_usd"], 0.20);
+        assert_eq!(amort["cold_usd"], 0.12);
+        assert_eq!(amort["warm_avg_usd"], 0.02);
+        assert_eq!(amort["direct_dispatch_hits"], 1);
+        assert_eq!(amort["deopt_count"], 1);
+        assert!((amort["saving_per_reuse_usd"].as_f64().unwrap() - 0.10).abs() < 1e-9);
+        assert_eq!(amort["breakeven_reuses"], 2);
+    }
+
+    #[test]
+    fn collect_storage_sweeps_orphans_and_retire_unpins_expired_snapshots() {
+        let scratch = test_support::scratch();
+        let state = scratch.path().join("state");
+        let workspace = scratch.path().join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::open(&state).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude"}),
+                "gc",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+
+        let orphan_art = state
+            .join("skillcache/capsules")
+            .join(&project_id)
+            .join("orphan-cap/1");
+        let orphan_qual = state.join("skillcache/qualification/orphan-cap/1");
+        std::fs::create_dir_all(&orphan_art).unwrap();
+        std::fs::create_dir_all(&orphan_qual).unwrap();
+        std::fs::write(orphan_art.join("capsule.json"), b"{}").unwrap();
+
+        let snap_ret = state.join("skillcache/snapshots/gen-retire-snap");
+        std::fs::create_dir_all(&snap_ret).unwrap();
+        std::fs::write(snap_ret.join("data.bin"), b"payload").unwrap();
+
+        {
+            let db = store.connection().unwrap();
+            let old_ts = (chrono::Utc::now() - chrono::Duration::days(db::TRACE_DAYS + 2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: "gen-retire-snap",
+                    session_id: &sid,
+                    provider: "claude",
+                    model: None,
+                    request: "r",
+                    skill_refs: &json!([]),
+                    steps: &json!([]),
+                    usage: &Value::Null,
+                    redaction: &json!({}),
+                },
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_traces SET created_at=?1 WHERE generation='gen-retire-snap'",
+                [&old_ts],
+            )
+            .unwrap();
+            let skill =
+                json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0"});
+            db::begin_capsule(
+                &db,
+                "cap-to-retire",
+                "cmp-r",
+                &project_id,
+                &sid,
+                "gen-retire-snap",
+                &skill,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-to-retire",
+                    mu_name: "pdf",
+                    mu_description: "d",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/no",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+        }
+
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let domain =
+            SkillCacheDomain::new(store.clone(), providers, Arc::new(AtomicBool::new(false)));
+        assert!(
+            !orphan_art.exists(),
+            "startup sweep must remove orphaned artifact dirs"
+        );
+        assert!(
+            !orphan_qual.exists(),
+            "startup sweep must remove orphaned qualification dirs"
+        );
+        assert!(snap_ret.exists(), "active capsule keeps its snapshot alive");
+
+        domain
+            .retire(&project_id, "cap-to-retire", &json!({}))
+            .unwrap();
+        assert!(
+            !snap_ret.exists(),
+            "retiring unpins expired trace & deletes snapshot"
+        );
+    }
+
+    #[test]
+    fn inflight_snapshot_survives_concurrent_gc_and_collect_storage() {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("app.php"), "<?php echo 1;\n").unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sid = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude"}),
+                "inflight",
+                &[],
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS launches(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    settings TEXT NOT NULL,
+                    usage TEXT,
+                    context TEXT,
+                    receipt TEXT
+                )",
+                [],
+            )
+            .unwrap();
+            db.execute("UPDATE sessions SET status='running' WHERE id=?1", [&sid])
+                .unwrap();
+            db.execute(
+                "INSERT INTO launches(id,session_id,kind,status,started_at,settings) VALUES('gen-launch-active',?1,'native','running','2026-01-01T00:00:00Z','{}')",
+                [&sid],
+            )
+            .unwrap();
+        }
+
+        let inflight_guard = snapshot::pin_inflight(&store.state, "gen-inflight");
+        assert!(
+            snapshot::take_with_allowlist(&store.state, &workspace, "gen-inflight", &[])
+                .unwrap()
+                .is_some()
+        );
+        let snap_inflight = store.state.join("skillcache/snapshots/gen-inflight");
+        let snap_launch = store.state.join("skillcache/snapshots/gen-launch-active");
+        let snap_orphan = store.state.join("skillcache/snapshots/gen-orphan");
+        std::fs::create_dir_all(&snap_launch).unwrap();
+        std::fs::create_dir_all(&snap_orphan).unwrap();
+
+        let store_gc = store.clone();
+        let pid_gc = project_id.clone();
+        let gc_handle = std::thread::spawn(move || {
+            for _ in 0..8 {
+                gc_project_and_snapshots(&store_gc, &pid_gc);
+                collect_storage(&store_gc);
+            }
+        });
+
+        let ws_worker = workspace.clone();
+        let store_worker = store.clone();
+        let pid_worker = project_id.clone();
+        let sid_worker = sid.clone();
+        let worker_handle = std::thread::spawn(move || {
+            let _g = snapshot::pin_inflight(&store_worker.state, "gen-concurrent-save");
+            assert!(
+                snapshot::take_with_allowlist(
+                    &store_worker.state,
+                    &ws_worker,
+                    "gen-concurrent-save",
+                    &[],
+                )
+                .unwrap()
+                .is_some()
+            );
+            let db = store_worker.connection().unwrap();
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: "gen-concurrent-save",
+                    session_id: &sid_worker,
+                    provider: "claude",
+                    model: None,
+                    request: "r",
+                    skill_refs: &json!([]),
+                    steps: &json!([]),
+                    usage: &Value::Null,
+                    redaction: &json!({}),
+                },
+            )
+            .unwrap();
+            let art = compile::artifact_dir(&store_worker, &pid_worker, "cap-concurrent", 1);
+            std::fs::create_dir_all(art.join("warm")).unwrap();
+            db::begin_capsule(
+                &db,
+                "cap-concurrent",
+                "cmp-conc",
+                &pid_worker,
+                &sid_worker,
+                "gen-concurrent-save",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0"}),
+                None,
+            )
+            .unwrap();
+        });
+
+        gc_handle.join().unwrap();
+        worker_handle.join().unwrap();
+
+        assert!(
+            snap_inflight.exists(),
+            "pinned in-flight snapshot must survive GC/collect_storage"
+        );
+        assert!(
+            snap_launch.exists(),
+            "active running launch snapshot must survive GC/collect_storage"
+        );
+        assert!(
+            store
+                .state
+                .join("skillcache/snapshots/gen-concurrent-save")
+                .exists(),
+            "concurrently saved trace snapshot must survive GC/collect_storage"
+        );
+        assert!(
+            compile::artifact_dir(&store, &project_id, "cap-concurrent", 1)
+                .join("warm")
+                .exists(),
+            "concurrently begun capsule artifacts must survive collect_storage"
+        );
+        assert!(
+            !snap_orphan.exists(),
+            "unreferenced orphan snapshot must be swept"
+        );
+
+        drop(inflight_guard);
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "UPDATE launches SET status='completed' WHERE id='gen-launch-active'",
+                [],
+            )
+            .unwrap();
+            db.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sid])
+                .unwrap();
+        }
+        collect_storage(&store);
+        assert!(
+            !snap_inflight.exists(),
+            "dropped in-flight snapshot without trace must be collected once inactive"
+        );
+        assert!(
+            !snap_launch.exists(),
+            "completed launch snapshot without trace must be collected once inactive"
+        );
+    }
+
+    #[test]
+    fn cross_worktree_staleness_checks_caller_project_graph_ir() {
+        let scratch = test_support::scratch();
+        let wt1 = scratch.path().join("wt1");
+        let wt2 = scratch.path().join("wt2");
+        let state = scratch.path().join("state");
+        std::fs::create_dir_all(wt1.join("src")).unwrap();
+        std::fs::create_dir_all(wt1.join(".claude/skills/dep-check")).unwrap();
+        std::fs::write(wt1.join(".claude/skills/dep-check/SKILL.md"), "# Dep\n").unwrap();
+        std::fs::write(
+            wt1.join("src/Service.php"),
+            "<?php\nclass Service { public static function run() {} }\n",
+        )
+        .unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "base"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+
+        let store = SessionStore::open(&state).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let ir1 = crate::graph_ir::GraphIrStore::open(&state, &pid1).unwrap();
+        ir1.sync_workspace(&wt1).unwrap();
+        // Advance pid1's IR epoch beyond pid2's so `pid2_epoch < manifest.ir_revision` too.
+        std::fs::write(wt1.join("src/Extra1.php"), "<?php\nclass Extra1 {}\n").unwrap();
+        ir1.sync_workspace(&wt1).unwrap();
+        std::fs::write(wt1.join("src/Extra2.php"), "<?php\nclass Extra2 {}\n").unwrap();
+        ir1.sync_workspace(&wt1).unwrap();
+        let rev1 = ir1.current_write_epoch();
+
+        // In wt2 (caller worktree), add a new caller depending on Service.php.
+        std::fs::write(
+            wt2.join("src/Caller.php"),
+            "<?php\nclass Caller { public function go() { Service::run(); } }\n",
+        )
+        .unwrap();
+        let ir2 = crate::graph_ir::GraphIrStore::open(&state, &pid2).unwrap();
+        ir2.sync_workspace(&wt2).unwrap();
+        assert!(ir2.current_write_epoch() < rev1);
+
+        let skill_tree = fingerprint::tree_sha256(&wt1.join(".claude/skills/dep-check")).unwrap();
+        let art_dir = compile::artifact_dir(&store, &pid1, "cap-sib-ir", 1);
+        let warm_dir = art_dir.join("warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "dep-check", "description": "Check service"},
+            "source": {"skills": [{"name": "dep-check", "path": ".claude/skills/dep-check/SKILL.md", "tree_sha256": skill_tree.sha256}]}
+        }))
+        .unwrap();
+        let pkg_sha =
+            package::write_warm(&warm_dir, &cap, Some(b"# Dep\n"), &Default::default()).unwrap();
+        let env_fp = fingerprint::env_fingerprint(&fingerprint::runtime_versions(&[]));
+        let mut path_hashes = BTreeMap::new();
+        path_hashes.insert(
+            "src/Service.php".to_owned(),
+            trace::hash_workspace_target(&wt1.join("src/Service.php")),
+        );
+        let manifest = db::ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/dep-check/SKILL.md".into()],
+            ast_selectors: vec!["src/Service.php".into()],
+            caller_files: vec!["src/Service.php".into()],
+            ir_revision: rev1,
+            path_hashes,
+            ..Default::default()
+        };
+        let capsule_row = json!({
+            "capsule_id": "cap-sib-ir",
+            "project_id": pid1,
+            "kind": "skill",
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "compile_rules_version": infra_skillcache::compile_rules::version(),
+            "env_fingerprint": env_fp,
+            "package_sha256": pkg_sha,
+            "artifact_dir": art_dir,
+            "capabilities": {"network": "none", "runtimes": []},
+            "skill_files": {
+                "skills": [{
+                    "name": "dep-check",
+                    "path": ".claude/skills/dep-check/SKILL.md",
+                    "tree_sha256": skill_tree.sha256,
+                    "taken_ns": skill_tree.taken_ns.to_string(),
+                    "files": skill_tree.files.iter().map(|f| json!({
+                        "path": f.path,
+                        "size": f.size,
+                        "mtime_ns": f.mtime_ns.to_string(),
+                    })).collect::<Vec<_>>(),
+                }]
+            },
+            "dependency_manifest": serde_json::to_value(&manifest).unwrap(),
+        });
+        assert_eq!(
+            staleness_for_warm_candidate_in_project(
+                Some(&state),
+                Some(&pid1),
+                &capsule_row,
+                &wt1,
+                None
+            ),
+            None
+        );
+        let reason = staleness_for_warm_candidate_in_project(
+            Some(&state),
+            Some(&pid2),
+            &capsule_row,
+            &wt2,
+            None,
+        );
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|msg| msg.contains("New IR caller `src/Caller.php`")),
+            "caller worktree GraphIR must invalidate sibling capsule on new caller, got {reason:?}"
+        );
     }
 }

@@ -2032,5 +2032,55 @@ new file mode 100644
         assert!(!super::super::diff::pending_expand_still_valid_for_test(
             &k_side, gen_side
         ));
+
+        // Expand-all batch work cancels cleanly via clear_pending_diff_work on targeted scope only.
+        let gen_ea_a = super::super::diff::seed_pending_expand_all_for_test("results-diff");
+        let gen_ea_b = super::super::diff::seed_pending_expand_all_for_test("workspace-diff");
+        assert!(super::super::diff::pending_expand_all_still_valid_for_test(
+            "results-diff",
+            gen_ea_a
+        ));
+        assert!(super::super::diff::pending_expand_all_still_valid_for_test(
+            "workspace-diff",
+            gen_ea_b
+        ));
+        super::super::diff::clear_pending_diff_work(Some("results-diff"));
+        assert!(
+            !super::super::diff::pending_expand_all_still_valid_for_test("results-diff", gen_ea_a)
+        );
+        assert!(super::super::diff::pending_expand_all_still_valid_for_test(
+            "workspace-diff",
+            gen_ea_b
+        ));
+        super::super::diff::clear_pending_diff_work(None);
+
+        // Git header & diff section parser handles " b/" in path, C-escaped quotes/octal, and renames.
+        let edge_diff = concat!(
+            "diff --git a/dir with b/file.rs b/dir with b/file.rs\n",
+            "index 111..222 100644\n",
+            "--- a/dir with b/file.rs\n",
+            "+++ b/dir with b/file.rs\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git \"a/quote \\\"name\\\" \\303\\251.txt\" \"b/quote \\\"name\\\" \\303\\251.txt\"\n",
+            "index 111..222 100644\n",
+            "--- \"a/quote \\\"name\\\" \\303\\251.txt\"\n",
+            "+++ \"b/quote \\\"name\\\" \\303\\251.txt\"\n",
+            "@@ -1 +1 @@\n",
+            "-x\n",
+            "+y\n",
+            "diff --git a/sub b/old name.rs b/sub b/new name.rs\n",
+            "similarity index 100%\n",
+            "rename from sub b/old name.rs\n",
+            "rename to sub b/new name.rs\n",
+        );
+        let parsed_edges = super::super::diff::parse_diff_files(edge_diff);
+        assert_eq!(parsed_edges.len(), 3);
+        assert_eq!(parsed_edges[0].path, "dir with b/file.rs");
+        assert_eq!(parsed_edges[1].path, "quote \"name\" é.txt");
+        assert_eq!(parsed_edges[2].status, "renamed");
+        assert_eq!(parsed_edges[2].old_path, "sub b/old name.rs");
+        assert_eq!(parsed_edges[2].path, "sub b/new name.rs");
     }
 }

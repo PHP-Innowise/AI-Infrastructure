@@ -12,23 +12,34 @@
 use crate::{
     HarnessError, Result,
     commands::ResolvedCommand,
-    skillcache::{compile::Runtime, db, settings, staleness, trace},
+    skillcache::{
+        compile::Runtime, db, settings, staleness_for_warm_candidate_in_project,
+        staleness_in_project, trace,
+    },
     store::SessionStore,
 };
-use infra_host::provider::{Launch, LaunchAdapter, PreparedCommand};
+use infra_host::{
+    provider::{Launch, LaunchAdapter, PreparedCommand},
+    sandbox::Spec,
+};
 use infra_skillcache::{
     Form, Step,
     capsule::{CapsuleKind, Network},
-    env_filter, executor, package, prompt, state, trace as sc_trace,
+    compile_rules::{
+        BINDING_WORKSPACE_SCAN_LIMIT, extract_deterministic_bindings, normalize_safe_relative_path,
+    },
+    env_filter,
+    executor::is_ignored_workspace_name_with,
+    package, prompt, state, trace as sc_trace,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -71,9 +82,13 @@ pub struct Warm {
     pub bin: Option<PathBuf>,
     pub package: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
+    pub(crate) engine: Option<PathBuf>,
+    pub(crate) codex: Option<PathBuf>,
     /// True when the active verified capsule is pure deterministic read-only (`Step::Program` only)
     /// and eligible for direct in-process execution without paying the ~25k prefix LLM turn.
     pub direct_dispatch: bool,
+    /// Deterministically extracted bindings for parameterized direct dispatch.
+    pub direct_bindings: Option<serde_json::Map<String, Value>>,
     /// The last journal line already turned into a session event.
     seen: AtomicU64,
     /// The last sidecar `run-log.changes.jsonl` line already forwarded to focus tracking.
@@ -82,6 +97,26 @@ pub struct Warm {
 impl Warm {
     fn agent_only(&self) -> bool {
         self.eval_arm.as_deref() == Some("skillcache_agent")
+    }
+
+    pub(crate) fn with_engine(&self, engine: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            capsule_id: self.capsule_id.clone(),
+            form: self.form,
+            eval_arm: self.eval_arm.clone(),
+            name: self.name.clone(),
+            block: self.block.clone(),
+            environment: self.environment.clone(),
+            bin: self.bin.clone(),
+            package: self.package.clone(),
+            state_dir: self.state_dir.clone(),
+            engine: self.engine.clone().or(engine),
+            codex: self.codex.clone(),
+            direct_dispatch: self.direct_dispatch,
+            direct_bindings: self.direct_bindings.clone(),
+            seen: AtomicU64::new(self.seen.load(Ordering::Relaxed)),
+            seen_changes: AtomicU64::new(self.seen_changes.load(Ordering::Relaxed)),
+        })
     }
 
     #[cfg(test)]
@@ -96,7 +131,10 @@ impl Warm {
             bin: None,
             package: None,
             state_dir: Some(state_dir),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }
@@ -380,16 +418,12 @@ fn is_read_only_capsule(capsule_row: &Value) -> bool {
 }
 
 /// Among several active capsules of one skill, the one whose description
-/// matches the request best. Used only behind [`RETRIEVAL_BY_MU`].
-fn best_by_description(
-    store: &SessionStore,
-    project_id: &str,
-    ids: &[String],
-    request: &str,
-) -> Option<String> {
+/// matches the request best. Used only behind [`RETRIEVAL_BY_MU`] and tool-chain ranking.
+fn best_by_description(store: &SessionStore, ids: &[String], request: &str) -> Option<String> {
     let words = request
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| word.chars().count() >= 3)
+        .filter(|word| !is_mu_stopword(&word.to_ascii_lowercase()))
         .take(24)
         .map(|word| format!("\"{}\"", word.replace('"', "")))
         .collect::<Vec<_>>();
@@ -400,12 +434,12 @@ fn best_by_description(
     let mut query = db
         .prepare(
             "SELECT capsule_id FROM skillcache_capsules_fts
-             WHERE skillcache_capsules_fts MATCH ?1 AND project_id=?2
+             WHERE skillcache_capsules_fts MATCH ?1
              ORDER BY bm25(skillcache_capsules_fts)",
         )
         .ok()?;
     let ranked = query
-        .query_map(rusqlite::params![words.join(" OR "), project_id], |row| {
+        .query_map(rusqlite::params![words.join(" OR ")], |row| {
             row.get::<_, String>(0)
         })
         .ok()?
@@ -582,32 +616,120 @@ fn decide_raw_trace(
         bin: None,
         package: None,
         state_dir: None,
+        engine: None,
+        codex: None,
         direct_dispatch: false,
+        direct_bindings: None,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
     }))
 }
 
-fn message_matches_mu(message: &str, capsule: &Value, hint: Option<&str>) -> bool {
+fn is_mu_stopword(tok: &str) -> bool {
+    matches!(
+        tok,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "this"
+            | "that"
+            | "are"
+            | "was"
+            | "were"
+            | "can"
+            | "could"
+            | "would"
+            | "should"
+            | "into"
+            | "onto"
+            | "about"
+            | "please"
+            | "how"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "you"
+            | "your"
+            | "our"
+            | "out"
+            | "not"
+            | "but"
+            | "all"
+            | "any"
+            | "has"
+            | "have"
+            | "had"
+            | "did"
+            | "does"
+            | "its"
+            | "let"
+            | "use"
+            | "using"
+            | "via"
+    )
+}
+
+fn tokenize_mu(text: &str) -> BTreeSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|tok| tok.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|tok| !is_mu_stopword(tok))
+        .collect()
+}
+
+fn mu_tokens_for_capsule(capsule: &Value) -> BTreeSet<String> {
     let mu_name = capsule["mu"]["name"].as_str().unwrap_or("");
+    let desc = capsule["mu"]["description"].as_str().unwrap_or("");
+    tokenize_mu(&format!("{mu_name} {desc}"))
+}
+
+fn capsule_lexical_f1_millionths(msg_tokens: &BTreeSet<String>, capsule: &Value) -> u64 {
+    if msg_tokens.is_empty() {
+        return 0;
+    }
+    let mu_tokens = mu_tokens_for_capsule(capsule);
+    if mu_tokens.is_empty() {
+        return 0;
+    }
+    let overlap = msg_tokens
+        .iter()
+        .filter(|tok| mu_tokens.contains(*tok))
+        .count() as u64;
+    let denom = (msg_tokens.len() + mu_tokens.len()) as u64;
+    (2 * overlap * 1_000_000) / denom.max(1)
+}
+
+fn message_matches_mu(message: &str, capsule: &Value, hint: Option<&str>) -> bool {
+    let mu_name = capsule["mu"]["name"].as_str().unwrap_or("").trim();
     if let Some(hint) = hint
         && hint.eq_ignore_ascii_case(mu_name)
     {
         return true;
     }
-    let tokenize = |text: &str| -> std::collections::BTreeSet<String> {
-        text.split(|ch: char| !ch.is_ascii_alphanumeric())
-            .filter(|tok| tok.len() >= 3)
-            .map(|tok| tok.to_ascii_lowercase())
-            .collect()
-    };
-    let msg_tokens = tokenize(message);
+    if !mu_name.is_empty() && message.trim().eq_ignore_ascii_case(mu_name) {
+        return true;
+    }
+    let msg_tokens = tokenize_mu(message);
     if msg_tokens.is_empty() {
         return false;
     }
-    let desc = capsule["mu"]["description"].as_str().unwrap_or("");
-    let mu_tokens = tokenize(&format!("{mu_name} {desc}"));
-    msg_tokens.iter().any(|tok| mu_tokens.contains(tok))
+    let mu_tokens = mu_tokens_for_capsule(capsule);
+    if mu_tokens.is_empty() {
+        return false;
+    }
+    let overlap = msg_tokens
+        .iter()
+        .filter(|tok| mu_tokens.contains(*tok))
+        .count();
+    let union = msg_tokens.len() + mu_tokens.len() - overlap;
+    // Require multi-token overlap, >=60% query-token precision, and >=33.3% Jaccard similarity
+    // so broad edit requests sharing 1-2 generic tokens cannot hijack a specialized tool-chain.
+    overlap >= 2 && overlap * 5 >= msg_tokens.len() * 3 && overlap * 3 >= union
 }
 
 fn decide_toolchain_candidate(
@@ -620,24 +742,76 @@ fn decide_toolchain_candidate(
     message: &str,
 ) -> std::result::Result<(Value, String), Decision> {
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let candidates = match runtime.store.connection().and_then(|db| match arm {
-        None => db::active_toolchain_capsules_for_project(&db, project_id, None),
-        Some("written_procedure" | "skillcache_no_replay") => {
-            db::active_toolchain_capsules_for_project(&db, project_id, arm)
+    let common_dir = db::canonical_git_common_dir(workspace);
+    let candidates = match runtime.store.connection().and_then(|db| {
+        let siblings = db::sibling_worktree_projects(&db, project_id, workspace)?;
+        match arm {
+            None => db::active_toolchain_capsules_for_worktrees(
+                &db,
+                project_id,
+                &siblings,
+                common_dir.as_deref(),
+                None,
+            ),
+            Some("written_procedure" | "skillcache_no_replay") => {
+                db::active_toolchain_capsules_for_worktrees(
+                    &db,
+                    project_id,
+                    &siblings,
+                    common_dir.as_deref(),
+                    arm,
+                )
+            }
+            Some("skillcache_agent" | "skillcache_executor") => {
+                let dedicated = db::active_toolchain_capsules_for_worktrees(
+                    &db,
+                    project_id,
+                    &siblings,
+                    common_dir.as_deref(),
+                    arm,
+                )?;
+                Ok(if dedicated.is_empty() {
+                    db::active_toolchain_capsules_for_worktrees(
+                        &db,
+                        project_id,
+                        &siblings,
+                        common_dir.as_deref(),
+                        None,
+                    )?
+                } else {
+                    dedicated
+                })
+            }
+            Some(_) => Ok(Vec::new()),
         }
-        Some("skillcache_agent" | "skillcache_executor") => {
-            let dedicated = db::active_toolchain_capsules_for_project(&db, project_id, arm)?;
-            Ok(if dedicated.is_empty() {
-                db::active_toolchain_capsules_for_project(&db, project_id, None)?
-            } else {
-                dedicated
-            })
-        }
-        Some(_) => Ok(Vec::new()),
     }) {
         Ok(rows) => rows,
         Err(error) => return Err(miss("unavailable", error.to_string())),
     };
+    let has_sibling = candidates.iter().any(|c| c["project_id"] != project_id);
+    let now_tree_sha = if has_sibling {
+        trace::workspace_tree_sha(workspace).ok()
+    } else {
+        None
+    };
+    let candidates: Vec<Value> = candidates
+        .into_iter()
+        .filter(|capsule| {
+            if capsule["project_id"] == project_id {
+                return true;
+            }
+            let cap_tree = capsule["tool_chain_tree_sha"].as_str().unwrap_or("");
+            !cap_tree.is_empty()
+                && now_tree_sha.as_deref() == Some(cap_tree)
+                && staleness_in_project(
+                    Some(&runtime.store.state),
+                    Some(project_id),
+                    capsule,
+                    workspace,
+                )
+                .is_none()
+        })
+        .collect();
     let hint = settings::skill_hint(session);
     let matching: Vec<Value> = candidates
         .into_iter()
@@ -681,18 +855,286 @@ fn decide_toolchain_candidate(
     }
     let fresh: Vec<Value> = eligible
         .iter()
-        .filter(|capsule| staleness(capsule, workspace).is_none())
+        .filter(|capsule| {
+            staleness_in_project(
+                Some(&runtime.store.state),
+                Some(project_id),
+                capsule,
+                workspace,
+            )
+            .is_none()
+        })
         .cloned()
         .collect();
-    let pool = if fresh.is_empty() { &eligible } else { &fresh };
+    let base_pool = if fresh.is_empty() { &eligible } else { &fresh };
+    let local_pool: Vec<Value> = base_pool
+        .iter()
+        .filter(|capsule| capsule["project_id"] == project_id)
+        .cloned()
+        .collect();
+    let pool = if local_pool.is_empty() {
+        base_pool
+    } else {
+        &local_pool
+    };
     let chosen = match pool.len() {
         1 => pool[0].clone(),
-        _ => best_by_health_and_recency(&runtime.store, pool),
+        _ => {
+            let ids = pool
+                .iter()
+                .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
+                .collect::<Vec<_>>();
+            if let Some(best_id) = best_by_description(&runtime.store, &ids, message)
+                && let Some(found) = pool
+                    .iter()
+                    .find(|capsule| capsule["capsule_id"] == best_id.as_str())
+                    .cloned()
+            {
+                found
+            } else {
+                let msg_tokens = tokenize_mu(message);
+                let max_score = pool
+                    .iter()
+                    .map(|c| capsule_lexical_f1_millionths(&msg_tokens, c))
+                    .max()
+                    .unwrap_or(0);
+                let top_scored: Vec<Value> = pool
+                    .iter()
+                    .filter(|c| capsule_lexical_f1_millionths(&msg_tokens, c) == max_score)
+                    .cloned()
+                    .collect();
+                best_by_health_and_recency(&runtime.store, &top_scored)
+            }
+        }
     };
     Ok((chosen, String::new()))
 }
 
+fn resolve_native_slash_skill(workspace: &Path, message: &str) -> Option<(String, String)> {
+    let trimmed = message.trim();
+    let rest = trimmed.strip_prefix('/')?;
+    let raw_cmd = rest
+        .split(char::is_whitespace)
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    if raw_cmd.contains("..") || raw_cmd.contains('\\') || raw_cmd.starts_with('.') {
+        return None;
+    }
+    let skill_name = raw_cmd.rsplit(':').next().unwrap_or(raw_cmd);
+    if !skill_name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    let home = crate::run_activity::user_home().map(PathBuf::from);
+    for root in [Some(workspace), home.as_deref()].into_iter().flatten() {
+        for folder in [".claude/skills", ".agents/skills", ".cursor/skills"] {
+            let candidate = root.join(folder).join(skill_name).join("SKILL.md");
+            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.is_file())
+                && let Some(spelled) = trace::spelled_skill(workspace, &candidate)
+            {
+                return Some((skill_name.to_owned(), spelled));
+            }
+        }
+    }
+    None
+}
+
+fn extract_route_args(
+    route: &ResolvedCommand,
+    message: &str,
+    skill_name: Option<&str>,
+) -> Option<String> {
+    if let Some(args) = route
+        .requests
+        .first()
+        .and_then(|req| req.get("args"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(args.to_owned());
+    }
+    let msg = message.trim();
+    let name = route
+        .requests
+        .first()
+        .and_then(|req| req["name"].as_str())
+        .filter(|n| !n.is_empty())
+        .or_else(|| skill_name.filter(|n| !n.is_empty()));
+    if let Some(name) = name {
+        for prefix in ["/", "$"] {
+            let trigger = format!("{prefix}{name}");
+            if let Some(rest) = msg.strip_prefix(&trigger)
+                && rest.starts_with(char::is_whitespace)
+            {
+                let trimmed = rest.trim();
+                return (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Resolves deterministic capsule bindings against `message`, `route`, and
+/// bounded workspace inspection, failing closed (`None`) on any ambiguity.
+fn resolve_host_deterministic_bindings(
+    capsule: &infra_skillcache::SkillCapsule,
+    route: &ResolvedCommand,
+    message: &str,
+    workspace: &Path,
+) -> Option<serde_json::Map<String, Value>> {
+    let fallback_name = capsule.skills.first().map(|s| s.name.as_str());
+    let route_args = extract_route_args(route, message, fallback_name);
+    let allowlist = &capsule.capabilities.allow_ignored;
+    extract_deterministic_bindings(capsule, message, route_args.as_deref(), |re_opt, tokens| {
+        let ws_canon = infra_core::fs::canonicalize(workspace).map_err(|_| ())?;
+        let check_rel = |candidate: &str| -> Option<String> {
+            let norm = normalize_safe_relative_path(candidate)?;
+            let first = norm.split('/').next()?;
+            if is_ignored_workspace_name_with(first, allowlist)
+                || first == ".harness-tmp"
+                || first == "target"
+            {
+                return None;
+            }
+            let full = ws_canon.join(&norm);
+            let meta = std::fs::symlink_metadata(&full).ok()?;
+            if infra_core::fs::linked(&meta) {
+                return None;
+            }
+            let canon = infra_core::fs::canonicalize(&full).ok()?;
+            if !canon.starts_with(&ws_canon) || canon == ws_canon {
+                return None;
+            }
+            if re_opt.is_some_and(|re| !re.is_match(&norm)) {
+                return None;
+            }
+            Some(norm)
+        };
+        let mut matched = Vec::new();
+        let mut seen = BTreeSet::new();
+        for token in tokens {
+            if let Some(norm) = check_rel(token)
+                && seen.insert(norm.clone())
+            {
+                matched.push(norm);
+            }
+        }
+        if !matched.is_empty() {
+            return Ok(matched);
+        }
+        let Some(re) = re_opt else {
+            return Ok(Vec::new());
+        };
+        let mut visited = 0usize;
+        let mut stack = vec![ws_canon.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut entries = std::fs::read_dir(&dir)
+                .map_err(|_| ())?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| ())?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                visited += 1;
+                if visited > BINDING_WORKSPACE_SCAN_LIMIT {
+                    return Err(());
+                }
+                let path = entry.path();
+                let name = entry.file_name();
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                if is_ignored_workspace_name_with(name_str, allowlist)
+                    || name_str == ".harness-tmp"
+                    || (dir == ws_canon && name_str == "target")
+                {
+                    continue;
+                }
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if infra_core::fs::linked(&meta) {
+                    continue;
+                }
+                let Ok(canon) = infra_core::fs::canonicalize(&path) else {
+                    continue;
+                };
+                if !canon.starts_with(&ws_canon) {
+                    continue;
+                }
+                let Ok(rel_path) = path.strip_prefix(&ws_canon) else {
+                    continue;
+                };
+                let rel_raw = rel_path.to_string_lossy();
+                let rel_slash = if cfg!(windows) {
+                    rel_raw.replace('\\', "/")
+                } else {
+                    rel_raw.into_owned()
+                };
+                if let Some(norm) = normalize_safe_relative_path(&rel_slash) {
+                    if re.is_match(&norm) && seen.insert(norm.clone()) {
+                        matched.push(norm);
+                    }
+                    if meta.is_dir() {
+                        stack.push(path);
+                    }
+                }
+            }
+        }
+        Ok(matched)
+    })
+}
+
+fn max_log_seq(path: &Path) -> u64 {
+    state::read_log_at(path, 0)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|ev| ev["seq"].as_u64())
+        .max()
+        .unwrap_or(0)
+}
+
+fn run_state_is_paused(state_dir: &Path, package_dir: &Path) -> bool {
+    let state_file = state_dir.join("plan-state.json");
+    let Ok(Some(run_state)) = state::RunState::load(&state_file) else {
+        return false;
+    };
+    let Ok(stored) = package::load(package_dir) else {
+        return false;
+    };
+    run_state.capsule_sha256 == stored.capsule_sha256
+        && run_state.position < stored.capsule.plan_len()
+}
+
 fn decide_for(
+    runtime: &Runtime,
+    session: &Value,
+    route: &ResolvedCommand,
+    message: &str,
+    workspace: &Path,
+    generation: Option<&str>,
+) -> Decision {
+    let session_state_root = session["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|sid| runtime.store.state.join("skillcache/sessions").join(sid));
+    let decision = decide_for_inner(runtime, session, route, message, workspace, generation);
+    if generation.is_some()
+        && let Decision::Miss { reason, .. } = &decision
+        && *reason != "unavailable"
+        && let Some(root) = &session_state_root
+        && root.exists()
+    {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    decision
+}
+
+fn decide_for_inner(
     runtime: &Runtime,
     session: &Value,
     route: &ResolvedCommand,
@@ -712,12 +1154,20 @@ fn decide_for(
         crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual);
     let bypass =
         crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Bypass);
-    if route.mode == "native" {
-        return miss(
-            "native_route",
-            "a native command goes to the CLI as typed, without Harness instructions",
-        );
-    }
+    let pin = settings::capsule_pin(session);
+    let native_slash_skill = if route.mode == "native" && route.requests.is_empty() {
+        match resolve_native_slash_skill(workspace, message) {
+            Some(found) => Some(found),
+            None => {
+                return miss(
+                    "native_route",
+                    "a native command without a matching skill goes to the CLI as typed",
+                );
+            }
+        }
+    } else {
+        None
+    };
     let plan_only = session["mode"] != "edit";
     if !["claude", "codex", "cursor"].contains(&provider) {
         return miss(
@@ -731,42 +1181,38 @@ fn decide_for(
             "hybrid executor capsules run on Claude and Codex only",
         );
     }
-    if provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure")) {
-        return miss(
-            "codex_manual",
-            "Codex in Manual mode would ask before every step of the executor",
-        );
-    }
+    let codex_manual =
+        provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure"));
     if arm == Some("raw_trace") {
         return decide_raw_trace(runtime, session, route, workspace);
     }
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let pin = settings::capsule_pin(session);
     let (chosen, skill_path) = if let Some(pinned_id) = pin {
         if route.requests.len() > 1 {
             return miss("no_single_skill", "the message names more than one skill");
         }
-        let requested_skill_path = if route.requests.len() == 1 {
-            match route.requests[0]["path"]
+        let (requested_skill_path, requested_skill_name) = if let Some((name, path)) =
+            native_slash_skill.as_ref()
+        {
+            (Some(path.clone()), name.as_str())
+        } else if route.requests.len() == 1 {
+            let path = match route.requests[0]["path"]
                 .as_str()
                 .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
             {
-                Some(path) => Some(path),
+                Some(path) => path,
                 None => {
                     return miss(
                         "no_capsule",
                         "the routed skill is not a skill folder of this project or of your home",
                     );
                 }
-            }
+            };
+            let name = route.requests[0]["name"].as_str().unwrap_or("");
+            (Some(path), name)
         } else {
-            None
+            (None, "")
         };
-        let requested_skill_name = route
-            .requests
-            .first()
-            .and_then(|req| req["name"].as_str())
-            .unwrap_or("");
         let requested_tree_sha = requested_skill_path
             .as_deref()
             .and_then(|path| trace::skill_file(workspace, path))
@@ -814,7 +1260,10 @@ fn decide_for(
         }
         let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
         (row, skill_path)
-    } else if route.requests.is_empty() && settings::tool_chain_enabled(&runtime.store, session) {
+    } else if route.requests.is_empty()
+        && native_slash_skill.is_none()
+        && settings::tool_chain_enabled(&runtime.store, session)
+    {
         match decide_toolchain_candidate(
             runtime, session, provider, arm, plan_only, workspace, message,
         ) {
@@ -822,76 +1271,110 @@ fn decide_for(
             Err(missed) => return missed,
         }
     } else {
-        if route.requests.len() != 1 {
-            return miss(
-                "no_single_skill",
-                if route.requests.is_empty() {
-                    "the message names no skill"
-                } else {
-                    "the message names more than one skill"
-                },
-            );
-        }
-        let request = &route.requests[0];
-        let Some(skill_path) = request["path"]
-            .as_str()
-            .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
-        else {
-            return miss(
-                "no_capsule",
-                "the routed skill is not a skill folder of this project or of your home",
-            );
-        };
-        let skill_name = request["name"].as_str().unwrap_or("");
+        let (skill_name_owned, skill_path): (String, String) =
+            if let Some((name, path)) = native_slash_skill.clone() {
+                (name, path)
+            } else {
+                if route.requests.len() != 1 {
+                    return miss(
+                        "no_single_skill",
+                        if route.requests.is_empty() {
+                            "the message names no skill"
+                        } else {
+                            "the message names more than one skill"
+                        },
+                    );
+                }
+                let request = &route.requests[0];
+                let Some(skill_path) = request["path"]
+                    .as_str()
+                    .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
+                else {
+                    return miss(
+                        "no_capsule",
+                        "the routed skill is not a skill folder of this project or of your home",
+                    );
+                };
+                (
+                    request["name"].as_str().unwrap_or("").to_owned(),
+                    skill_path,
+                )
+            };
+        let skill_name = skill_name_owned.as_str();
         let skill_tree_sha = trace::skill_file(workspace, &skill_path)
             .and_then(|file| file.parent().map(Path::to_path_buf))
             .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
             .map(|tree| tree.sha256)
             .unwrap_or_default();
-        let mut candidates = match runtime.store.connection().and_then(|db| match arm {
-            None => db::active_capsules_for_skill_or_mirror(
-                &db,
-                project_id,
-                &skill_path,
-                skill_name,
-                &skill_tree_sha,
-                None,
-            ),
-            Some("written_procedure" | "skillcache_no_replay") => {
-                db::active_capsules_for_skill_or_mirror(
+        let common_dir = db::canonical_git_common_dir(workspace);
+        let mut candidates = match runtime.store.connection().and_then(|db| {
+            let siblings = db::sibling_worktree_projects(&db, project_id, workspace)?;
+            match arm {
+                None => db::active_capsules_for_skill_or_mirror_in_worktrees(
                     &db,
                     project_id,
+                    &siblings,
+                    common_dir.as_deref(),
                     &skill_path,
                     skill_name,
                     &skill_tree_sha,
-                    arm,
-                )
-            }
-            Some("skillcache_agent" | "skillcache_executor") => {
-                let dedicated = db::active_capsules_for_skill_or_mirror(
-                    &db,
-                    project_id,
-                    &skill_path,
-                    skill_name,
-                    &skill_tree_sha,
-                    arm,
-                )?;
-                Ok(if dedicated.is_empty() {
-                    db::active_capsules_for_skill_or_mirror(
+                    None,
+                ),
+                Some("written_procedure" | "skillcache_no_replay") => {
+                    db::active_capsules_for_skill_or_mirror_in_worktrees(
                         &db,
                         project_id,
+                        &siblings,
+                        common_dir.as_deref(),
                         &skill_path,
                         skill_name,
                         &skill_tree_sha,
-                        None,
-                    )?
-                } else {
-                    dedicated
-                })
+                        arm,
+                    )
+                }
+                Some("skillcache_agent" | "skillcache_executor") => {
+                    let dedicated = db::active_capsules_for_skill_or_mirror_in_worktrees(
+                        &db,
+                        project_id,
+                        &siblings,
+                        common_dir.as_deref(),
+                        &skill_path,
+                        skill_name,
+                        &skill_tree_sha,
+                        arm,
+                    )?;
+                    Ok(if dedicated.is_empty() {
+                        db::active_capsules_for_skill_or_mirror_in_worktrees(
+                            &db,
+                            project_id,
+                            &siblings,
+                            common_dir.as_deref(),
+                            &skill_path,
+                            skill_name,
+                            &skill_tree_sha,
+                            None,
+                        )?
+                    } else {
+                        dedicated
+                    })
+                }
+                Some(_) => Ok(Vec::new()),
             }
-            Some(_) => Ok(Vec::new()),
         }) {
-            Ok(candidates) => candidates,
+            Ok(candidates) => candidates
+                .into_iter()
+                .filter(|cap| {
+                    cap["project_id"] == project_id
+                        || staleness_for_warm_candidate_in_project(
+                            Some(&runtime.store.state),
+                            Some(project_id),
+                            cap,
+                            workspace,
+                            Some(&skill_path),
+                        )
+                        .is_none()
+                })
+                .collect::<Vec<_>>(),
             Err(error) => return miss("unavailable", error.to_string()),
         };
         if candidates.is_empty()
@@ -947,7 +1430,33 @@ fn decide_for(
         } else {
             eligible
         };
-        let chosen = match eligible.len() {
+        let fresh: Vec<Value> = eligible
+            .iter()
+            .filter(|capsule| {
+                capsule["project_id"] != project_id
+                    || staleness_for_warm_candidate_in_project(
+                        Some(&runtime.store.state),
+                        Some(project_id),
+                        capsule,
+                        workspace,
+                        (!skill_path.is_empty()).then_some(skill_path.as_str()),
+                    )
+                    .is_none()
+            })
+            .cloned()
+            .collect();
+        let base_pool = if fresh.is_empty() { &eligible } else { &fresh };
+        let local_eligible: Vec<Value> = base_pool
+            .iter()
+            .filter(|capsule| capsule["project_id"] == project_id)
+            .cloned()
+            .collect();
+        let ranked_eligible = if local_eligible.is_empty() {
+            base_pool
+        } else {
+            &local_eligible
+        };
+        let chosen = match ranked_eligible.len() {
             0 if plan_only && had_provider_eligible => {
                 return miss(
                     "plan_mode",
@@ -955,7 +1464,7 @@ fn decide_for(
                 );
             }
             0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
-            1 => eligible[0].clone(),
+            1 => ranked_eligible[0].clone(),
             _ => {
                 let by_description = runtime
                     .store
@@ -963,29 +1472,36 @@ fn decide_for(
                     .ok()
                     .flatten()
                     .is_some_and(|value| value == true);
-                let ids = eligible
+                let ids = ranked_eligible
                     .iter()
                     .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
                     .collect::<Vec<_>>();
                 let best = by_description
-                    .then(|| best_by_description(&runtime.store, project_id, &ids, message))
+                    .then(|| best_by_description(&runtime.store, &ids, message))
                     .flatten();
                 match best.and_then(|id| {
-                    eligible
+                    ranked_eligible
                         .iter()
                         .find(|capsule| capsule["capsule_id"] == id.as_str())
                         .cloned()
                 }) {
                     Some(capsule) => capsule,
-                    None => best_by_health_and_recency(&runtime.store, &eligible),
+                    None => best_by_health_and_recency(&runtime.store, ranked_eligible),
                 }
             }
         };
         (chosen, skill_path)
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
-    if let Some(reason) = staleness(&chosen, workspace) {
-        if generation.is_some() {
+    let is_local_capsule = chosen["project_id"].as_str() == Some(project_id);
+    if let Some(reason) = staleness_for_warm_candidate_in_project(
+        Some(&runtime.store.state),
+        Some(project_id),
+        &chosen,
+        workspace,
+        (!skill_path.is_empty()).then_some(skill_path.as_str()),
+    ) {
+        if generation.is_some() && is_local_capsule {
             if let Ok(db) = runtime.store.connection() {
                 let _ = db::set_capsule_status(&db, &capsule_id, "stale", Some(&reason));
             }
@@ -1016,12 +1532,114 @@ fn decide_for(
         skill_path.as_str()
     };
     let agent_only = arm == Some("skillcache_agent");
-    let text = if agent_only {
+    let mut text = if agent_only {
         prompt::render_agent_driven(&stored, skill_label)
     } else {
         block(&stored, skill_label)
     };
+    let engine = runtime.engine.clone();
+    let codex = runtime.codex_executable();
     let eval_arm = arm.map(String::from);
+    let all_read_only = stored.capsule.form == Form::Hybrid
+        && !stored.capsule.programs.is_empty()
+        && stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_program_steps = stored.capsule.form == Form::Hybrid
+        && stored
+            .capsule
+            .plan()
+            .all(|step| matches!(step, Step::Program { .. }));
+    let explicit_direct = session["skillcache"]["direct_dispatch"].as_bool() == Some(true);
+    let mode_allows_direct =
+        plan_only || stored.capsule.kind != CapsuleKind::ToolChain || explicit_direct;
+    let sid_opt = session["id"].as_str().filter(|s| !s.is_empty());
+    let sid_key = sid_opt.unwrap_or("session");
+    let state_subdir = if sid_opt.is_some() && !capsule_id.is_empty() {
+        capsule_id.as_str()
+    } else {
+        generation.unwrap_or("preview")
+    };
+    let session_root = runtime
+        .store
+        .state
+        .join("skillcache/sessions")
+        .join(sid_key);
+    let state_dir = session_root.join(state_subdir);
+
+    // Inspect whether a prior multi-turn paused RunState applies to this capsule.
+    let mut resolved_deterministic: Option<serde_json::Map<String, Value>> = None;
+    let mut resume_note: Option<String> = None;
+    let mut initial_seen = 0u64;
+    let mut initial_seen_changes = 0u64;
+    if stored.capsule.form == Form::Hybrid && sid_opt.is_some() {
+        if generation.is_some()
+            && session_root.exists()
+            && let Ok(entries) = std::fs::read_dir(&session_root)
+        {
+            for entry in entries.flatten() {
+                if entry.file_name().to_str() != Some(state_subdir) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let state_file = state_dir.join("plan-state.json");
+        if let Ok(Some(existing)) = state::RunState::load(&state_file) {
+            let valid_pos = existing.capsule_sha256 == stored.capsule_sha256
+                && existing.position < stored.capsule.plan_len();
+            let candidate_bindings = if !stored.capsule.bindings.is_empty() {
+                resolved_deterministic =
+                    resolve_host_deterministic_bindings(&stored.capsule, route, message, workspace);
+                resolved_deterministic.as_ref()
+            } else {
+                None
+            };
+            let bindings_conflict = candidate_bindings.is_some_and(|new_map| {
+                new_map
+                    .iter()
+                    .any(|(k, v)| existing.bindings.get(k).is_some_and(|old| old != v))
+            });
+            if valid_pos && !bindings_conflict {
+                initial_seen = max_log_seq(&state_dir.join(state::LOG_FILE));
+                initial_seen_changes = max_log_seq(&state_dir.join(state::CHANGES_FILE));
+                resume_note = Some(format!(
+                    "\n\nPaused SkillCache run on disk: position {}/{} (awaiting {:?}). Call `skillcache-run status` or `skillcache-run continue` to resume it instead of restarting with `skillcache-run run`, or run `skillcache-run reset` before starting an unrelated request.",
+                    existing.position + 1,
+                    stored.capsule.plan_len(),
+                    existing.awaiting,
+                ));
+            } else if generation.is_some() {
+                let _ = std::fs::remove_dir_all(&state_dir);
+            }
+        }
+    }
+    let resuming = resume_note.is_some();
+    if let Some(note) = &resume_note {
+        text.push_str(note);
+    }
+
+    let can_try_direct = arm.is_none()
+        && !agent_only
+        && all_read_only
+        && all_program_steps
+        && !resuming
+        && mode_allows_direct;
+    let direct_bindings = if can_try_direct {
+        if stored.capsule.bindings.is_empty() {
+            Some(serde_json::Map::new())
+        } else {
+            resolved_deterministic.or_else(|| {
+                resolve_host_deterministic_bindings(&stored.capsule, route, message, workspace)
+            })
+        }
+    } else {
+        None
+    };
+    let direct_dispatch = direct_bindings.is_some();
+    if codex_manual && stored.capsule.form == Form::Hybrid && !direct_dispatch && !all_read_only {
+        return miss(
+            "codex_manual",
+            "Codex in Manual mode would ask before every step of the executor",
+        );
+    }
     let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
         // A written procedure is read, and a preview stages nothing.
         return Decision::Hit(Arc::new(Warm {
@@ -1034,31 +1652,16 @@ fn decide_for(
             bin: None,
             package: None,
             state_dir: None,
-            direct_dispatch: false,
+            engine,
+            codex,
+            direct_dispatch,
+            direct_bindings,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }));
     };
-    let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
-    let all_program_steps = stored
-        .capsule
-        .plan()
-        .all(|step| matches!(step, Step::Program { .. }));
-    let direct_dispatch = arm.is_none()
-        && !agent_only
-        && all_read_only
-        && all_program_steps
-        && !stored.capsule.programs.is_empty()
-        && stored.capsule.bindings.is_empty()
-        && (plan_only || stored.capsule.kind == CapsuleKind::ToolChain);
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
-        let state_dir = runtime
-            .store
-            .state
-            .join("skillcache/sessions")
-            .join(session["id"].as_str().unwrap_or("session"))
-            .join(generation);
         infra_core::fs::ensure_directory(&state_dir, true)?;
         Ok((bin, state_dir))
     })();
@@ -1093,9 +1696,12 @@ fn decide_for(
         bin: Some(bin),
         package: Some(warm_dir),
         state_dir: Some(state_dir),
+        engine,
+        codex,
         direct_dispatch,
-        seen: AtomicU64::new(0),
-        seen_changes: AtomicU64::new(0),
+        direct_bindings,
+        seen: AtomicU64::new(initial_seen),
+        seen_changes: AtomicU64::new(initial_seen_changes),
     }))
 }
 
@@ -1470,17 +2076,44 @@ impl Warm {
                 "text": format!("SkillCache: {reason} The capsule is not used until it is requalified or compiled again."),
             }));
         }
-        if let Some(state_dir) = &self.state_dir {
+        let keep_paused = self
+            .state_dir
+            .as_deref()
+            .zip(self.package.as_deref())
+            .is_some_and(|(sd, pkg)| run_state_is_paused(sd, pkg));
+        if !keep_paused && let Some(state_dir) = &self.state_dir {
             let _ = std::fs::remove_dir_all(state_dir);
         }
     }
 
-    /// Removes temporary state when a warm turn failed or was cancelled before finishing.
+    /// Removes temporary state when a warm turn failed or was cancelled before finishing,
+    /// unless a mid-plan run state (`position < plan_len` after step 0) is paused cleanly.
     pub(crate) fn cleanup_abandoned(&self) {
-        if let Some(state_dir) = &self.state_dir {
+        let keep_paused = self
+            .state_dir
+            .as_deref()
+            .zip(self.package.as_deref())
+            .is_some_and(|(sd, pkg)| {
+                run_state_is_paused(sd, pkg)
+                    && state::RunState::load(&sd.join("plan-state.json"))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|rs| rs.position > 0)
+            });
+        if !keep_paused && let Some(state_dir) = &self.state_dir {
             let _ = std::fs::remove_dir_all(state_dir);
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PartialDirectFailure {
+    pub step_index: usize,
+    pub program: String,
+    pub instruction: String,
+    pub diagnostics: Value,
+    pub required_outputs: Vec<String>,
+    pub prefix_results: Value,
 }
 
 pub(crate) enum DirectDispatchOutcome {
@@ -1491,6 +2124,7 @@ pub(crate) enum DirectDispatchOutcome {
     Fallback {
         reason: String,
         program_failed: bool,
+        partial: Option<PartialDirectFailure>,
     },
 }
 
@@ -1535,64 +2169,292 @@ pub fn format_direct_output(capsule_name: &str, answer: &Value) -> String {
     serde_json::to_string_pretty(answer).unwrap_or_else(|_| answer.to_string())
 }
 
-/// Executes an eligible deterministic read-only capsule directly via `executor::execute`,
-/// avoiding the ~25k prefix LLM loop while falling back cleanly on error, missing bindings,
-/// residual steps, or program failure.
+struct DirectSandboxDir(PathBuf);
+impl Drop for DirectSandboxDir {
+    fn drop(&mut self) {
+        package::release(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn push_unique_path(list: &mut Vec<PathBuf>, path: PathBuf) {
+    if !list.contains(&path) {
+        list.push(path);
+    }
+}
+
+struct DirectSandboxInputs<'a> {
+    engine: &'a super::gates::Engine,
+    package_dir: &'a Path,
+    workspace: &'a Path,
+    state_dir: &'a Path,
+    sandbox_ws: &'a Path,
+    protected: &'a [PathBuf],
+    stored: &'a package::Package,
+    all_read_only: bool,
+}
+
+fn build_direct_sandbox_spec(
+    inputs: DirectSandboxInputs<'_>,
+) -> std::result::Result<(String, PathBuf, PathBuf, PathBuf, Spec), String> {
+    let canon = |path: &Path| {
+        infra_core::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))
+    };
+    let canon_pkg = canon(inputs.package_dir)?;
+    let canon_ws = canon(inputs.workspace)?;
+    let canon_state = canon(inputs.state_dir)?;
+    let canon_sandbox_ws = canon(inputs.sandbox_ws)?;
+    let mut canon_protected = Vec::with_capacity(inputs.protected.len());
+    for path in inputs.protected {
+        canon_protected.push(canon(path)?);
+    }
+    let (executable, extra_readable) = inputs
+        .engine
+        .command(&canon_sandbox_ws)
+        .map_err(|err| err.to_string())?;
+    let mut readable = Vec::new();
+    for path in extra_readable {
+        push_unique_path(&mut readable, canon(&path)?);
+    }
+    push_unique_path(&mut readable, canon_pkg.clone());
+    let mut writable = vec![canon_state.clone()];
+    if inputs.all_read_only {
+        push_unique_path(&mut readable, canon_ws.clone());
+    } else {
+        push_unique_path(&mut writable, canon_ws.clone());
+    }
+    let spec = Spec {
+        workspace: canon_sandbox_ws.clone(),
+        target: canon_sandbox_ws,
+        protected: canon_protected,
+        readable,
+        accounts: writable,
+        runtime: super::gates::gate_runtime_dirs(&inputs.stored.capsule.capabilities.runtimes),
+        codex: inputs.engine.codex.clone(),
+        evidence: None,
+        network: inputs.stored.capsule.capabilities.network == Network::Required,
+    };
+    Ok((executable, canon_pkg, canon_ws, canon_state, spec))
+}
+
+/// Executes an eligible deterministic read-only capsule directly inside
+/// `infra_host::sandbox::gate`, avoiding the ~25k prefix LLM loop while falling
+/// back cleanly on sandbox refusal, error, missing bindings, residual steps, or program failure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn try_direct_execute(
     warm: &Warm,
     workspace: &Path,
     generation: &str,
     supplied_bindings: Option<&Value>,
 ) -> DirectDispatchOutcome {
+    try_direct_execute_with(warm, workspace, generation, supplied_bindings, &[], None)
+}
+
+fn direct_fallback(reason: impl Into<String>, program_failed: bool) -> DirectDispatchOutcome {
+    DirectDispatchOutcome::Fallback {
+        reason: reason.into(),
+        program_failed,
+        partial: None,
+    }
+}
+
+fn partial_direct_failure(state_dir: &Path, answer: &Value) -> Option<PartialDirectFailure> {
+    let step_index = answer["step_index"]
+        .as_u64()
+        .and_then(|v| usize::try_from(v).ok())?;
+    if step_index == 0 {
+        return None;
+    }
+    let state_file = state_dir.join("plan-state.json");
+    let run_state = state::RunState::load(&state_file).ok().flatten()?;
+    if !matches!(
+        run_state.awaiting,
+        state::Awaiting::Outputs { step_index: s, .. } if s == step_index
+    ) {
+        return None;
+    }
+    let required_outputs = answer["required_outputs"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let prefix_results = if answer["results"].is_object() {
+        answer["results"].clone()
+    } else {
+        Value::Object(run_state.results)
+    };
+    Some(PartialDirectFailure {
+        step_index,
+        program: answer["program"].as_str().unwrap_or("").to_owned(),
+        instruction: answer["instruction"].as_str().unwrap_or("").to_owned(),
+        diagnostics: answer["diagnostics"].clone(),
+        required_outputs,
+        prefix_results,
+    })
+}
+
+/// Executes an eligible deterministic read-only capsule inside `infra_host::sandbox::gate`,
+/// passing optional protected boundary paths and cancellation signal.
+pub(crate) fn try_direct_execute_with(
+    warm: &Warm,
+    workspace: &Path,
+    generation: &str,
+    supplied_bindings: Option<&Value>,
+    protected: &[PathBuf],
+    cancel: Option<&Arc<AtomicBool>>,
+) -> DirectDispatchOutcome {
     if !warm.direct_dispatch {
-        return DirectDispatchOutcome::Fallback {
-            reason: "not_eligible".into(),
-            program_failed: false,
-        };
+        return direct_fallback("not_eligible", false);
     }
     let (Some(package_dir), Some(state_dir)) = (&warm.package, &warm.state_dir) else {
-        return DirectDispatchOutcome::Fallback {
-            reason: "missing_stage".into(),
-            program_failed: false,
-        };
+        return direct_fallback("missing_stage", false);
     };
     let stored = match package::load(package_dir) {
         Ok(pkg) => pkg,
-        Err(err) => {
+        Err(err) => return direct_fallback(err.to_string(), false),
+    };
+    let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_program_steps = stored
+        .capsule
+        .plan()
+        .all(|step| matches!(step, Step::Program { .. }));
+    if !all_read_only || !all_program_steps {
+        return direct_fallback("requires_agent", false);
+    }
+    let effective_bindings = supplied_bindings.cloned().or_else(|| {
+        warm.direct_bindings
+            .as_ref()
+            .filter(|m| !m.is_empty())
+            .map(|m| Value::Object(m.clone()))
+    });
+    if !stored.capsule.bindings.is_empty() && effective_bindings.is_none() {
+        return direct_fallback("needs_bindings", false);
+    }
+    let default_cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.unwrap_or(&default_cancel);
+    if cancel_flag.load(Ordering::Acquire) {
+        return direct_fallback("cancelled", false);
+    }
+    let sandbox_base = state_dir.parent().unwrap_or(state_dir);
+    let sandbox_root = sandbox_base.join(format!("direct-sandbox-{}", crate::store::hexid()));
+    let _sandbox_cleanup = DirectSandboxDir(sandbox_root.clone());
+    let sandbox_ws = sandbox_root.join("work");
+    let scratch = sandbox_ws.join(".harness-tmp");
+    if let Err(err) = infra_core::fs::ensure_directory(&scratch, true)
+        .and_then(|_| infra_core::fs::ensure_directory(state_dir, true))
+    {
+        return direct_fallback(format!("sandbox_unavailable: {err}"), false);
+    }
+    let engine = super::gates::Engine {
+        path: warm.engine.clone(),
+        codex: warm.codex.clone(),
+    };
+    let (executable, canon_pkg, canon_ws, canon_state, spec) =
+        match build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir,
+            workspace,
+            state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected,
+            stored: &stored,
+            all_read_only,
+        }) {
+            Ok(parts) => parts,
+            Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
+        };
+    let canon_scratch = match infra_core::fs::canonicalize(&scratch) {
+        Ok(path) => path,
+        Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
+    };
+    let state_file = canon_state.join("plan-state.json");
+    let environment = super::gates::sandbox_environment(
+        &engine,
+        &canon_pkg,
+        &canon_ws,
+        &canon_scratch,
+        Some(&state_file),
+        generation,
+    );
+    let (argv, stdin_bytes) = if let Some(bindings) = &effective_bindings {
+        match serde_json::to_vec(bindings) {
+            Ok(bytes) => (
+                vec![executable, "skillcache".into(), "run".into(), "-".into()],
+                bytes,
+            ),
+            Err(err) => return direct_fallback(format!("invalid_bindings: {err}"), false),
+        }
+    } else {
+        (
+            vec![executable, "skillcache".into(), "run".into()],
+            Vec::new(),
+        )
+    };
+    let seconds = stored
+        .capsule
+        .programs
+        .iter()
+        .map(|p| p.timeout_seconds)
+        .sum::<u64>()
+        .saturating_add(15);
+    let ran = match super::gates::run_sandboxed_with_input(
+        &spec,
+        &argv,
+        &environment,
+        seconds,
+        &stdin_bytes,
+        cancel_flag,
+    ) {
+        Ok(ran) => ran,
+        Err(err) => return direct_fallback(format!("sandbox_unavailable: {err}"), false),
+    };
+    if let Some(stopped) = ran.stopped {
+        return direct_fallback(stopped, true);
+    }
+    let parsed = infra_core::strict_json::parse(
+        String::from_utf8_lossy(&ran.stdout).trim().as_bytes(),
+        8 * 1024 * 1024,
+        32,
+        200_000,
+    );
+    if ran.code != Some(0) {
+        if let Ok(answer) = parsed {
+            let code = answer["code"].as_str().unwrap_or("");
+            let status = answer["status"].as_str().unwrap_or("");
+            let program_failed = code == "program_failed" || status == "program_failed";
+            let reason = answer["message"]
+                .as_str()
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| super::gates::detail(&ran.stderr));
+            let partial = if program_failed {
+                partial_direct_failure(&canon_state, &answer)
+            } else {
+                None
+            };
             return DirectDispatchOutcome::Fallback {
-                reason: err.to_string(),
-                program_failed: false,
+                reason,
+                program_failed,
+                partial,
             };
         }
-    };
-    if !stored.capsule.programs.iter().all(|p| p.read_only)
-        || !stored
-            .capsule
-            .plan()
-            .all(|step| matches!(step, Step::Program { .. }))
-    {
-        return DirectDispatchOutcome::Fallback {
-            reason: "requires_agent".into(),
-            program_failed: false,
+        let code_desc = ran
+            .code
+            .map_or_else(|| "signal".to_owned(), |c| format!("exit_{c}"));
+        let stderr_detail = super::gates::detail(&ran.stderr);
+        let reason = if stderr_detail.is_empty() {
+            format!("sandbox_{code_desc}")
+        } else {
+            format!("sandbox_{code_desc}: {stderr_detail}")
         };
+        return direct_fallback(reason, false);
     }
-    if !stored.capsule.bindings.is_empty() && supplied_bindings.is_none() {
-        return DirectDispatchOutcome::Fallback {
-            reason: "needs_bindings".into(),
-            program_failed: false,
-        };
-    }
-    let state_file = state_dir.join("plan-state.json");
-    let exec_session = executor::Session {
-        package: &stored,
-        workspace,
-        state_file: &state_file,
-        generation,
-    };
-    match executor::execute(
-        &exec_session,
-        executor::Command::Run(supplied_bindings.cloned()),
-    ) {
+    match parsed {
         Ok(answer) => {
             let status = answer["status"].as_str().unwrap_or("");
             let no_failures = answer["failed"].as_array().is_none_or(Vec::is_empty);
@@ -1600,22 +2462,37 @@ pub(crate) fn try_direct_execute(
                 let formatted = format_direct_output(&warm.name, &answer);
                 return DirectDispatchOutcome::Completed { answer, formatted };
             }
-            let program_failed = status == "program_failed"
-                || !answer["failed"].as_array().is_none_or(Vec::is_empty);
+            let program_failed =
+                status == "program_failed" || answer["code"] == "program_failed" || !no_failures;
             let reason = if status == "program_failed" && !answer["diagnostics"].is_null() {
                 format!("program_failed: {}", answer["diagnostics"])
+            } else if let Some(msg) = answer["message"].as_str().filter(|s| !s.is_empty()) {
+                msg.to_owned()
             } else {
                 status.to_owned()
+            };
+            let partial = if program_failed {
+                partial_direct_failure(&canon_state, &answer)
+            } else {
+                None
             };
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                partial,
             }
         }
-        Err(refusal) => DirectDispatchOutcome::Fallback {
-            reason: refusal.message,
-            program_failed: refusal.code == "program_failed",
-        },
+        Err(_) => {
+            let stderr_detail = super::gates::detail(&ran.stderr);
+            direct_fallback(
+                if stderr_detail.is_empty() {
+                    "invalid_sandbox_output".to_owned()
+                } else {
+                    format!("invalid_sandbox_output: {stderr_detail}")
+                },
+                false,
+            )
+        }
     }
 }
 
@@ -1762,10 +2639,11 @@ mod tests {
             decide(&session("cursor", "edit", "auto", "warm_only"), &one),
             "no_capsule"
         );
-        // warm_disabled_for_codex_manual
+        // Uncompiled/unknown skill in Codex Manual must still miss with `no_capsule`,
+        // not mask uncompiled state with `codex_manual`.
         assert_eq!(
             decide(&session("codex", "edit", "manual", "auto"), &one),
-            "codex_manual"
+            "no_capsule"
         );
         // Claude in Manual is not Codex in Manual: it gets as far as the skill.
         assert_eq!(
@@ -1803,7 +2681,7 @@ mod tests {
         assert_eq!(decision.event().unwrap()["phase"], "miss");
         assert_eq!(
             decision.record().unwrap(),
-            json!({"decision": "miss", "reason": "codex_manual"})
+            json!({"decision": "miss", "reason": "no_capsule"})
         );
         assert!(Decision::Off.event().is_none() && Decision::Off.record().is_none());
         // Nothing was staged for any of them.
@@ -1899,7 +2777,10 @@ mod tests {
             bin: Some(PathBuf::from("/state/skillcache/bin/abc")),
             package: Some(PathBuf::from("/state/warm")),
             state_dir: Some(PathBuf::from("/state/skillcache/sessions/s/g")),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         });
@@ -2030,7 +2911,10 @@ mod tests {
                 bin: None,
                 package: None,
                 state_dir: None,
+                engine: None,
+                codex: None,
                 direct_dispatch: false,
+                direct_bindings: None,
                 seen: AtomicU64::new(0),
                 seen_changes: AtomicU64::new(0),
             }),
@@ -2070,7 +2954,10 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -2325,7 +3212,10 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3051,7 +3941,10 @@ mod tests {
             bin: None,
             package: Some(warm_dir.clone()),
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3083,7 +3976,10 @@ mod tests {
             bin: None,
             package: Some(warm_dir.clone()),
             state_dir: Some(state_dir.clone()),
+            engine: None,
+            codex: None,
             direct_dispatch: false,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3091,6 +3987,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "not_eligible");
                 assert!(!program_failed);
@@ -3138,7 +4035,10 @@ mod tests {
             bin: None,
             package: Some(hybrid_instr_dir.clone()),
             state_dir: Some(hybrid_instr_state),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3146,6 +4046,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "requires_agent");
                 assert!(!program_failed);
@@ -3165,7 +4066,8 @@ mod tests {
         assert_eq!(thin.ledger["thin_formatter"], true);
         assert!(thin.text.len() < 512);
 
-        // Failing read-only program falls back cleanly with program_failed = true.
+        // Failing read-only program falls back cleanly inside `sandbox::gate` with `program_failed = true`
+        // (and never falls back to unconfined execution when sandbox/engine fails).
         let bad_warm_dir = dir.path().join("bad-warm");
         let bad_state_dir = dir.path().join("bad-state");
         std::fs::create_dir_all(&bad_state_dir).unwrap();
@@ -3175,15 +4077,85 @@ mod tests {
             b"import sys\nsys.exit(2)\n".to_vec(),
         );
         package::write_warm(&bad_warm_dir, &cap, None, &bad_files).unwrap();
-        let bad_warm = Warm {
-            package: Some(bad_warm_dir),
-            state_dir: Some(bad_state_dir),
-            ..warm
+        let missing_engine_warm = Warm {
+            capsule_id: warm.capsule_id.clone(),
+            form: warm.form,
+            eval_arm: warm.eval_arm.clone(),
+            name: warm.name.clone(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(bad_warm_dir.clone()),
+            state_dir: Some(bad_state_dir.clone()),
+            engine: Some(dir.path().join("nonexistent-engine")),
+            codex: None,
+            direct_dispatch: true,
+            direct_bindings: None,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
         };
-        match try_direct_execute(&bad_warm, &workspace, "g-fail", None) {
-            DirectDispatchOutcome::Fallback { program_failed, .. } => assert!(program_failed),
+        match try_direct_execute(&missing_engine_warm, &workspace, "g-noeng", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+                ..
+            } => {
+                assert!(
+                    reason.contains("sandbox_unavailable") || reason.contains("sandbox_"),
+                    "missing engine must fail closed without unconfined execution: {reason}"
+                );
+                assert!(!program_failed);
+            }
             DirectDispatchOutcome::Completed { .. } => {
-                panic!("expected fallback when direct execution failed");
+                panic!("missing engine must not complete unconfined");
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mock_dir = dir.path().join("mock-engine-bin");
+            std::fs::create_dir_all(&mock_dir).unwrap();
+            let mock_engine = mock_dir.join("infra-engine");
+            std::fs::write(
+                &mock_engine,
+                "#!/bin/sh\necho '{\"status\":\"program_failed\",\"diagnostics\":{\"reason\":\"nonzero_exit\",\"attempts\":1}}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&mock_engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let bad_warm = Warm {
+                package: Some(bad_warm_dir),
+                state_dir: Some(bad_state_dir),
+                engine: Some(mock_engine),
+                ..warm
+            };
+            match try_direct_execute(&bad_warm, &workspace, "g-fail", None) {
+                DirectDispatchOutcome::Fallback {
+                    reason,
+                    program_failed,
+                    ..
+                } => {
+                    if program_failed {
+                        // Mock engine ran under guardian + sandbox and surfaced program failure.
+                    } else if infra_host::sandbox::available() {
+                        // Unit tests (`--lib`) do not configure `use_guardian`, so `guardian()`
+                        // resolves to the `--lib` test binary which cannot serve `internal-guard`;
+                        // real sandboxed `program_failed` is verified in `tests/skillcache_harness.rs`.
+                        assert!(
+                            reason.contains(
+                                "The native guardian exited without a valid native exit receipt."
+                            ),
+                            "unexpected fallback reason on sandbox-capable host: reason={reason} program_failed={program_failed}"
+                        );
+                    } else {
+                        assert!(
+                            reason.starts_with("sandbox_unavailable:"),
+                            "expected sandbox_unavailable when sandbox unavailable, got reason={reason} program_failed={program_failed}"
+                        );
+                    }
+                }
+                DirectDispatchOutcome::Completed { .. } => {
+                    panic!("expected fallback when direct execution failed");
+                }
             }
         }
         let _ = package::remove(&hybrid_instr_dir);
@@ -3225,7 +4197,10 @@ mod tests {
             bin: None,
             package: Some(param_cap_dir.clone()),
             state_dir: Some(dir.path().join("param-direct-state")),
+            engine: None,
+            codex: None,
             direct_dispatch: true,
+            direct_bindings: None,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -3233,6 +4208,7 @@ mod tests {
             DirectDispatchOutcome::Fallback {
                 reason,
                 program_failed,
+                ..
             } => {
                 assert_eq!(reason, "needs_bindings");
                 assert!(!program_failed);
@@ -3346,5 +4322,1483 @@ mod tests {
             other => panic!("expected normal warm hit, got {}", reason(&other)),
         }
         let _ = package::remove(&param_cap_dir);
+    }
+
+    #[test]
+    fn message_matches_mu_rejects_one_token_or_broad_hijack_and_ranks_toolchains() {
+        let cap_routes = json!({
+            "mu": {"name": "check-php-routes", "description": "Check php routes"}
+        });
+        assert!(!message_matches_mu("refactor routes", &cap_routes, None));
+        assert!(!message_matches_mu(
+            "fix the bug in php routes",
+            &cap_routes,
+            None
+        ));
+        assert!(message_matches_mu("check php routes", &cap_routes, None));
+        assert!(message_matches_mu(
+            "please check php routes",
+            &cap_routes,
+            None
+        ));
+        assert!(message_matches_mu("check-php-routes", &cap_routes, None));
+        assert!(message_matches_mu(
+            "anything",
+            &cap_routes,
+            Some("check-php-routes")
+        ));
+
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&[]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": ""});
+            for (cid, name, desc) in [
+                (
+                    "cap-broad",
+                    "check-routes-broad",
+                    "Check routes middleware controllers migrations tables",
+                ),
+                ("cap-exact", "check-routes", "Check routes"),
+            ] {
+                db::begin_capsule(&db, cid, cid, &project_id, "s", "g", &tc_ref, None).unwrap();
+                db::activate_capsule(
+                    &db,
+                    &db::Qualified {
+                        capsule_id: cid,
+                        mu_name: name,
+                        mu_description: desc,
+                        form: "textual",
+                        capsule_sha256: "a",
+                        package_sha256: "b",
+                        skill_files: &json!({}),
+                        env_fingerprint: &env_fp,
+                        engine_digest: &rt.engine_digest(),
+                        artifact_dir: "/tmp/nonexistent",
+                        capabilities: &json!({"network": "none", "runtimes": []}),
+                    },
+                )
+                .unwrap();
+                db::set_capsule_kind_meta(&db, cid, "tool_chain", "").unwrap();
+                db::set_capsule_read_only(&db, cid, true).unwrap();
+            }
+        }
+        let session = json!({"project_id": project_id});
+        let (chosen, _) = decide_toolchain_candidate(
+            &rt,
+            &session,
+            "codex",
+            None,
+            false,
+            &workspace,
+            "check routes",
+        )
+        .unwrap_or_else(|d| panic!("matching tool-chain expected: {}", reason(&d)));
+        assert_eq!(chosen["capsule_id"], "cap-exact");
+    }
+
+    #[test]
+    fn toolchain_in_edit_mode_requires_explicit_direct_dispatch_opt_in() {
+        let dir = crate::skillcache::test_support::scratch();
+        let workspace = dir.path().join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}\n").unwrap();
+        let tree_sha = trace::workspace_tree_sha(&workspace).unwrap();
+        let warm_dir = dir.path().join("caps/cap-tc-edit/warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-app-routes", "description": "Inspect app routes"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert(
+            "programs/scan/main.py",
+            b"print('{\"status\": \"complete\", \"result\": {\"summary\": \"ok\"}}')\n".to_vec(),
+        );
+        let pkg_sha = package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+        let loaded = package::load(&warm_dir).unwrap();
+
+        let store = SessionStore::open(&dir.path().join("store")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&["python3".into()]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": &tree_sha});
+            db::begin_capsule(
+                &db,
+                "cap-tc-edit",
+                "cmp-tc-edit",
+                &project_id,
+                "s",
+                "g",
+                &tc_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-tc-edit",
+                    mu_name: "inspect-app-routes",
+                    mu_description: "Inspect app routes",
+                    form: "hybrid",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: &rt.engine_digest(),
+                    artifact_dir: warm_dir.parent().unwrap().to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-tc-edit", "tool_chain", &tree_sha).unwrap();
+            db::set_capsule_read_only(&db, "cap-tc-edit", true).unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-tc-edit", 1, gate, true, &json!({"passed": true}))
+                    .unwrap();
+            }
+        }
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect app routes".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let edit_default = json!({
+            "id": "s-edit",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(
+            &rt,
+            &edit_default,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-edit"),
+        ) {
+            Decision::Hit(decided) => assert!(
+                !decided.direct_dispatch,
+                "ToolChain in edit mode must not set direct_dispatch=true without opt-in"
+            ),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let edit_opt_in = json!({
+            "id": "s-edit-opt",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true, "direct_dispatch": true},
+        });
+        match decide_for(
+            &rt,
+            &edit_opt_in,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-opt"),
+        ) {
+            Decision::Hit(decided) => assert!(
+                decided.direct_dispatch,
+                "explicit direct_dispatch opt-in should enable direct_dispatch in edit mode"
+            ),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let plan_mode = json!({
+            "id": "s-plan",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "plan",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(
+            &rt,
+            &plan_mode,
+            &route,
+            "inspect app routes",
+            &workspace,
+            Some("g-plan"),
+        ) {
+            Decision::Hit(decided) => assert!(decided.direct_dispatch),
+            other => panic!("expected warm hit, got {}", reason(&other)),
+        }
+        let _ = package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn build_direct_sandbox_spec_enforces_network_ro_workspace_and_protected_overlap() {
+        let dir = crate::skillcache::test_support::scratch();
+        let workspace = dir.path().join("workspace");
+        let pkg_dir = dir.path().join("warm");
+        let state_dir = dir.path().join("state");
+        let sandbox_ws = dir.path().join("sandbox/work");
+        let scratch = sandbox_ws.join(".harness-tmp");
+        let protected_dir = dir.path().join("protected-src");
+        let engine_file = dir.path().join("engine-bin/infra-engine");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        std::fs::create_dir_all(engine_file.parent().unwrap()).unwrap();
+        std::fs::write(&engine_file, b"#!/bin/sh\n").unwrap();
+
+        let cap_net = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "net-check", "description": "Net check"},
+            "source": {"skills": [{"name": "s", "path": ".agents/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "required", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/scan/main.py", b"print('{}')\n".to_vec());
+        package::write_warm(&pkg_dir, &cap_net, None, &files).unwrap();
+        let loaded = package::load(&pkg_dir).unwrap();
+
+        let engine = super::super::gates::Engine {
+            path: Some(engine_file),
+            codex: None,
+        };
+        let canon_pkg = infra_core::fs::canonicalize(&pkg_dir).unwrap();
+        let canon_ws = infra_core::fs::canonicalize(&workspace).unwrap();
+        let canon_state = infra_core::fs::canonicalize(&state_dir).unwrap();
+        let canon_scratch = infra_core::fs::canonicalize(&scratch).unwrap();
+        let canon_prot = infra_core::fs::canonicalize(&protected_dir).unwrap();
+
+        let (_, pkg, ws, state, spec_ro) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: std::slice::from_ref(&protected_dir),
+            stored: &loaded,
+            all_read_only: true,
+        })
+        .unwrap();
+        assert_eq!(pkg, canon_pkg);
+        assert_eq!(ws, canon_ws);
+        assert_eq!(state, canon_state);
+        assert!(spec_ro.network);
+        assert!(spec_ro.readable.contains(&canon_pkg));
+        assert!(spec_ro.readable.contains(&canon_ws));
+        assert_eq!(spec_ro.accounts, vec![canon_state.clone()]);
+        assert_eq!(spec_ro.protected, vec![canon_prot]);
+
+        let (_, _, _, _, spec_rw) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: &[],
+            stored: &loaded,
+            all_read_only: false,
+        })
+        .unwrap();
+        assert!(!spec_rw.readable.contains(&canon_ws));
+        assert!(spec_rw.accounts.contains(&canon_ws));
+
+        // Overlapping `protected` with `workspace` must be rejected by `sandbox::gate`.
+        let (_, _, _, _, overlap_spec) = build_direct_sandbox_spec(DirectSandboxInputs {
+            engine: &engine,
+            package_dir: &pkg_dir,
+            workspace: &workspace,
+            state_dir: &state_dir,
+            sandbox_ws: &sandbox_ws,
+            protected: std::slice::from_ref(&workspace),
+            stored: &loaded,
+            all_read_only: true,
+        })
+        .unwrap();
+        let overlap_err = infra_host::sandbox::gate(
+            &overlap_spec,
+            &["infra-engine".into(), "skillcache".into(), "run".into()],
+        )
+        .expect_err("protected overlapping workspace must fail closed");
+        assert_eq!(overlap_err.code, "forbidden");
+
+        let env = super::super::gates::sandbox_environment(
+            &engine,
+            &canon_pkg,
+            &canon_ws,
+            &canon_scratch,
+            Some(&canon_state.join("plan-state.json")),
+            "g-env",
+        );
+        assert_eq!(
+            env.get("HOME").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("TMPDIR").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("USERPROFILE").map(String::as_str),
+            Some(canon_scratch.to_string_lossy().as_ref())
+        );
+        let unicode_tokens = tokenize_mu("Prüfen PHP-Routen überprüfen");
+        assert!(unicode_tokens.contains("prüfen"), "{unicode_tokens:?}");
+        assert!(unicode_tokens.contains("überprüfen"), "{unicode_tokens:?}");
+        let _ = package::remove(&pkg_dir);
+    }
+
+    #[test]
+    fn p1_parameterized_edit_direct_codex_manual_native_route_and_multiturn_continuity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude/skills/audit")).unwrap();
+        std::fs::create_dir_all(ws.join("invoices")).unwrap();
+        std::fs::write(ws.join(".claude/skills/audit/SKILL.md"), "# Audit\n").unwrap();
+        std::fs::write(ws.join("invoices/q1.pdf"), "pdf").unwrap();
+        let skill_tree =
+            infra_skillcache::fingerprint::tree_sha256(&ws.join(".claude/skills/audit")).unwrap();
+
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store: store.clone(),
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let skill_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "skill",
+            "mu": {"name": "audit-ro", "description": "Audit one PDF deterministically"},
+            "source": {"skills": [{"name": "audit", "path": ".claude/skills/audit/SKILL.md", "tree_sha256": skill_tree.sha256}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [
+                {"name": "target_file", "type": "path", "origin": "workspace_path", "pattern": r"^invoices/.*\.pdf$"},
+                {"name": "year", "type": "number", "origin": "prompt_regex", "pattern": r"\b(20\d{2})\b", "default": 2026}
+            ],
+            "programs": [{
+                "id": "audit_pdf",
+                "entry": ["python3", "programs/audit/main.py"],
+                "inputs": ["target_file", "year"],
+                "outputs": [],
+                "check": ["python3", "programs/audit/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "audit_pdf"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/audit/main.py", b"print('{}')\n".to_vec());
+        let art_dir = root.join("caps/cap-audit");
+        let warm_dir = art_dir.join("warm");
+        let pkg_sha = package::write_warm(&warm_dir, &skill_cap, None, &files).unwrap();
+        let cap_sha = package::load(&warm_dir).unwrap().capsule_sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&["python3".into()]),
+        );
+
+        {
+            let db = store.connection().unwrap();
+            let skill_ref = json!({
+                "name": "audit",
+                "path": ".claude/skills/audit/SKILL.md",
+                "tree_sha256": skill_tree.sha256,
+                "taken_ns": skill_tree.taken_ns.to_string(),
+                "files": skill_tree.files.iter().map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                    "mtime_ns": f.mtime_ns.to_string(),
+                })).collect::<Vec<_>>(),
+            });
+            db::begin_capsule(
+                &db,
+                "cap-audit",
+                "cmp-audit",
+                &project_id,
+                "s0",
+                "g0",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-audit",
+                    mu_name: "audit-ro",
+                    mu_description: "Audit one PDF deterministically",
+                    form: "hybrid",
+                    capsule_sha256: &cap_sha,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({"skills": [skill_ref]}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "",
+                    artifact_dir: art_dir.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+        }
+
+        // 1. Parameterized all_read_only Skill capsule in `mode == "edit"` enables direct_dispatch!
+        let edit_session = json!({
+            "id": "sess-p1",
+            "project_id": project_id,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto"}
+        });
+        let native_route = ResolvedCommand {
+            mode: "native".into(),
+            text: "/audit invoices/q1.pdf".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let native_unknown = ResolvedCommand {
+            mode: "native".into(),
+            text: "/compact".into(),
+            requests: vec![],
+            notice: None,
+        };
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &edit_session,
+                &native_unknown,
+                "/compact",
+                &ws,
+                Some("g0")
+            )),
+            "native_route"
+        );
+        let hit_native = match decide_for(
+            &rt,
+            &edit_session,
+            &native_route,
+            "/audit invoices/q1.pdf",
+            &ws,
+            Some("g1"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected native /skill hit, got {}", reason(&other)),
+        };
+        assert!(hit_native.direct_dispatch);
+        assert_eq!(
+            hit_native
+                .direct_bindings
+                .as_ref()
+                .unwrap()
+                .get("target_file"),
+            Some(&json!("invoices/q1.pdf"))
+        );
+        assert_eq!(
+            hit_native.direct_bindings.as_ref().unwrap().get("year"),
+            Some(&json!(2026))
+        );
+
+        // 2. Ambiguous workspace_path fails closed (`direct_dispatch == false`, keeps warm hit).
+        std::fs::write(ws.join("invoices/q2.pdf"), "pdf2").unwrap();
+        let hit_ambig = match decide_for(
+            &rt,
+            &edit_session,
+            &native_route,
+            "/audit all invoices",
+            &ws,
+            Some("g2"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!(
+                "expected warm fallback hit on ambiguity, got {}",
+                reason(&other)
+            ),
+        };
+        assert!(!hit_ambig.direct_dispatch);
+        assert!(hit_ambig.direct_bindings.is_none());
+
+        // 3. Codex + Manual mode allows read-only / direct_dispatch warm hit!
+        let codex_manual = json!({
+            "id": "sess-codex-man",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "permissions": "manual",
+            "skillcache": {"mode": "auto"}
+        });
+        let text_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "$audit invoices/q1.pdf".into(),
+            requests: vec![json!({"name": "audit", "path": ".claude/skills/audit/SKILL.md"})],
+            notice: None,
+        };
+        let codex_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit invoices/q1.pdf 2025",
+            &ws,
+            Some("g3"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!(
+                "expected codex manual read-only hit, got {}",
+                reason(&other)
+            ),
+        };
+        assert!(codex_hit.direct_dispatch);
+
+        // 4. Multi-turn paused RunState preserved across Warm::finish, resumed in Turn 2, reset on conflict/unrelated turn.
+        let cont_dir = codex_hit.state_dir.clone().unwrap();
+        let mut paused = state::RunState::new(&cap_sha, "g3");
+        paused.position = 0; // < plan_len (1)
+        paused.awaiting = state::Awaiting::Outputs {
+            step_index: 0,
+            names: vec![],
+        };
+        paused
+            .bindings
+            .insert("target_file".into(), json!("invoices/q1.pdf"));
+        paused.save(&cont_dir.join("plan-state.json")).unwrap();
+        codex_hit.finish(&store, &codex_manual, "g3", &|_| Ok(()));
+        assert!(
+            cont_dir.join("plan-state.json").exists(),
+            "paused RunState position < plan_len must not be removed on finish"
+        );
+
+        let resumed_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit continue",
+            &ws,
+            Some("g4"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected resume hit, got {}", reason(&other)),
+        };
+        assert!(!resumed_hit.direct_dispatch);
+        assert!(resumed_hit.block.contains("Paused SkillCache run on disk"));
+
+        // Conflicting new target resets paused state cleanly!
+        let reset_hit = match decide_for(
+            &rt,
+            &codex_manual,
+            &text_route,
+            "$audit invoices/q2.pdf",
+            &ws,
+            Some("g5"),
+        ) {
+            Decision::Hit(w) => w,
+            other => panic!("expected reset fresh hit, got {}", reason(&other)),
+        };
+        assert!(reset_hit.direct_dispatch);
+        assert!(!reset_hit.block.contains("Paused SkillCache run on disk"));
+
+        let _ = package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn codex_manual_preview_textual_and_pinned_native_commands_behave_consistently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude/skills/audit")).unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills/writer")).unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills/notes")).unwrap();
+        std::fs::write(ws.join(".claude/skills/audit/SKILL.md"), "# Audit\n").unwrap();
+        std::fs::write(ws.join(".claude/skills/writer/SKILL.md"), "# Writer\n").unwrap();
+        std::fs::write(ws.join(".claude/skills/notes/SKILL.md"), "# Notes\n").unwrap();
+
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store: store.clone(),
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let env_fp_py = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&["python3".into()]),
+        );
+        let env_fp_empty = infra_skillcache::fingerprint::env_fingerprint(&BTreeMap::new());
+
+        // Helper to seed an active capsule on disk + SQLite.
+        let seed_cap = |cap_id: &str,
+                        skill_name: &str,
+                        skill_rel: &str,
+                        form: Form,
+                        read_only: bool,
+                        program_src: &[u8]| {
+            let tree =
+                infra_skillcache::fingerprint::tree_sha256(ws.join(skill_rel).parent().unwrap())
+                    .unwrap();
+            let cap = infra_skillcache::SkillCapsule::from_value(&if form == Form::Textual {
+                json!({
+                    "schema_version": 1,
+                    "form": "textual",
+                    "kind": "skill",
+                    "mu": {"name": format!("{skill_name}-txt"), "description": "Textual guide"},
+                    "source": {"skills": [{"name": skill_name, "path": skill_rel, "tree_sha256": tree.sha256}]},
+                })
+            } else {
+                json!({
+                    "schema_version": 1,
+                    "form": "hybrid",
+                    "kind": "skill",
+                    "mu": {"name": format!("{skill_name}-hyb"), "description": "Hybrid capsule"},
+                    "source": {"skills": [{"name": skill_name, "path": skill_rel, "tree_sha256": tree.sha256}]},
+                    "capabilities": {"network": "none", "runtimes": ["python3"]},
+                    "bindings": [],
+                    "programs": [{
+                        "id": "p",
+                        "entry": ["python3", "programs/p/main.py"],
+                        "inputs": [],
+                        "outputs": [],
+                        "check": ["python3", "programs/p/main.py", "--check"],
+                        "timeout_seconds": 30,
+                        "read_only": read_only,
+                    }],
+                    "steps": [{"kind": "program", "program": "p"}],
+                    "verification": [],
+                })
+            })
+            .unwrap();
+            let art_dir = root.join("capsules").join(cap_id);
+            let warm_dir = art_dir.join("warm");
+            let mut pkg_files = infra_skillcache::package::Files::new();
+            let markdown = if form == Form::Textual {
+                Some(b"# Textual\n\nFollow steps.\n".as_slice())
+            } else {
+                pkg_files.insert("programs/p/main.py", program_src.to_vec());
+                None
+            };
+            let pkg_sha = package::write_warm(&warm_dir, &cap, markdown, &pkg_files).unwrap();
+            let cap_sha = package::load(&warm_dir).unwrap().capsule_sha256;
+            let skill_ref = json!({
+                "name": skill_name,
+                "path": skill_rel,
+                "tree_sha256": tree.sha256,
+                "taken_ns": tree.taken_ns.to_string(),
+                "files": tree.files.iter().map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                    "mtime_ns": f.mtime_ns.to_string(),
+                })).collect::<Vec<_>>(),
+            });
+            let caps_json = if form == Form::Textual {
+                json!({})
+            } else {
+                json!({"network": "none", "runtimes": ["python3"]})
+            };
+            let env_fp = if form == Form::Textual {
+                env_fp_empty.as_str()
+            } else {
+                env_fp_py.as_str()
+            };
+            let db = store.connection().unwrap();
+            db::begin_capsule(
+                &db,
+                cap_id,
+                &format!("cmp-{cap_id}"),
+                &project_id,
+                "s0",
+                "g0",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: cap_id,
+                    mu_name: &cap.mu.name,
+                    mu_description: &cap.mu.description,
+                    form: form.as_str(),
+                    capsule_sha256: &cap_sha,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({"skills": [skill_ref]}),
+                    env_fingerprint: env_fp,
+                    engine_digest: "",
+                    artifact_dir: art_dir.to_str().unwrap(),
+                    capabilities: &caps_json,
+                },
+            )
+            .unwrap();
+            warm_dir
+        };
+
+        let dir_ro = seed_cap(
+            "cap-ro",
+            "audit",
+            ".claude/skills/audit/SKILL.md",
+            Form::Hybrid,
+            true,
+            b"print('ro')\n",
+        );
+        let dir_rw = seed_cap(
+            "cap-rw",
+            "writer",
+            ".claude/skills/writer/SKILL.md",
+            Form::Hybrid,
+            false,
+            b"print('rw')\n",
+        );
+        let dir_txt = seed_cap(
+            "cap-txt",
+            "notes",
+            ".claude/skills/notes/SKILL.md",
+            Form::Textual,
+            false,
+            b"",
+        );
+
+        let codex_manual_session = |pin: Option<&str>| {
+            let mut sc = json!({"mode": "auto"});
+            if let Some(id) = pin {
+                sc["capsule_id"] = id.into();
+            }
+            json!({
+                "id": "sess-qa",
+                "project_id": project_id,
+                "provider": "codex",
+                "mode": "edit",
+                "permissions": "manual",
+                "skillcache": sc,
+            })
+        };
+        let skill_route = |name: &str, rel: &str| ResolvedCommand {
+            mode: "text".into(),
+            text: format!("${name}"),
+            requests: vec![json!({"name": name, "path": rel})],
+            notice: None,
+        };
+
+        // 1. Existing workspace skill WITHOUT a capsule misses with `no_capsule`, NOT `codex_manual`.
+        std::fs::create_dir_all(ws.join(".claude/skills/uncompiled")).unwrap();
+        std::fs::write(ws.join(".claude/skills/uncompiled/SKILL.md"), "# Empty\n").unwrap();
+        let missing_route = skill_route("uncompiled", ".claude/skills/uncompiled/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &missing_route,
+                "$uncompiled",
+                &ws,
+                Some("g")
+            )),
+            "no_capsule"
+        );
+        assert_eq!(
+            preview(
+                &rt,
+                &codex_manual_session(None),
+                &missing_route,
+                "$uncompiled",
+                &ws
+            )["reason"],
+            "no_capsule"
+        );
+
+        // 2. Form::Textual hits cleanly on Codex + Manual for BOTH preview (`generation == None`) and live `decide`.
+        let txt_route = skill_route("notes", ".claude/skills/notes/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &txt_route,
+                "$notes",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            preview(&rt, &codex_manual_session(None), &txt_route, "$notes", &ws)["decision"],
+            "hit"
+        );
+
+        // 3. `all_read_only` Form::Hybrid hits cleanly in BOTH `preview` and live `decide` on Codex + Manual.
+        let ro_route = skill_route("audit", ".claude/skills/audit/SKILL.md");
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &codex_manual_session(None),
+                &ro_route,
+                "$audit",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            preview(&rt, &codex_manual_session(None), &ro_route, "$audit", &ws)["decision"],
+            "hit"
+        );
+
+        // 4. Mutating Form::Hybrid (`read_only == false`) misses with `codex_manual` in BOTH `preview` and live `decide`.
+        let rw_route = skill_route("writer", ".claude/skills/writer/SKILL.md");
+        let rw_live = decide_for(
+            &rt,
+            &codex_manual_session(None),
+            &rw_route,
+            "$writer",
+            &ws,
+            Some("g"),
+        );
+        assert_eq!(reason(&rw_live), "codex_manual");
+        assert_eq!(
+            rw_live.record().unwrap(),
+            json!({"decision": "miss", "reason": "codex_manual"})
+        );
+        let rw_prev = preview(&rt, &codex_manual_session(None), &rw_route, "$writer", &ws);
+        assert_eq!(rw_prev["decision"], "miss");
+        assert_eq!(rw_prev["reason"], "codex_manual");
+
+        // 5. Pinned capsule must NEVER hijack `route.mode == "native"` CLI commands (`/compact`, `/clear`).
+        let claude_pinned = json!({
+            "id": "sess-pin",
+            "project_id": project_id,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "bypass",
+            "skillcache": {"mode": "warm_only", "capsule_id": "cap-ro"},
+        });
+        let native_empty = ResolvedCommand {
+            mode: "native".into(),
+            text: "/compact".into(),
+            requests: vec![],
+            notice: None,
+        };
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/compact",
+                &ws,
+                Some("g")
+            )),
+            "native_route"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/clear",
+                &ws,
+                Some("g")
+            )),
+            "native_route"
+        );
+        // Native slash invocation naming the pinned skill STILL hits, while naming another skill misses with `no_capsule`.
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/audit invoices",
+                &ws,
+                Some("g")
+            )),
+            "hit"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &claude_pinned,
+                &native_empty,
+                "/notes",
+                &ws,
+                Some("g")
+            )),
+            "no_capsule"
+        );
+
+        let _ = package::remove(&dir_ro);
+        let _ = package::remove(&dir_rw);
+        let _ = package::remove(&dir_txt);
+    }
+
+    #[test]
+    fn cross_worktree_toolchain_and_mirror_capsules_share_across_git_worktrees_and_isolate_on_drift()
+     {
+        let root = crate::skillcache::test_support::scratch();
+        let wt1 = root.path().join("wt1");
+        let wt2 = root.path().join("wt2");
+        let other = root.path().join("other");
+
+        let git = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} in {}", dir.display());
+        };
+        let skill_md =
+            "---\nname: pdf\ndescription: Extract PDF rows\n---\n# PDF\nRead invoices.\n";
+        for repo in [&wt1, &other] {
+            std::fs::create_dir_all(repo.join(".claude/skills/pdf")).unwrap();
+            std::fs::create_dir_all(repo.join(".agents/skills/pdf")).unwrap();
+            std::fs::write(repo.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+            std::fs::write(repo.join(".agents/skills/pdf/SKILL.md"), skill_md).unwrap();
+            std::fs::write(repo.join("app.php"), "<?php echo 1;\n").unwrap();
+            git(repo, &["init", "-q"]);
+            git(repo, &["config", "core.autocrlf", "false"]);
+            git(repo, &["add", "."]);
+            git(repo, &["commit", "-q", "-m", "base"]);
+        }
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+        // In wt2, keep ONLY `.agents/skills/pdf/SKILL.md` (mirror) to verify mirror sharing across worktrees.
+        let _ = std::fs::remove_dir_all(wt2.join(".claude"));
+        git(&wt2, &["add", "-A"]);
+        git(&wt2, &["commit", "-q", "-m", "mirror-only"]);
+        // Also align wt1 so workspace_tree_sha matches wt2 when testing clean ToolChain sharing.
+        let _ = std::fs::remove_dir_all(wt1.join(".claude"));
+        git(&wt1, &["add", "-A"]);
+        git(&wt1, &["commit", "-q", "-m", "mirror-only"]);
+        // Restore `.claude/skills/pdf` in wt1 as uncommitted/re-added? No: compile skill in wt1 on `.agents` vs `.claude`:
+        // Instead, put `.claude` on wt1 BEFORE removing it? Wait: if `.claude` differs, `workspace_tree_sha` differs!
+        // Keep identical files in wt1, wt2, and other, and test `.claude` in wt1 -> `.agents` in wt2 when both mirrors exist!
+        std::fs::create_dir_all(wt1.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt1.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "with-mirrors"]);
+        git(&wt2, &["merge", "-q", "--ff-only", "HEAD"]);
+        // Bring wt2 to the exact same tree as wt1 (`git checkout` wt1's branch tree).
+        let wt1_head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt1)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        git(&wt2, &["reset", "--hard", "-q", wt1_head.trim()]);
+        // Sync `other` repo to identical files.
+        std::fs::create_dir_all(other.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(other.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid3 = store.register(&other).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(pid1, pid2);
+
+        let tree_sha_ws = trace::workspace_tree_sha(&wt1).unwrap();
+        assert_eq!(tree_sha_ws, trace::workspace_tree_sha(&wt2).unwrap());
+        assert_eq!(tree_sha_ws, trace::workspace_tree_sha(&other).unwrap());
+        let skill_tree_sha =
+            infra_skillcache::fingerprint::tree_sha256(&wt1.join(".claude/skills/pdf"))
+                .unwrap()
+                .sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+
+        // Seed 1 ToolChain capsule and 1 Skill (mirror) capsule in `wt1` (`pid1`).
+        let tc_root = root.path().join("artifacts/wt-tc");
+        let tc_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-php", "description": "Inspect PHP app safely"},
+            "source": {"skills": [], "tool_chain": {"tree_sha256": tree_sha_ws}},
+        }))
+        .unwrap();
+        let tc_pkg = infra_skillcache::package::write_warm(
+            &tc_root.join("warm"),
+            &tc_cap,
+            Some(b"# Inspect\n1. Check app.php.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+
+        let sk_root = root.path().join("artifacts/wt-sk");
+        let sk_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "pdf-mirror", "description": "Extract PDF rows"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}]},
+        })).unwrap();
+        let sk_pkg = infra_skillcache::package::write_warm(
+            &sk_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract rows.\n"),
+            &infra_skillcache::package::Files::new(),
+        )
+        .unwrap();
+
+        {
+            let db = store.connection().unwrap();
+            let common = db::canonical_git_common_dir(&wt1);
+            db::begin_capsule(
+                &db,
+                "cap-wt-tc",
+                "cmp-wt-tc",
+                &pid1,
+                "s1",
+                "g1",
+                &json!({"name": "tool-chain", "path": "", "tree_sha256": tree_sha_ws}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-wt-tc",
+                    mu_name: "inspect-php",
+                    mu_description: "Inspect PHP app safely",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: &tc_pkg,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: tc_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-wt-tc", "tool_chain", &tree_sha_ws).unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-wt-tc", common.as_deref()).unwrap();
+
+            db::begin_capsule(
+                &db, "cap-wt-sk", "cmp-wt-sk", &pid1, "s1", "g2",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}), None,
+            ).unwrap();
+            db::activate_capsule(&db, &db::Qualified {
+                capsule_id: "cap-wt-sk", mu_name: "pdf-mirror", mu_description: "Extract PDF rows",
+                form: "textual", capsule_sha256: "b", package_sha256: &sk_pkg,
+                skill_files: &json!({"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha, "taken_ns": "0", "files": []}]}),
+                env_fingerprint: &env_fp, engine_digest: "eng",
+                artifact_dir: sk_root.to_str().unwrap(), capabilities: &json!({"network": "none", "runtimes": []}),
+            }).unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-wt-sk", common.as_deref()).unwrap();
+        }
+
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+
+        let tc_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect php app".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let sk_route = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let sess_for = |pid: &str, id: &str| {
+            json!({
+                "id": id,
+                "project_id": pid,
+                "provider": "claude",
+                "mode": "edit",
+                "permissions": "auto",
+                "skillcache": {"mode": "warm_only", "tool_chain": true},
+            })
+        };
+
+        // 1. Sibling `wt2` (`pid2`) hits BOTH ToolChain and mirror Skill capsules from `wt1` (`pid1`).
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2"),
+            &tc_route,
+            "inspect php app",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-tc"),
+            other_dec => panic!(
+                "expected cross-worktree ToolChain hit, got {}",
+                reason(&other_dec)
+            ),
+        }
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2"),
+            &sk_route,
+            "$pdf extract",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-sk"),
+            other_dec => panic!(
+                "expected cross-worktree mirror hit, got {}",
+                reason(&other_dec)
+            ),
+        }
+
+        // Remove `.claude` in `wt2` so `wt2` is truly mirror-only (only `.agents/skills/pdf/SKILL.md`),
+        // and verify mirror fallback resolves `.agents` even when `.claude` is absent on disk.
+        std::fs::remove_dir_all(wt2.join(".claude")).unwrap();
+        match decide_for(
+            &rt,
+            &sess_for(&pid2, "s-wt2-mirror-only"),
+            &sk_route,
+            "$pdf extract",
+            &wt2,
+            None,
+        ) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-wt-sk"),
+            other_dec => panic!(
+                "expected mirror-only sibling hit without `.claude`, got {}",
+                reason(&other_dec)
+            ),
+        }
+        // Restore `.claude` in `wt2` before subsequent tree-drift assertions.
+        std::fs::create_dir_all(wt2.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt2.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+
+        // 2. Unrelated repo `other` (`pid3`) with different `git_common_dir` MUST stay strictly isolated!
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid3, "s-other"),
+                &tc_route,
+                "inspect php app",
+                &other,
+                None
+            )),
+            "no_single_skill"
+        );
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid3, "s-other"),
+                &sk_route,
+                "$pdf extract",
+                &other,
+                None
+            )),
+            "no_capsule"
+        );
+
+        // 3. When `wt2` modifies a workspace file (`workspace_tree_sha` differs) or skill (`skill_tree_sha` differs),
+        // `wt2` stays isolated (misses) while `wt1`'s capsule remains `"active"` (never marked stale by `wt2`).
+        std::fs::write(wt2.join("app.php"), "<?php echo 2;\n").unwrap();
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid2, "s-wt2-drift"),
+                &tc_route,
+                "inspect php app",
+                &wt2,
+                Some("g-drift")
+            )),
+            "no_single_skill"
+        );
+        std::fs::write(
+            wt2.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf\n---\nChanged\n",
+        )
+        .unwrap();
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &sess_for(&pid2, "s-wt2-sk-drift"),
+                &sk_route,
+                "$pdf extract",
+                &wt2,
+                Some("g-sk-drift")
+            )),
+            "no_capsule"
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            assert_eq!(
+                db::capsule(&db, "cap-wt-tc").unwrap().unwrap()["status"],
+                "active"
+            );
+            assert_eq!(
+                db::capsule(&db, "cap-wt-sk").unwrap().unwrap()["status"],
+                "active"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_local_capsule_does_not_shadow_fresh_sibling_capsule() {
+        let root = tempfile::tempdir().unwrap();
+        let wt1 = root.path().join("wt1");
+        let wt2 = root.path().join("wt2");
+        let skill_md = "---\nname: pdf\ndescription: Extract PDF rows\n---\n# PDF\n";
+        std::fs::create_dir_all(wt1.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(wt1.join(".claude/skills/pdf/SKILL.md"), skill_md).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "base"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let skill_tree_sha =
+            infra_skillcache::fingerprint::tree_sha256(&wt1.join(".claude/skills/pdf"))
+                .unwrap()
+                .sha256;
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &crate::skillcache::runtime_versions(&[]),
+        );
+        let sk_cap = SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "textual",
+            "mu": {"name": "pdf", "description": "Extract PDF rows"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}]},
+        })).unwrap();
+        let sib_root = root.path().join("artifacts/sib-fresh");
+        let sib_pkg = infra_skillcache::package::write_warm(
+            &sib_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract.\n"),
+            &Default::default(),
+        )
+        .unwrap();
+        let stale_root = root.path().join("artifacts/local-stale");
+        let _ = infra_skillcache::package::write_warm(
+            &stale_root.join("warm"),
+            &sk_cap,
+            Some(b"# PDF\n1. Extract.\n"),
+            &Default::default(),
+        )
+        .unwrap();
+        let common = db::canonical_git_common_dir(&wt1);
+        {
+            let db = store.connection().unwrap();
+            let skill_files = json!({"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha, "taken_ns": "0", "files": []}]});
+            db::begin_capsule(
+                &db,
+                "cap-sib-fresh",
+                "cmp-sib",
+                &pid1,
+                "s1",
+                "g1",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-sib-fresh",
+                    mu_name: "pdf",
+                    mu_description: "Extract PDF rows",
+                    form: "textual",
+                    capsule_sha256: "sib",
+                    package_sha256: &sib_pkg,
+                    skill_files: &skill_files,
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: sib_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-sib-fresh", common.as_deref()).unwrap();
+
+            db::begin_capsule(
+                &db,
+                "cap-local-stale",
+                "cmp-loc",
+                &pid2,
+                "s2",
+                "g2",
+                &json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": skill_tree_sha}),
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-local-stale",
+                    mu_name: "pdf",
+                    mu_description: "Extract PDF rows",
+                    form: "textual",
+                    capsule_sha256: "loc",
+                    package_sha256: "stale-package-sha-mismatch",
+                    skill_files: &skill_files,
+                    env_fingerprint: &env_fp,
+                    engine_digest: "eng",
+                    artifact_dir: stale_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": []}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_git_common_dir(&db, "cap-local-stale", common.as_deref()).unwrap();
+        }
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let sess = json!({
+            "id": "s-wt2",
+            "project_id": pid2,
+            "provider": "claude",
+            "mode": "edit",
+            "permissions": "auto",
+            "skillcache": {"mode": "warm_only"},
+        });
+        match decide_for(&rt, &sess, &route, "$pdf extract", &wt2, None) {
+            Decision::Hit(w) => assert_eq!(w.capsule_id, "cap-sib-fresh"),
+            other => panic!(
+                "expected fresh sibling hit on turn 1, got {}",
+                reason(&other)
+            ),
+        }
     }
 }

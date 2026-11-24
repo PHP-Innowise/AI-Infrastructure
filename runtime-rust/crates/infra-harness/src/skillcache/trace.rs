@@ -63,8 +63,8 @@ pub fn should_snapshot_for_observation(
     crate::skillcache::settings::mode(session) == "observe" && workspace_has_skills(workspace)
 }
 
-/// As [`should_snapshot_for_observation`], also enabling snapshots when
-/// opt-in `ToolChain` capture is enabled on `store` or `session`.
+/// As [`should_snapshot_for_observation`], also enabling observation tracking
+/// when opt-in `ToolChain` capture is enabled on `store` or `session`.
 pub fn should_snapshot_for_observation_in_store(
     store: &SessionStore,
     session: &Value,
@@ -74,6 +74,218 @@ pub fn should_snapshot_for_observation_in_store(
     should_snapshot_for_observation(session, route, workspace)
         || (crate::skillcache::settings::records(session)
             && crate::skillcache::settings::tool_chain_enabled(store, session))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObservationStrategy {
+    None,
+    Full,
+    LightweightToolchain,
+}
+
+/// Chooses pre-turn observation work: routed/explicit skill observations take a
+/// full pre-turn snapshot; unrouted `ToolChain` candidates use a lightweight
+/// pre/post git/stat fingerprint so cold turns avoid heavy `ignored/` copies.
+pub(crate) fn observation_strategy(
+    store: &SessionStore,
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> ObservationStrategy {
+    if should_snapshot_for_observation(session, route, workspace) {
+        ObservationStrategy::Full
+    } else if crate::skillcache::settings::records(session)
+        && crate::skillcache::settings::tool_chain_enabled(store, session)
+    {
+        ObservationStrategy::LightweightToolchain
+    } else {
+        ObservationStrategy::None
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ToolchainPreTurnStamp {
+    pub digest: String,
+}
+
+fn stat_stamp_entry(path: &Path) -> String {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return "missing".into();
+    };
+    if infra_core::fs::linked(&meta) {
+        let target = std::fs::read_link(path)
+            .map(|t| t.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return format!("link:{target}");
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    #[cfg(unix)]
+    let (ctime, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            meta.ino(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ctime, ino) = (0i128, 0u64);
+    format!(
+        "{}:{}:{mtime}:{ctime}:{ino}",
+        if meta.is_dir() { "d" } else { "f" },
+        meta.len()
+    )
+}
+
+fn stat_tree_bounded(
+    root: &Path,
+    subdir: Option<&str>,
+    allowlist: &[String],
+    max_entries: usize,
+    out: &mut Vec<(String, String)>,
+) -> Option<()> {
+    let start = match subdir {
+        Some(rel) => root.join(rel),
+        None => root.to_path_buf(),
+    };
+    if !start.exists() {
+        return Some(());
+    }
+    let mut stack = vec![start];
+    while let Some(dir) = stack.pop() {
+        let mut entries = std::fs::read_dir(&dir)
+            .ok()?
+            .collect::<std::io::Result<Vec<_>>>()
+            .ok()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            if out.len() >= max_entries {
+                return None;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if subdir.is_none()
+                && (executor::is_ignored_workspace_name_with(name_str, allowlist)
+                    || (dir == root && matches!(name_str, ".harness-tmp" | "target")))
+            {
+                continue;
+            }
+            if subdir.is_some() && executor::ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&name_str) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let stamp = stat_stamp_entry(&path);
+            let is_dir = stamp.starts_with("d:");
+            out.push((rel, stamp));
+            if is_dir {
+                stack.push(path);
+            }
+        }
+    }
+    Some(())
+}
+
+/// Captures a lightweight git+stat fingerprint of `workspace` (zero file reads or
+/// `ignored/` copies) so unrouted `ToolChain` cold turns can verify `changes.is_empty()`
+/// post-turn before capturing a replay snapshot.
+pub(crate) fn capture_toolchain_pre_turn_stamp(
+    workspace: &Path,
+    allowlist: &[String],
+) -> Option<ToolchainPreTurnStamp> {
+    const STAT_LIMIT: usize = 25_000;
+    if let Ok(located) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--show-toplevel", "--show-prefix"])
+        .output()
+        && located.status.success()
+    {
+        let text = String::from_utf8_lossy(&located.stdout);
+        let mut lines = text.lines();
+        if let Some(top_raw) = lines.next().map(str::trim).filter(|s| !s.is_empty()) {
+            let top = PathBuf::from(top_raw);
+            let prefix = lines
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('/')
+                .to_owned();
+            let tree_ref = if prefix.is_empty() {
+                "HEAD^{tree}".to_owned()
+            } else {
+                format!("HEAD:{prefix}")
+            };
+            let tree_oid = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&top)
+                .args(["rev-parse", "--verify", "--quiet", &tree_ref])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "UNBORN".to_owned());
+            if let Ok(status_out) = std::process::Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args([
+                    "-c",
+                    "core.quotePath=false",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--no-renames",
+                    "--",
+                    ".",
+                ])
+                .output()
+                && status_out.status.success()
+            {
+                let mut entries = Vec::new();
+                for record in status_out.stdout.split(|b| *b == 0) {
+                    if record.len() < 4 {
+                        continue;
+                    }
+                    let xy = String::from_utf8_lossy(&record[..2]).into_owned();
+                    let repo_rel = String::from_utf8_lossy(&record[3..]).into_owned();
+                    let stamp = stat_stamp_entry(&top.join(&repo_rel));
+                    entries.push((format!("{xy}:{repo_rel}"), stamp));
+                }
+                for dir in allowlist {
+                    stat_tree_bounded(workspace, Some(dir), allowlist, STAT_LIMIT, &mut entries)?;
+                }
+                entries.sort();
+                let mut payload = format!("git-stat-v1:{tree_oid}\n");
+                for (k, v) in entries {
+                    payload.push_str(&format!("{k}={v}\n"));
+                }
+                return Some(ToolchainPreTurnStamp {
+                    digest: fingerprint::sha256(payload.as_bytes()),
+                });
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    stat_tree_bounded(workspace, None, allowlist, STAT_LIMIT, &mut entries)?;
+    entries.sort();
+    let mut payload = String::from("fs-stat-v1\n");
+    for (k, v) in entries {
+        payload.push_str(&format!("{k}={v}\n"));
+    }
+    Some(ToolchainPreTurnStamp {
+        digest: fingerprint::sha256(payload.as_bytes()),
+    })
 }
 
 const TOOLCHAIN_MANIFEST_FILES: [&str; 8] = [
@@ -87,7 +299,7 @@ const TOOLCHAIN_MANIFEST_FILES: [&str; 8] = [
     "artisan",
 ];
 
-fn hash_workspace_target(path: &Path) -> String {
+pub(crate) fn hash_workspace_target(path: &Path) -> String {
     const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
     const MAX_DIR_FILES: usize = 10_000;
     const MAX_DIR_BYTES: u64 = 64 * 1024 * 1024;
@@ -379,6 +591,94 @@ pub fn is_read_only_tool_name(name: &str) -> bool {
             | "list_dir"
             | "search"
     )
+}
+
+fn strip_workspace_prefix(workspace: &Path, ws_canon: Option<&Path>, raw: &str) -> Option<String> {
+    let candidate = Path::new(raw);
+    if !raw.starts_with('/') && !candidate.is_absolute() {
+        return None;
+    }
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    for root in [Some(workspace), ws_canon].into_iter().flatten() {
+        if let Ok(rel) = candidate.strip_prefix(root) {
+            let text = rel.to_string_lossy().replace('\\', "/");
+            let trimmed = text.trim_start_matches("./").trim_end_matches('/');
+            return Some(if trimmed.is_empty() {
+                ".".to_owned()
+            } else {
+                trimmed.to_owned()
+            });
+        }
+    }
+    None
+}
+
+fn normalize_workspace_segment(
+    workspace: &Path,
+    ws_canon: Option<&Path>,
+    segment: &str,
+) -> Option<String> {
+    let tokens = infra_generator::commands::tokenize(segment).ok()?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(tokens.len());
+    for (idx, token) in tokens.into_iter().enumerate() {
+        let rewritten = if idx == 0 {
+            token
+        } else if let Some((flag, rhs)) = token.split_once('=')
+            && !flag.is_empty()
+            && (rhs.starts_with('/') || Path::new(rhs).is_absolute())
+            && let Some(rel) = strip_workspace_prefix(workspace, ws_canon, rhs)
+        {
+            format!("{flag}={rel}")
+        } else if let Some(rel) = strip_workspace_prefix(workspace, ws_canon, &token) {
+            rel
+        } else {
+            token
+        };
+        normalized.push(infra_generator::commands::quote(&rewritten));
+    }
+    Some(normalized.join(" "))
+}
+
+fn is_read_only_shell_command(store: &SessionStore, workspace: &Path, command: &str) -> bool {
+    let Some(segments) = infra_skillcache::trace::split_read_only_shell_chain(command) else {
+        return false;
+    };
+    let ws_canon = infra_core::fs::canonicalize(workspace).ok();
+    segments.into_iter().all(|segment| {
+        let candidate = normalize_workspace_segment(workspace, ws_canon.as_deref(), &segment)
+            .unwrap_or(segment);
+        matches!(
+            crate::permissions::classify_read_only_program_command_in_store(
+                Some(workspace),
+                Some(store),
+                &candidate,
+            ),
+            Ok(Some(_))
+        )
+    })
+}
+
+fn is_read_only_toolchain_step(store: &SessionStore, workspace: &Path, step: &Value) -> bool {
+    let name = step["tool"]
+        .as_str()
+        .or_else(|| step["name"].as_str())
+        .unwrap_or("");
+    if is_read_only_tool_name(name) {
+        return true;
+    }
+    if !infra_skillcache::trace::is_shell_tool_name(name) {
+        return false;
+    }
+    infra_skillcache::trace::step_shell_command(step)
+        .is_some_and(|command| is_read_only_shell_command(store, workspace, command))
 }
 
 /// Store setting JSON controlling short-turn observation admission
@@ -768,13 +1068,7 @@ pub fn check_admissible_with_toolchain(
             .steps
             .iter()
             .filter(|step| step["kind"] == "tool")
-            .any(|step| {
-                let name = step["tool"]
-                    .as_str()
-                    .or_else(|| step["name"].as_str())
-                    .unwrap_or("");
-                !is_read_only_tool_name(name)
-            });
+            .any(|step| !is_read_only_toolchain_step(store, workspace, step));
         if has_mutating {
             return Err(skipped(
                 "mutating_tool_chain",
@@ -1229,5 +1523,164 @@ mod tests {
         assert!(!out.contains("pwd-value-7777"));
         assert!(!out.contains("auth-value-6666"));
         assert!(out.contains("visible-safe-5555"));
+    }
+
+    #[test]
+    fn check_admissible_with_toolchain_classifies_codex_claude_and_cursor_shell_steps() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let workspace = infra_core::fs::canonicalize(&ws).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}").unwrap();
+        std::fs::write(workspace.join("src/App.php"), "<?php echo 1;\n").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "check php files and git status".into(),
+            requests: vec![],
+            notice: None,
+        };
+
+        // Codex `command_execution` with wrapped bash -lc + chained read-only commands + workspace-abs path.
+        let abs_php = workspace.join("src/App.php");
+        let codex_ro = Trace {
+            provider: "codex".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status --short && cat composer.json'"}}),
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": format!("php -l {}", abs_php.display())}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let (skills, tools, tree_sha) = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "check php files and git status",
+            &codex_ro,
+            &Value::Null,
+        )
+        .expect("read-only codex command_execution turn should qualify");
+        assert!(skills.is_empty());
+        assert_eq!(tools, 2);
+        assert!(tree_sha.is_some());
+
+        // Claude `Bash` + Cursor `shell` / `shellToolCall` read-only turns also qualify,
+        // including quoted pipes (`rg 'a|b' src`) and compound `bash -lc` chains.
+        let claude_cursor_ro = Trace {
+            provider: "claude".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "Bash", "input": {"command": "git status --short"}}),
+                json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "/bin/sh -c \"ls -la; rg 'a|b' src\""}}),
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status' && bash -lc 'cat composer.json'"}}),
+                json!({"kind": "tool", "tool": "shell", "input": {"command": "ls -la"}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        assert!(
+            check_admissible_with_toolchain(
+                &store,
+                true,
+                &workspace,
+                &route,
+                "check php files and git status",
+                &claude_cursor_ro,
+                &Value::Null,
+            )
+            .is_ok()
+        );
+
+        // Mutating shell commands, mutating git/sort/rg flags, redirects, inline eval, and out-of-workspace absolute paths are rejected.
+        for bad_step in [
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status && rm -rf src'"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "cat composer.json > copy.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "python3 -c 'print(1)'"}}),
+            json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "cat /etc/passwd"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git commit -m oops"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git rm -r src"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git mv a b"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git branch -D main"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git apply patch.diff"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git worktree remove wt"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git gc --prune=now"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git diff --output=out.txt"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "sort -o out.txt composer.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "sort --output=out.txt composer.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "rg --pre=./evil.sh App src"}}),
+        ] {
+            let mut bad = codex_ro.clone();
+            bad.steps.push(bad_step.clone());
+            let err = check_admissible_with_toolchain(
+                &store,
+                true,
+                &workspace,
+                &route,
+                "check php files and git status",
+                &bad,
+                &Value::Null,
+            )
+            .unwrap_err();
+            assert_eq!(err["reason"], "mutating_tool_chain", "{bad_step}");
+        }
+    }
+
+    #[test]
+    fn toolchain_observation_strategy_defers_heavy_snapshot_and_detects_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let workspace = infra_core::fs::canonicalize(&ws).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}\n").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let tc_sess = store
+            .create(
+                &json!({
+                    "project_id": project_id,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "native",
+                    "permissions": "auto",
+                    "skillcache": {"mode": "auto", "tool_chain": true}
+                }),
+                "inspect composer",
+                &[],
+            )
+            .unwrap();
+        let unrouted = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect composer".into(),
+            requests: vec![],
+            notice: None,
+        };
+        assert_eq!(
+            observation_strategy(&store, &tc_sess, &unrouted, &workspace),
+            ObservationStrategy::LightweightToolchain
+        );
+        let routed = ResolvedCommand {
+            mode: "text".into(),
+            text: "$pdf inspect".into(),
+            requests: vec![json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        assert_eq!(
+            observation_strategy(&store, &tc_sess, &routed, &workspace),
+            ObservationStrategy::Full
+        );
+
+        let before = capture_toolchain_pre_turn_stamp(&workspace, &[]).unwrap();
+        let same = capture_toolchain_pre_turn_stamp(&workspace, &[]).unwrap();
+        assert_eq!(before, same);
+
+        std::fs::write(workspace.join("silent.txt"), "mutated").unwrap();
+        let after = capture_toolchain_pre_turn_stamp(&workspace, &[]).unwrap();
+        assert_ne!(before, after);
     }
 }

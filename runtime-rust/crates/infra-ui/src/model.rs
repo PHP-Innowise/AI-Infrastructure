@@ -173,6 +173,7 @@ pub struct ApprovalQueueState {
     pub drawer_open: bool,
     pub rules: Vec<ApprovalRule>,
     pub rules_sid: String,
+    pub rules_sid_manual: bool,
     pub rules_loading: bool,
     pub rules_error: String,
     pub waiting_counts: BTreeMap<String, usize>,
@@ -558,6 +559,39 @@ pub fn upsert_sessions(sessions: &[V]) {
         upsert(session.clone());
     }
 }
+
+/// Parses a numeric stream event ID from either an integer or string `"id"` field.
+pub(crate) fn numeric_event_id(event: &V) -> Option<u64> {
+    event["id"]
+        .as_u64()
+        .or_else(|| event["id"].as_str()?.trim().parse().ok())
+}
+
+/// Removes up to `remove_count` oldest events from `events` and clears their IDs from `seen`
+/// so evicted history can still be reloaded cleanly via `?before=` pagination.
+pub(crate) fn prune_events_prefix(
+    events: &mut Vec<V>,
+    seen: &mut BTreeSet<String>,
+    remove_count: usize,
+) -> (Vec<V>, Option<u64>, bool) {
+    let count = remove_count.min(events.len());
+    if count == 0 {
+        return (Vec::new(), events.first().and_then(numeric_event_id), false);
+    }
+    let drained: Vec<V> = events.drain(..count).collect();
+    let mut drained_any_numeric = false;
+    for ev in &drained {
+        if numeric_event_id(ev).is_some() {
+            drained_any_numeric = true;
+        }
+        let id = string(&ev["id"]);
+        if !id.is_empty() {
+            seen.remove(&id);
+        }
+    }
+    let oldest = events.first().and_then(numeric_event_id);
+    (drained, oldest, drained_any_numeric)
+}
 #[cfg(test)]
 mod sdd_contract_tests {
     use super::*;
@@ -921,5 +955,21 @@ mod omnigraph_model_tests {
         assert_eq!(from_obj.key, "write:src/*");
         assert_eq!(from_obj.tool, "Write");
         assert_eq!(from_obj.pattern, "src/*");
+    }
+
+    #[test]
+    fn prune_events_prefix_evicts_oldest_and_frees_seen_ids() {
+        let mut events = (1..=5)
+            .map(|id| serde_json::json!({"id": id, "kind": "text", "text": format!("msg {id}")}))
+            .collect::<Vec<_>>();
+        let mut seen: BTreeSet<String> = (1..=5).map(|id| id.to_string()).collect();
+
+        let (drained, oldest, any_num) = prune_events_prefix(&mut events, &mut seen, 3);
+        assert_eq!(drained.len(), 3);
+        assert_eq!(oldest, Some(4));
+        assert!(any_num);
+        assert_eq!(events.len(), 2);
+        assert!(!seen.contains("1") && !seen.contains("3"));
+        assert!(seen.contains("4") && seen.contains("5"));
     }
 }

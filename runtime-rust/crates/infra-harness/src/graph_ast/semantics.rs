@@ -299,16 +299,18 @@ pub(super) fn emit_semantic_from_call(
                     || callee_lower == "route"
                     || callee_lower.starts_with("handle")
                     || callee_lower.starts_with("map"))
-                && let Some(target) = normalize_route_contract(Some(verb), clean_path, false)
             {
-                ctx.push_semantic(
-                    "exposes_route",
-                    target,
-                    source_symbol.clone(),
-                    line,
-                    evidence,
-                );
-                route_emitted = true;
+                let composed_path = ctx.compose_call_route_path(clean_path);
+                if let Some(target) = normalize_route_contract(Some(verb), &composed_path, false) {
+                    ctx.push_semantic(
+                        "exposes_route",
+                        target,
+                        source_symbol.clone(),
+                        line,
+                        evidence,
+                    );
+                    route_emitted = true;
+                }
             }
         }
     }
@@ -330,11 +332,29 @@ pub(super) fn emit_semantic_from_call(
         );
     }
 
-    // 2. DI bindings (`bind`, `singleton`, `scoped`, `AddSingleton`, `AddScoped`, `AddTransient`, `provide`)
-    if matches!(
+    // 2. DI bindings & container resolutions (`bind`, `singleton`, `scoped`, `app()->make(...)`, `Container::get(...)`, `resolve(...)`)
+    let is_di_binding = matches!(
         callee_lower.as_str(),
         "bind" | "singleton" | "scoped" | "addsingleton" | "addscoped" | "addtransient" | "provide"
-    ) {
+    );
+    let is_express_app_get = callee_lower == "get"
+        && recv_lower == "app"
+        && (!string_args.is_empty()
+            || (matches!(ctx.grammar, AstGrammar::TypeScript | AstGrammar::JavaScript) && {
+                let parts = split_top_level_commas(args_inner);
+                parts.len() >= 2 && !parts[1].trim_start().starts_with('{')
+            }));
+    let is_container_resolve = !route_emitted
+        && !is_express_app_get
+        && !args_inner.is_empty()
+        && ((matches!(
+            callee_lower.as_str(),
+            "make" | "makewith" | "get" | "resolve"
+        ) && is_di_container_receiver(&recv_lower))
+            || (recv_lower.is_empty()
+                && ((callee_lower == "app")
+                    || (callee_lower == "resolve" && ctx.grammar == AstGrammar::Php))));
+    if is_di_binding || is_container_resolve {
         let targets = extract_di_targets(args_inner, args_text, string_args, full_chain_text);
         for svc in targets {
             ctx.push_semantic(
@@ -344,6 +364,20 @@ pub(super) fn emit_semantic_from_call(
                 line,
                 evidence,
             );
+            if is_container_resolve && svc.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                ctx.push_ref(AstRef {
+                    target_name: svc,
+                    member: None,
+                    context: "di_resolve".to_owned(),
+                    access: "type".to_owned(),
+                    member_kind: None,
+                    owner_type: None,
+                    enclosing_symbol: source_symbol.clone(),
+                    is_static: false,
+                    line,
+                    evidence: clip_str(evidence, 160),
+                });
+            }
         }
     }
 
@@ -492,7 +526,8 @@ pub(super) fn emit_semantic_from_attribute(
     };
     if let Some(verb) = route_verb {
         if let Some(path) = string_args.first() {
-            if let Some(target) = normalize_route_contract(Some(verb), path, false) {
+            let composed = ctx.compose_attr_route_path(path);
+            if let Some(target) = normalize_route_contract(Some(verb), &composed, false) {
                 ctx.push_semantic(
                     "exposes_route",
                     target,
@@ -501,16 +536,17 @@ pub(super) fn emit_semantic_from_attribute(
                     attr_text,
                 );
             }
-        } else if verb != "ANY"
-            && let Some(target) = normalize_route_contract(Some(verb), "/", false)
-        {
-            ctx.push_semantic(
-                "exposes_route",
-                target,
-                annotated_symbol.map(str::to_owned),
-                line,
-                attr_text,
-            );
+        } else if verb != "ANY" {
+            let composed = ctx.compose_attr_route_path("/");
+            if let Some(target) = normalize_route_contract(Some(verb), &composed, false) {
+                ctx.push_semantic(
+                    "exposes_route",
+                    target,
+                    annotated_symbol.map(str::to_owned),
+                    line,
+                    attr_text,
+                );
+            }
         }
     }
 
@@ -693,6 +729,30 @@ fn extract_new_type_in_closure(raw: &str) -> Option<String> {
     clean_di_type_token(tok)
 }
 
+fn is_di_container_receiver(recv_lower: &str) -> bool {
+    let r = recv_lower.trim();
+    matches!(
+        r,
+        "app"
+            | "app()"
+            | "$app"
+            | "$this->app"
+            | "$this->container"
+            | "container"
+            | "$container"
+            | "injector"
+            | "$injector"
+            | "moduleref"
+            | "servicelocator"
+            | "di"
+    ) || r.ends_with("\\app")
+        || r.ends_with("\\container")
+        || r.ends_with("->app")
+        || r.ends_with("->container")
+        || r.ends_with(".container")
+        || r.ends_with(".injector")
+}
+
 pub(super) fn extract_di_targets(
     args_inner: &str,
     args_text: &str,
@@ -771,30 +831,162 @@ pub(super) fn extract_di_targets(
     targets
 }
 
+/// Collapses brace-balanced JS/TS template interpolations (`${...}`) to `placeholder`.
+/// Rejects empty (`${}`) or unclosed interpolations and any whitespace outside `${...}`.
+/// Returns `(collapsed, leading_template_slash)` where `leading_template_slash` is `true`
+/// when `raw` starts with `${...}` immediately followed by `/`.
+struct TemplateExprState {
+    brace_depth: usize,
+    quote: Option<u8>,
+    escaped: bool,
+}
+
+fn collapse_route_template_interpolations(raw: &str, placeholder: &str) -> Option<(String, bool)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut idx = 0usize;
+
+    while idx < bytes.len() {
+        if bytes[idx] == b'$' && idx + 1 < bytes.len() && bytes[idx + 1] == b'{' {
+            let expr_start = idx + 2;
+            let mut cursor = expr_start;
+            let mut stack = vec![TemplateExprState {
+                brace_depth: 1,
+                quote: None,
+                escaped: false,
+            }];
+            while cursor < bytes.len() && !stack.is_empty() {
+                let b = bytes[cursor];
+                let frame = stack.last_mut().expect("stack non-empty");
+                if let Some(q) = frame.quote {
+                    if frame.escaped {
+                        frame.escaped = false;
+                    } else if b == b'\\' {
+                        frame.escaped = true;
+                    } else if q == b'`'
+                        && b == b'$'
+                        && cursor + 1 < bytes.len()
+                        && bytes[cursor + 1] == b'{'
+                    {
+                        stack.push(TemplateExprState {
+                            brace_depth: 1,
+                            quote: None,
+                            escaped: false,
+                        });
+                        cursor += 2;
+                        continue;
+                    } else if b == q {
+                        frame.quote = None;
+                    }
+                    cursor += 1;
+                    continue;
+                }
+                match b {
+                    b'\'' | b'"' | b'`' => frame.quote = Some(b),
+                    b'{' => frame.brace_depth += 1,
+                    b'}' => {
+                        frame.brace_depth -= 1;
+                        if frame.brace_depth == 0 {
+                            stack.pop();
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            if !stack.is_empty() || trimmed[expr_start..cursor - 1].trim().is_empty() {
+                return None;
+            }
+            out.push_str(placeholder);
+            idx = cursor;
+            continue;
+        }
+        let ch = trimmed[idx..].chars().next()?;
+        if ch.is_whitespace() {
+            return None;
+        }
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+
+    let leading_template_slash =
+        out.starts_with(placeholder) && out.trim_start_matches(placeholder).starts_with('/');
+    Some((out, leading_template_slash))
+}
+
+fn find_closing_delim(chars: &[char], open_idx: usize, open: char, close: char) -> Option<usize> {
+    let mut i = open_idx + 1;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        if chars[i] == open {
+            depth += 1;
+        } else if chars[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return (i > open_idx + 1).then_some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Normalizes a single URL path segment (whole-segment or inline placeholders) to `placeholder`.
+fn normalize_route_segment(seg: &str, placeholder: &str) -> String {
+    if seg == placeholder || (seg.starts_with(':') && seg.len() > 1) {
+        return placeholder.to_owned();
+    }
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::with_capacity(seg.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let close = match chars[i] {
+            '{' => Some('}'),
+            '<' => Some('>'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(close_ch) = close
+            && let Some(end) = find_closing_delim(&chars, i, chars[i], close_ch)
+        {
+            out.push_str(placeholder);
+            i = end + 1;
+            continue;
+        }
+        out.push(chars[i].to_ascii_lowercase());
+        i += 1;
+    }
+    out
+}
+
 /// Normalizes a route specification and optional HTTP verb into canonical `route:<VERB|*> /norm/{param}`.
 pub(crate) fn normalize_route_contract(
     verb: Option<&str>,
     raw_path: &str,
     require_leading_slash_or_http: bool,
 ) -> Option<String> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
-        return None;
-    }
-    let path_part = if let Some(rest) = trimmed
+    let (collapsed, leading_template_slash) =
+        collapse_route_template_interpolations(raw_path, "{param}")?;
+    let path_part = if let Some(rest) = collapsed
         .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
+        .or_else(|| collapsed.strip_prefix("https://"))
     {
         match rest.find('/') {
             Some(slash) => &rest[slash..],
             None => "/",
         }
-    } else if trimmed.starts_with('/') {
-        trimmed
+    } else if leading_template_slash {
+        collapsed.trim_start_matches("{param}")
+    } else if collapsed.starts_with('/') {
+        collapsed.as_str()
     } else if require_leading_slash_or_http {
         return None;
     } else {
-        trimmed
+        collapsed.as_str()
     };
     let without_query = path_part.split(['?', '#']).next().unwrap_or(path_part);
     let mut norm_segments = Vec::new();
@@ -802,16 +994,7 @@ pub(crate) fn normalize_route_contract(
         if seg.is_empty() {
             continue;
         }
-        let is_param = (seg.starts_with('{') && seg.ends_with('}') && seg.len() > 2)
-            || (seg.starts_with("${") && seg.ends_with('}') && seg.len() > 3)
-            || (seg.starts_with('<') && seg.ends_with('>') && seg.len() > 2)
-            || (seg.starts_with('[') && seg.ends_with(']') && seg.len() > 2)
-            || (seg.starts_with(':') && seg.len() > 1);
-        if is_param {
-            norm_segments.push("{param}".to_owned());
-        } else {
-            norm_segments.push(seg.to_ascii_lowercase());
-        }
+        norm_segments.push(normalize_route_segment(seg, "{param}"));
     }
     let norm_path = if norm_segments.is_empty() {
         "/".to_owned()

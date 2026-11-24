@@ -68,7 +68,7 @@ pub struct Engine {
     pub codex: Option<PathBuf>,
 }
 impl Engine {
-    fn command(&self, workspace: &Path) -> Result<(String, Vec<PathBuf>)> {
+    pub(super) fn command(&self, workspace: &Path) -> Result<(String, Vec<PathBuf>)> {
         let text = |path: &Path| {
             path.to_str()
                 .map(String::from)
@@ -84,19 +84,20 @@ impl Engine {
     }
 }
 
-struct Ran {
-    code: Option<i32>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    seconds: f64,
-    stopped: Option<&'static str>,
+pub(super) struct Ran {
+    pub(super) code: Option<i32>,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+    pub(super) seconds: f64,
+    pub(super) stopped: Option<&'static str>,
 }
 
-fn run_sandboxed(
+pub(super) fn run_sandboxed_with_input(
     spec: &Spec,
     argv: &[String],
     environment: &BTreeMap<String, String>,
     seconds: u64,
+    input: &[u8],
     cancel: &Arc<AtomicBool>,
 ) -> Result<Ran> {
     let command = sandbox::gate(spec, argv)?;
@@ -108,7 +109,7 @@ fn run_sandboxed(
             argv: &command,
             cwd: &spec.workspace,
             environment,
-            input: &[],
+            input,
             output_limit: OUTPUT_BYTES,
             deadline: started + Duration::from_secs(seconds),
         },
@@ -149,7 +150,17 @@ fn run_sandboxed(
     }
 }
 
-fn detail(bytes: &[u8]) -> String {
+fn run_sandboxed(
+    spec: &Spec,
+    argv: &[String],
+    environment: &BTreeMap<String, String>,
+    seconds: u64,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Ran> {
+    run_sandboxed_with_input(spec, argv, environment, seconds, &[], cancel)
+}
+
+pub(super) fn detail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim();
     let start = text.len().saturating_sub(DETAIL_BYTES);
@@ -182,12 +193,13 @@ fn sandbox_denied(text: &str) -> bool {
     .any(|sign| text.contains(sign))
 }
 
-fn environment(
+pub(super) fn sandbox_environment(
     engine: &Engine,
     package: &Path,
     workspace: &Path,
     scratch: &Path,
     state_file: Option<&Path>,
+    generation: &str,
 ) -> BTreeMap<String, String> {
     let mut environment = std::env::vars()
         .filter(|(name, _)| {
@@ -212,17 +224,27 @@ fn environment(
     if let Some(state_file) = state_file {
         environment.insert(env_filter::STATE_FILE.into(), text(state_file));
     }
-    environment.insert(env_filter::GENERATION.into(), "gate".into());
+    environment.insert(env_filter::GENERATION.into(), generation.to_owned());
     // The host's home is not in the gate's root; programs get a scratch one.
-    for name in ["HOME", "TMPDIR", "TMP", "TEMP"] {
+    for name in ["HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP"] {
         environment.insert(name.into(), text(scratch));
     }
     environment
 }
 
+fn environment(
+    engine: &Engine,
+    package: &Path,
+    workspace: &Path,
+    scratch: &Path,
+    state_file: Option<&Path>,
+) -> BTreeMap<String, String> {
+    sandbox_environment(engine, package, workspace, scratch, state_file, "gate")
+}
+
 /// Resolves declared runtime executables into read-only sandbox directories
 /// without exposing `$HOME`.
-fn gate_runtime_dirs(runtimes: &[String]) -> Vec<PathBuf> {
+pub(crate) fn gate_runtime_dirs(runtimes: &[String]) -> Vec<PathBuf> {
     let path_env = std::env::var_os("PATH");
     let path_str = path_env.as_ref().and_then(|value| value.to_str());
     let mut dirs = Vec::new();

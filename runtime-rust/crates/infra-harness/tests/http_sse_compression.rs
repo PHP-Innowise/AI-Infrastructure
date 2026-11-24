@@ -952,3 +952,161 @@ async fn sse_filters_head_validation_permission_timeout_events_and_delete_varian
 
     srv.close().await;
 }
+
+#[tokio::test]
+async fn dedicated_waiting_permissions_routes_avoid_graph_domain_calls() {
+    let srv = TestServer::start().await;
+    let created = srv
+        .store
+        .create(
+            &json!({
+                "project_id": srv.project_id,
+                "title": "Waiting perm route test",
+                "provider": "claude",
+                "mode": "edit",
+                "workflow": "native",
+                "project_context": false,
+            }),
+            "hello waiting",
+            &[],
+        )
+        .unwrap();
+    let s1 = created["id"].as_str().unwrap().to_owned();
+
+    let desk = Arc::new(
+        infra_harness::permissions::PermissionDesk::new_with_timeout(Some(Duration::from_secs(30))),
+    );
+    let store_emit = srv.store.clone();
+    let sid_for_emit = s1.clone();
+    let emit: infra_harness::sessions::Event = Arc::new(move |val| {
+        store_emit.event(&sid_for_emit, &val)?;
+        Ok(())
+    });
+    let approvals = desk.approvals(&s1, emit);
+    let _rx = approvals
+        .ask_answer(&infra_host::permission::PermissionAsk {
+            id: "ask-route-1".into(),
+            provider: "claude".into(),
+            tool: "Shell".into(),
+            summary: "echo ok".into(),
+            session_option: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    srv.graph_domain.calls.lock().unwrap().clear();
+
+    let missing_resp = srv
+        .client
+        .get(srv.url("/api/sessions/does-not-exist/waiting-permissions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_resp.status(), 404);
+
+    let per_sess = srv
+        .get_json(&format!("/api/sessions/{s1}/waiting-permissions"))
+        .await;
+    assert_eq!(per_sess["session_id"], s1);
+    assert!(per_sess["waiting_permissions"].is_array());
+    assert_eq!(per_sess["items"], per_sess["waiting_permissions"]);
+
+    let batch = srv
+        .get_json(&format!(
+            "/api/permissions/waiting?project_id={}&session_id={s1}&limit=5",
+            srv.project_id
+        ))
+        .await;
+    assert!(batch["counts"].is_object());
+    assert!(batch["total"].is_u64());
+    let sessions = batch["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session_id"], s1);
+
+    let graph_calls = srv.graph_domain.calls.lock().unwrap().clone();
+    assert!(
+        graph_calls.is_empty(),
+        "waiting-permissions routes must not invoke graph domain: {graph_calls:?}"
+    );
+
+    srv.close().await;
+}
+
+#[tokio::test]
+async fn sse_project_subscription_admits_registered_system_member_graph_events() {
+    let srv = TestServer::start().await;
+    let base_root = srv._dir.path().to_path_buf();
+    let sys_dir = base_root.join("sys-root");
+    let member_dir = sys_dir.join("svc-a");
+    let other_dir = base_root.join("other-root");
+    std::fs::create_dir_all(&member_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+    std::fs::write(
+        sys_dir.join("system.json"),
+        r#"{"schema_version":1,"name":"sys-sse","services":[{"id":"svc-a","root":"svc-a"}]}"#,
+    )
+    .unwrap();
+
+    let sys_pid = srv.store.register(&sys_dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let member_pid = srv.store.register(&member_dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other_pid = srv.store.register(&other_dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut sse = srv
+        .client
+        .get(srv.url(&format!("/api/events/stream?project_id={sys_pid}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse.status(), 200);
+    let mut sse_buf = String::new();
+    let _ready = read_next_sse_event(&mut sse, &mut sse_buf).await;
+
+    srv.store.publish_event(
+        "graph_status",
+        None,
+        Some(other_pid.clone()),
+        json!({"project_id": other_pid, "state": "ready", "reason": "other"}),
+    );
+    srv.store.publish_event(
+        "session_status",
+        Some("s-other-member".into()),
+        Some(member_pid.clone()),
+        json!({"session_id": "s-other-member", "status": "idle"}),
+    );
+    srv.store.publish_event(
+        "graph_status",
+        None,
+        Some(member_pid.clone()),
+        json!({"project_id": member_pid, "state": "ready", "reason": "member"}),
+    );
+    srv.store.publish_event(
+        "system_graph_status",
+        None,
+        Some(member_pid.clone()),
+        json!({"project_id": member_pid, "state": "ready", "reason": "sys-member"}),
+    );
+
+    let first = read_next_sse_event(&mut sse, &mut sse_buf)
+        .await
+        .expect("expected member graph_status frame");
+    assert_eq!(first.event, "graph_status");
+    assert_eq!(first.data["project_id"], member_pid);
+
+    let second = read_next_sse_event(&mut sse, &mut sse_buf)
+        .await
+        .expect("expected member system_graph_status frame");
+    assert_eq!(second.event, "system_graph_status");
+    assert_eq!(second.data["project_id"], member_pid);
+
+    drop(sse);
+    srv.close().await;
+}

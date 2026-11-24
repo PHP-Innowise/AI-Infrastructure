@@ -2105,6 +2105,11 @@ pub(crate) mod canvas2d {
         scale.is_finite() && scale > 0.0 && scale < CLUSTER_HULL_MAX_SCALE
     }
 
+    #[allow(dead_code)]
+    pub fn should_paint_cluster_hull_labels(overlay_only: bool, show_cluster_hulls: bool) -> bool {
+        !overlay_only && show_cluster_hulls
+    }
+
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct DenseSceneMeta {
         pub nodes: HashMap<usize, DenseNodeMeta>,
@@ -3473,14 +3478,270 @@ pub(crate) mod canvas2d {
 
     type LastPaintEntry = (Camera, Option<(u8, usize)>, bool);
 
+    /// Pure-Rust cache key for the cached offscreen static Canvas2D base layer.
+    /// Excludes transient pointer `hover` so pointer move reuses the static base blit.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct OffscreenBaseKey {
+        pub scene_digest: u64,
+        pub dpr_bits: u64,
+        pub vw_bits: u64,
+        pub vh_bits: u64,
+        pub tx_bits: u64,
+        pub ty_bits: u64,
+        pub scale_bits: u64,
+        pub palette_epoch: u64,
+        pub draw_nodes: bool,
+        pub kind_hover: Option<String>,
+        pub active_layer: Option<String>,
+        pub hidden_kinds_digest: u64,
+    }
+
+    #[inline]
+    fn fnv1a_mix_u64(hash: &mut u64, value: u64) {
+        for b in value.to_le_bytes() {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+
+    #[inline]
+    fn fnv1a_mix_str(hash: &mut u64, s: &str) {
+        fnv1a_mix_u64(hash, s.len() as u64);
+        for &b in s.as_bytes() {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub fn hidden_kinds_digest(hidden_kinds: &HashSet<String>) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        if hidden_kinds.is_empty() {
+            return h;
+        }
+        let mut sorted: Vec<&str> = hidden_kinds.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        for kind in sorted {
+            fnv1a_mix_str(&mut h, kind);
+        }
+        h
+    }
+
+    pub fn compute_scene_digest(scene: &DenseScene, meta: &DenseSceneMeta) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        fnv1a_mix_u64(&mut h, scene.width.to_bits());
+        fnv1a_mix_u64(&mut h, scene.height.to_bits());
+        fnv1a_mix_u64(&mut h, scene.nodes.len() as u64);
+        fnv1a_mix_u64(&mut h, scene.edges.len() as u64);
+        fnv1a_mix_u64(&mut h, meta.containers.len() as u64);
+        fnv1a_mix_u64(&mut h, meta.cluster_hulls.len() as u64);
+        fnv1a_mix_u64(&mut h, u64::from(meta.commit_changes_active));
+        fnv1a_mix_u64(&mut h, meta.label_min_scale.map_or(0, f64::to_bits));
+        for node in &scene.nodes {
+            fnv1a_mix_u64(&mut h, node.index as u64);
+            fnv1a_mix_u64(&mut h, node.x.to_bits());
+            fnv1a_mix_u64(&mut h, node.y.to_bits());
+            fnv1a_mix_u64(&mut h, node.w.to_bits());
+            fnv1a_mix_u64(&mut h, node.h.to_bits());
+            let flags = u64::from(node.selected)
+                | (u64::from(node.lit) << 1)
+                | (u64::from(node.dim) << 2)
+                | (u64::from(node.changed) << 3)
+                | (u64::from(node.pinned) << 4)
+                | (u64::from(node.failed) << 5);
+            fnv1a_mix_u64(&mut h, flags);
+            fnv1a_mix_str(&mut h, &node.label);
+            fnv1a_mix_str(&mut h, &node.role);
+            if let Some(nm) = meta.nodes.get(&node.index) {
+                fnv1a_mix_u64(&mut h, u64::from(nm.in_cycle));
+                fnv1a_mix_str(&mut h, &nm.symbol_kind);
+                fnv1a_mix_str(&mut h, &nm.visibility);
+                fnv1a_mix_str(&mut h, &nm.blast_tag);
+                fnv1a_mix_str(&mut h, &nm.badge_text);
+            }
+            if let Some(layer) = meta.layer_of_node.get(&node.index) {
+                fnv1a_mix_str(&mut h, layer);
+            }
+        }
+        for edge in &scene.edges {
+            fnv1a_mix_u64(&mut h, edge.index as u64);
+            fnv1a_mix_u64(&mut h, edge.weight);
+            fnv1a_mix_u64(&mut h, edge.pts.len() as u64);
+            fnv1a_mix_u64(&mut h, edge.cmds.len() as u64);
+            let flags = u64::from(edge.against)
+                | (u64::from(edge.portal) << 1)
+                | (u64::from(edge.on) << 2)
+                | (u64::from(edge.lit) << 3)
+                | (u64::from(edge.dim) << 4)
+                | (u64::from(edge.detour) << 5)
+                | (u64::from(edge.guessed) << 6)
+                | (u64::from(edge.commit_touched) << 7)
+                | (u64::from(edge.back) << 8);
+            fnv1a_mix_u64(&mut h, flags);
+            fnv1a_mix_str(&mut h, &edge.kind);
+            fnv1a_mix_str(&mut h, &edge.diff);
+            fnv1a_mix_str(&mut h, &edge.impact);
+            fnv1a_mix_u64(&mut h, edge.kinds.len() as u64);
+            for k in &edge.kinds {
+                fnv1a_mix_str(&mut h, k);
+            }
+            for &(x, y) in &edge.pts {
+                fnv1a_mix_u64(&mut h, x.to_bits());
+                fnv1a_mix_u64(&mut h, y.to_bits());
+            }
+            for cmd in &edge.cmds {
+                match *cmd {
+                    DensePathCmd::Move(x, y) => {
+                        fnv1a_mix_u64(&mut h, 1);
+                        fnv1a_mix_u64(&mut h, x.to_bits());
+                        fnv1a_mix_u64(&mut h, y.to_bits());
+                    }
+                    DensePathCmd::Line(x, y) => {
+                        fnv1a_mix_u64(&mut h, 2);
+                        fnv1a_mix_u64(&mut h, x.to_bits());
+                        fnv1a_mix_u64(&mut h, y.to_bits());
+                    }
+                    DensePathCmd::Curve { c1, c2, to } => {
+                        fnv1a_mix_u64(&mut h, 3);
+                        fnv1a_mix_u64(&mut h, c1.0.to_bits());
+                        fnv1a_mix_u64(&mut h, c1.1.to_bits());
+                        fnv1a_mix_u64(&mut h, c2.0.to_bits());
+                        fnv1a_mix_u64(&mut h, c2.1.to_bits());
+                        fnv1a_mix_u64(&mut h, to.0.to_bits());
+                        fnv1a_mix_u64(&mut h, to.1.to_bits());
+                    }
+                }
+            }
+        }
+        for c in &meta.containers {
+            let kind_tag = match c.kind {
+                DenseContainerKind::TierBand => 0_u64,
+                DenseContainerKind::ServiceFrame => 1_u64,
+            };
+            fnv1a_mix_u64(&mut h, kind_tag);
+            fnv1a_mix_u64(&mut h, c.x.to_bits());
+            fnv1a_mix_u64(&mut h, c.y.to_bits());
+            fnv1a_mix_u64(&mut h, c.w.to_bits());
+            fnv1a_mix_u64(&mut h, c.h.to_bits());
+            fnv1a_mix_u64(&mut h, c.radius.to_bits());
+            fnv1a_mix_str(&mut h, &c.label);
+        }
+        for hull in &meta.cluster_hulls {
+            fnv1a_mix_str(&mut h, &hull.key);
+            fnv1a_mix_str(&mut h, &hull.label);
+            fnv1a_mix_u64(&mut h, hull.color_slot as u64);
+            fnv1a_mix_u64(&mut h, hull.node_count as u64);
+            fnv1a_mix_u64(&mut h, hull.bounds.0.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.1.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.2.to_bits());
+            fnv1a_mix_u64(&mut h, hull.bounds.3.to_bits());
+            fnv1a_mix_u64(&mut h, hull.centroid.0.to_bits());
+            fnv1a_mix_u64(&mut h, hull.centroid.1.to_bits());
+            fnv1a_mix_u64(&mut h, hull.polygon.len() as u64);
+            for &(x, y) in &hull.polygon {
+                fnv1a_mix_u64(&mut h, x.to_bits());
+                fnv1a_mix_u64(&mut h, y.to_bits());
+            }
+        }
+        h
+    }
+
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_offscreen_base_key(
+        scene_digest: u64,
+        dpr: f64,
+        vw: f64,
+        vh: f64,
+        cam: Camera,
+        palette_epoch: u64,
+        draw_nodes: bool,
+        kind_hover: Option<&str>,
+        active_layer: Option<&str>,
+        hidden_kinds: &HashSet<String>,
+    ) -> OffscreenBaseKey {
+        OffscreenBaseKey {
+            scene_digest,
+            dpr_bits: dpr.to_bits(),
+            vw_bits: vw.to_bits(),
+            vh_bits: vh.to_bits(),
+            tx_bits: cam.tx.to_bits(),
+            ty_bits: cam.ty.to_bits(),
+            scale_bits: cam.scale.to_bits(),
+            palette_epoch,
+            draw_nodes,
+            kind_hover: kind_hover
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty()),
+            active_layer: active_layer
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty()),
+            hidden_kinds_digest: hidden_kinds_digest(hidden_kinds),
+        }
+    }
+
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub fn should_reuse_offscreen_base(
+        cached: Option<&OffscreenBaseKey>,
+        next: &OffscreenBaseKey,
+    ) -> bool {
+        cached == Some(next)
+    }
+
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub fn is_overlay_edge(
+        edge: &DenseEdgeSpec,
+        hovered_edges: &HashSet<usize>,
+        active_kind_hover_lower: Option<&str>,
+    ) -> bool {
+        hovered_edges.contains(&edge.index)
+            || edge.on
+            || edge.lit
+            || active_kind_hover_lower.is_some_and(|hk| edge_matches_kind_lower(hk, edge))
+    }
+
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub fn is_overlay_node(
+        node: &DenseNodeSpec,
+        hover: Option<(u8, usize)>,
+        hovered_neighbors: &HashSet<usize>,
+    ) -> bool {
+        hover == Some((0, node.index))
+            || hovered_neighbors.contains(&node.index)
+            || node.selected
+            || node.lit
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    struct OffscreenBaseLayer {
+        key: OffscreenBaseKey,
+        canvas: wasm_ctx::CanvasEl,
+    }
+
     thread_local! {
         static DENSE_SCENES: RefCell<HashMap<String, (DenseScene, SpatialHitGrid, DenseSceneMeta)>> =
             RefCell::new(HashMap::new());
+        static SCENE_DIGESTS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
         static LAST_CAMERAS: RefCell<HashMap<String, Camera>> = RefCell::new(HashMap::new());
         static LAST_PAINT_STATE: RefCell<HashMap<String, LastPaintEntry>> =
             RefCell::new(HashMap::new());
+        static LAST_PAINTED_VIEWPORT: RefCell<HashMap<String, (u32, u32)>> =
+            RefCell::new(HashMap::new());
         static REPAINT_LISTENERS: RefCell<HashMap<String, Rc<dyn Fn()>>> =
             RefCell::new(HashMap::new());
+        #[cfg(target_arch = "wasm32")]
+        static OFFSCREEN_BASE_LAYERS: RefCell<HashMap<String, OffscreenBaseLayer>> =
+            RefCell::new(HashMap::new());
+    }
+
+    fn invalidate_offscreen_base_layer(canvas_id: &str) {
+        #[cfg(target_arch = "wasm32")]
+        OFFSCREEN_BASE_LAYERS.with(|layers| {
+            layers.borrow_mut().remove(canvas_id);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = canvas_id;
     }
 
     #[allow(dead_code)]
@@ -3490,14 +3751,25 @@ pub(crate) mod canvas2d {
 
     pub fn store_scene_with_meta(canvas_id: &str, scene: DenseScene, mut meta: DenseSceneMeta) {
         meta.rebuild_caches(&scene);
+        let digest = compute_scene_digest(&scene, &meta);
         let grid = SpatialHitGrid::build(&scene, 128.0);
         DENSE_SCENES.with(|s| {
             s.borrow_mut()
                 .insert(canvas_id.to_owned(), (scene, grid, meta));
         });
+        SCENE_DIGESTS.with(|d| {
+            d.borrow_mut().insert(canvas_id.to_owned(), digest);
+        });
+        invalidate_offscreen_base_layer(canvas_id);
         #[cfg(target_arch = "wasm32")]
         if let Some(host) = dom::get(canvas_id) {
             let _ = host.set_attribute("data-dense", "true");
+            if host.scroll_left() != 0 {
+                host.set_scroll_left(0);
+            }
+            if host.scroll_top() != 0 {
+                host.set_scroll_top(0);
+            }
         }
     }
 
@@ -3516,7 +3788,7 @@ pub(crate) mod canvas2d {
 
     #[allow(dead_code)]
     pub fn set_kind_hover(canvas_id: &str, kind: Option<&str>) -> bool {
-        DENSE_SCENES.with(|s| {
+        let changed = DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
             let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
                 return false;
@@ -3530,12 +3802,16 @@ pub(crate) mod canvas2d {
             }
             meta.kind_hover = next;
             true
-        })
+        });
+        if changed {
+            invalidate_offscreen_base_layer(canvas_id);
+        }
+        changed
     }
 
     #[allow(dead_code)]
     pub fn set_active_layer(canvas_id: &str, layer: Option<&str>) -> bool {
-        DENSE_SCENES.with(|s| {
+        let changed = DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
             let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
                 return false;
@@ -3549,12 +3825,16 @@ pub(crate) mod canvas2d {
             }
             meta.active_layer = next;
             true
-        })
+        });
+        if changed {
+            invalidate_offscreen_base_layer(canvas_id);
+        }
+        changed
     }
 
     #[allow(dead_code)]
     pub fn set_hidden_kinds(canvas_id: &str, hidden: HashSet<String>) -> bool {
-        DENSE_SCENES.with(|s| {
+        let changed = DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
             let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
                 return false;
@@ -3565,7 +3845,11 @@ pub(crate) mod canvas2d {
                 .filter(|k| !k.is_empty())
                 .collect();
             true
-        })
+        });
+        if changed {
+            invalidate_offscreen_base_layer(canvas_id);
+        }
+        changed
     }
 
     #[allow(dead_code)]
@@ -3644,14 +3928,21 @@ pub(crate) mod canvas2d {
     where
         F: FnOnce(&mut DenseScene),
     {
-        DENSE_SCENES.with(|s| {
+        let digest_opt = DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
-            let Some((scene, _, _)) = guard.get_mut(canvas_id) else {
-                return false;
-            };
+            let (scene, _, meta) = guard.get_mut(canvas_id)?;
             f(scene);
+            Some(compute_scene_digest(scene, meta))
+        });
+        if let Some(digest) = digest_opt {
+            SCENE_DIGESTS.with(|d| {
+                d.borrow_mut().insert(canvas_id.to_owned(), digest);
+            });
+            invalidate_offscreen_base_layer(canvas_id);
             true
-        })
+        } else {
+            false
+        }
     }
 
     /// Mutates the stored `DenseScene` (e.g. during Shift+drag node repositioning) and
@@ -3667,11 +3958,9 @@ pub(crate) mod canvas2d {
     where
         F: FnOnce(&mut DenseScene),
     {
-        DENSE_SCENES.with(|s| {
+        let digest_opt = DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
-            let Some((scene, grid, meta)) = guard.get_mut(canvas_id) else {
-                return false;
-            };
+            let (scene, grid, meta) = guard.get_mut(canvas_id)?;
             f(scene);
             if moved_nodes.is_empty() && moved_edges.is_empty() {
                 *grid = SpatialHitGrid::build(scene, 128.0);
@@ -3683,8 +3972,17 @@ pub(crate) mod canvas2d {
                     meta.cluster_hulls = compute_dense_cluster_hulls(scene, meta);
                 }
             }
+            Some(compute_scene_digest(scene, meta))
+        });
+        if let Some(digest) = digest_opt {
+            SCENE_DIGESTS.with(|d| {
+                d.borrow_mut().insert(canvas_id.to_owned(), digest);
+            });
+            invalidate_offscreen_base_layer(canvas_id);
             true
-        })
+        } else {
+            false
+        }
     }
 
     #[allow(dead_code)]
@@ -3703,11 +4001,18 @@ pub(crate) mod canvas2d {
         DENSE_SCENES.with(|s| {
             s.borrow_mut().remove(canvas_id);
         });
+        SCENE_DIGESTS.with(|d| {
+            d.borrow_mut().remove(canvas_id);
+        });
+        invalidate_offscreen_base_layer(canvas_id);
         LAST_CAMERAS.with(|c| {
             c.borrow_mut().remove(canvas_id);
         });
         LAST_PAINT_STATE.with(|p| {
             p.borrow_mut().remove(canvas_id);
+        });
+        LAST_PAINTED_VIEWPORT.with(|v| {
+            v.borrow_mut().remove(canvas_id);
         });
         REPAINT_LISTENERS.with(|hooks| {
             hooks.borrow_mut().remove(canvas_id);
@@ -3785,6 +4090,15 @@ pub(crate) mod canvas2d {
             );
             #[wasm_bindgen(method, js_name = clearRect)]
             pub(super) fn clear_rect(this: &Ctx2d, x: f64, y: f64, w: f64, h: f64);
+            #[wasm_bindgen(method, js_name = drawImage)]
+            pub(super) fn draw_image(
+                this: &Ctx2d,
+                image: &CanvasEl,
+                dx: f64,
+                dy: f64,
+                dw: f64,
+                dh: f64,
+            );
             #[wasm_bindgen(method, setter = strokeStyle)]
             pub(super) fn set_stroke_style(this: &Ctx2d, v: &str);
             #[wasm_bindgen(method, setter = fillStyle)]
@@ -3839,6 +4153,12 @@ pub(crate) mod canvas2d {
                 target: &web_sys::Node,
                 init: &JsValue,
             );
+
+            pub(super) type JsResizeObserver;
+            #[wasm_bindgen(constructor, js_class = ResizeObserver)]
+            pub(super) fn new(cb: &js_sys::Function) -> JsResizeObserver;
+            #[wasm_bindgen(method)]
+            pub(super) fn observe(this: &JsResizeObserver, target: &web_sys::Element);
         }
     }
 
@@ -3883,6 +4203,24 @@ pub(crate) mod canvas2d {
         dash_dot: js_sys::Array,
     }
 
+    /// Computes backed Canvas2D pixel dimensions `(target_w, target_h)` for a
+    /// laid-out CSS box `(css_w, css_h)` at clamped DPR `[1.0, 2.0]`.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn dense_bitmap_target_size(css_w: f64, css_h: f64, dpr: f64) -> Option<(u32, u32)> {
+        if !css_w.is_finite() || !css_h.is_finite() || css_w < 64.0 || css_h < 64.0 {
+            return None;
+        }
+        let clamped_dpr = if dpr.is_finite() {
+            dpr.clamp(1.0, 2.0)
+        } else {
+            1.0
+        };
+        Some((
+            ((css_w * clamped_dpr).round() as u32).max(1),
+            ((css_h * clamped_dpr).round() as u32).max(1),
+        ))
+    }
+
     #[cfg(target_arch = "wasm32")]
     struct ThemeWatcherHandles {
         _observer: wasm_ctx::JsMutationObserver,
@@ -3893,6 +4231,12 @@ pub(crate) mod canvas2d {
     }
 
     #[cfg(target_arch = "wasm32")]
+    struct ResizeWatcherHandle {
+        observer: wasm_ctx::JsResizeObserver,
+        _cb: Closure<dyn FnMut(js_sys::Array)>,
+    }
+
+    #[cfg(target_arch = "wasm32")]
     thread_local! {
         static PALETTE_THEME_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static RESOLVED_THEME_META: RefCell<Option<(u64, String, bool)>> = const { RefCell::new(None) };
@@ -3900,6 +4244,93 @@ pub(crate) mod canvas2d {
             RefCell::new(HashMap::new());
         static DASH_CACHE: RefCell<Option<DashArrays>> = const { RefCell::new(None) };
         static THEME_WATCHERS: RefCell<Option<ThemeWatcherHandles>> = const { RefCell::new(None) };
+        static RESIZE_WATCHER: RefCell<Option<ResizeWatcherHandle>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn measure_dense_canvas_box(
+        canvas_el: Option<&Element>,
+        canvas_id: &str,
+    ) -> Option<(f64, f64, f64, u32, u32)> {
+        let (mut vw, mut vh, measured) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
+        if !measured {
+            return None;
+        }
+        if let Some(el) = canvas_el {
+            let rect = el.get_bounding_client_rect();
+            if rect.width() >= 64.0 && rect.height() >= 64.0 {
+                vw = rect.width();
+                vh = rect.height();
+            }
+        }
+        let dpr = dom::window().device_pixel_ratio().clamp(1.0, 2.0);
+        let (target_w, target_h) = dense_bitmap_target_size(vw, vh, dpr)?;
+        Some((vw, vh, dpr, target_w, target_h))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn repaint_resized_canvases(entries: &js_sys::Array) {
+        let mut pending: Vec<(String, LastPaintEntry)> = Vec::new();
+        for entry in entries.iter() {
+            let Ok(target_val) = js_sys::Reflect::get(&entry, &"target".into()) else {
+                continue;
+            };
+            let Ok(host) = target_val.dyn_into::<Element>() else {
+                continue;
+            };
+            let id = host.id();
+            if id.is_empty() {
+                continue;
+            }
+            let Some(paint_state) = LAST_PAINT_STATE.with(|p| p.borrow().get(&id).copied()) else {
+                continue;
+            };
+            let canvas_el = host
+                .query_selector("canvas[data-dense-canvas='true']")
+                .ok()
+                .flatten();
+            let Some((_, _, _, cur_w, cur_h)) = measure_dense_canvas_box(canvas_el.as_ref(), &id)
+            else {
+                continue;
+            };
+            let prev = LAST_PAINTED_VIEWPORT.with(|v| v.borrow().get(&id).copied());
+            let backing_stale = canvas_el.as_ref().is_some_and(|el| {
+                let c: wasm_ctx::CanvasEl = el.clone().unchecked_into();
+                c.width() != cur_w || c.height() != cur_h
+            });
+            if prev != Some((cur_w, cur_h)) || backing_stale {
+                pending.push((id, paint_state));
+            }
+        }
+        for (id, (cam, hover, draw_nodes)) in pending {
+            paint_scene(&id, cam, hover, draw_nodes);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ensure_resize_watcher(host: &Element) {
+        if host.get_attribute("data-resize-observed").as_deref() == Some("true") {
+            return;
+        }
+        RESIZE_WATCHER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                let has_ro = js_sys::Reflect::get(&dom::window(), &"ResizeObserver".into())
+                    .is_ok_and(|v| v.is_function());
+                if !has_ro {
+                    return;
+                }
+                let cb = Closure::wrap(Box::new(move |entries: js_sys::Array| {
+                    repaint_resized_canvases(&entries);
+                }) as Box<dyn FnMut(js_sys::Array)>);
+                let observer = wasm_ctx::JsResizeObserver::new(cb.as_ref().unchecked_ref());
+                *slot = Some(ResizeWatcherHandle { observer, _cb: cb });
+            }
+            if let Some(ref handle) = *slot {
+                handle.observer.observe(host);
+                let _ = host.set_attribute("data-resize-observed", "true");
+            }
+        });
     }
 
     #[allow(dead_code)]
@@ -3909,6 +4340,7 @@ pub(crate) mod canvas2d {
             PALETTE_THEME_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
             RESOLVED_THEME_META.with(|m| *m.borrow_mut() = None);
             PALETTE_CACHE.with(|c| c.borrow_mut().clear());
+            OFFSCREEN_BASE_LAYERS.with(|layers| layers.borrow_mut().clear());
             LABEL_FIT_CACHE.with(|c| c.borrow_mut().clear());
             BADGE_WIDTH_CACHE.with(|c| c.borrow_mut().clear());
             let paints: Vec<(String, LastPaintEntry)> = LAST_PAINT_STATE.with(|p| {
@@ -4412,11 +4844,526 @@ pub(crate) mod canvas2d {
         ctx.set_global_alpha(1.0);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    struct PreparedEdge<'a> {
+        edge: &'a DenseEdgeSpec,
+        batch: DenseEdgeBatchKey,
+        hollow_arrow: bool,
+        active: bool,
+        alpha: f64,
+        width: f64,
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn push_prepared_edge<'a>(
+        out: &mut Vec<PreparedEdge<'a>>,
+        edge: &'a DenseEdgeSpec,
+        meta: &DenseSceneMeta,
+        view_bounds: (f64, f64, f64, f64),
+        hover: Option<(u8, usize)>,
+        hovered_edges: &HashSet<usize>,
+        active_kind_hover_lower: Option<&str>,
+    ) {
+        if !meta.hidden_kinds.is_empty()
+            && meta
+                .hidden_kinds
+                .iter()
+                .any(|hk| edge_matches_kind_lower(hk, edge))
+        {
+            return;
+        }
+        let Some((ex0, ey0, ex1, ey1)) = meta
+            .edge_bounds
+            .get(&edge.index)
+            .copied()
+            .or_else(|| edge_bounds(edge))
+        else {
+            return;
+        };
+        let (view_x0, view_y0, view_x1, view_y1) = view_bounds;
+        if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
+            return;
+        }
+        let hovered = hovered_edges.contains(&edge.index);
+        let hover_dimmed = hover.is_some() && !hovered;
+        let kind_matched =
+            active_kind_hover_lower.is_some_and(|hk| edge_matches_kind_lower(hk, edge));
+        let kind_dimmed = active_kind_hover_lower.is_some() && !kind_matched;
+        let appearance = resolve_dense_edge_stroke(edge, hovered);
+        let active = hovered || kind_matched || edge.on || edge.lit;
+
+        let alpha = if (edge.dim || kind_dimmed || hover_dimmed) && !active {
+            0.15
+        } else if active {
+            0.98
+        } else if edge.portal && !edge.against {
+            0.22
+        } else if edge.detour {
+            0.50
+        } else if meta.commit_changes_active && !appearance.highlighted {
+            0.38
+        } else if appearance.highlighted {
+            0.94
+        } else {
+            0.76
+        };
+        let width = if active {
+            2.4
+        } else if appearance.highlighted || edge.against {
+            2.0
+        } else {
+            (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
+        };
+        let batch = dense_edge_batch_key(active, &appearance, width, alpha);
+        out.push(PreparedEdge {
+            edge,
+            batch,
+            hollow_arrow: appearance.hollow_arrow,
+            active,
+            alpha,
+            width,
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn paint_dense_layer(
+        ctx: &wasm_ctx::Ctx2d,
+        scene: &DenseScene,
+        grid: &SpatialHitGrid,
+        meta: &DenseSceneMeta,
+        pal: &CanvasPalette,
+        cam: Camera,
+        dpr: f64,
+        vw: f64,
+        vh: f64,
+        target_w: u32,
+        target_h: u32,
+        hover: Option<(u8, usize)>,
+        hovered_neighbors: &HashSet<usize>,
+        hovered_edges: &HashSet<usize>,
+        active_kind_hover_lower: Option<&str>,
+        draw_nodes: bool,
+        overlay_only: bool,
+    ) {
+        if !overlay_only {
+            ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+            ctx.clear_rect(0.0, 0.0, target_w as f64, target_h as f64);
+        }
+        ctx.set_transform(
+            dpr * cam.scale,
+            0.0,
+            0.0,
+            dpr * cam.scale,
+            dpr * cam.tx,
+            dpr * cam.ty,
+        );
+
+        let view_x0 = -cam.tx / cam.scale.max(0.05) - 64.0;
+        let view_y0 = -cam.ty / cam.scale.max(0.05) - 64.0;
+        let view_x1 = view_x0 + vw / cam.scale.max(0.05) + 128.0;
+        let view_y1 = view_y0 + vh / cam.scale.max(0.05) + 128.0;
+        let view_bounds = (view_x0, view_y0, view_x1, view_y1);
+        let draw_arrows = cam.scale >= 0.35;
+        let badge_min_scale = 0.55;
+        let mut current_font: Option<&'static str> = None;
+        let show_cluster_hulls =
+            should_render_cluster_hulls(cam.scale) && meta.containers.is_empty();
+
+        with_dash_arrays(|dashes| {
+            if !overlay_only {
+                paint_dense_containers(
+                    ctx,
+                    &meta.containers,
+                    pal,
+                    dashes,
+                    cam.scale,
+                    view_bounds,
+                    &mut current_font,
+                );
+                if show_cluster_hulls {
+                    paint_cluster_hulls_underlay(
+                        ctx,
+                        &meta.cluster_hulls,
+                        pal,
+                        dashes,
+                        cam.scale,
+                        view_bounds,
+                    );
+                }
+            }
+
+            let mut prepared: Vec<PreparedEdge<'_>> = Vec::with_capacity(if overlay_only {
+                32
+            } else {
+                scene.edges.len().min(256)
+            });
+            if let Some(edge_indices) = grid.visible_edge_indices(
+                view_x0 - 8.0,
+                view_y0 - 8.0,
+                view_x1 + 8.0,
+                view_y1 + 8.0,
+            ) {
+                for edge_idx in edge_indices {
+                    if let Some(&pos) = meta.edge_pos_by_idx.get(&edge_idx) {
+                        if let Some(edge) = scene.edges.get(pos) {
+                            if !overlay_only
+                                || is_overlay_edge(edge, hovered_edges, active_kind_hover_lower)
+                            {
+                                push_prepared_edge(
+                                    &mut prepared,
+                                    edge,
+                                    meta,
+                                    view_bounds,
+                                    hover,
+                                    hovered_edges,
+                                    active_kind_hover_lower,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                for edge in &scene.edges {
+                    if overlay_only
+                        && !is_overlay_edge(edge, hovered_edges, active_kind_hover_lower)
+                    {
+                        continue;
+                    }
+                    push_prepared_edge(
+                        &mut prepared,
+                        edge,
+                        meta,
+                        view_bounds,
+                        hover,
+                        hovered_edges,
+                        active_kind_hover_lower,
+                    );
+                }
+            }
+
+            prepared.sort_by_key(|p| p.batch);
+
+            let mut open_batch: Option<DenseEdgeBatchKey> = None;
+            let mut last_alpha: Option<u8> = None;
+            let mut last_tone: Option<DenseEdgeTone> = None;
+            let mut last_width: Option<u16> = None;
+            let mut last_dash: Option<EdgeDashKind> = None;
+
+            for item in &prepared {
+                if open_batch != Some(item.batch) {
+                    if open_batch.is_some() {
+                        ctx.stroke();
+                    }
+                    let (_, tone, dash, width_q, alpha_q) = item.batch;
+                    if last_alpha != Some(alpha_q) {
+                        ctx.set_global_alpha(item.alpha);
+                        last_alpha = Some(alpha_q);
+                    }
+                    if last_tone != Some(tone) {
+                        ctx.set_stroke_style(palette_for_tone(pal, tone));
+                        last_tone = Some(tone);
+                    }
+                    if last_width != Some(width_q) {
+                        ctx.set_line_width(item.width);
+                        last_width = Some(width_q);
+                    }
+                    if last_dash != Some(dash) {
+                        ctx.set_line_dash(match dash {
+                            EdgeDashKind::Solid => &dashes.solid,
+                            EdgeDashKind::Dashed => &dashes.dashed,
+                            EdgeDashKind::Dotted => &dashes.dotted,
+                            EdgeDashKind::DashDot => &dashes.dash_dot,
+                        });
+                        last_dash = Some(dash);
+                    }
+                    ctx.begin_path();
+                    open_batch = Some(item.batch);
+                }
+
+                let edge = item.edge;
+                if !edge.cmds.is_empty() {
+                    for cmd in &edge.cmds {
+                        match *cmd {
+                            DensePathCmd::Move(x, y) => ctx.move_to(x, y),
+                            DensePathCmd::Line(x, y) => ctx.line_to(x, y),
+                            DensePathCmd::Curve { c1, c2, to } => {
+                                ctx.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+                            }
+                        }
+                    }
+                } else if !edge.pts.is_empty() {
+                    ctx.move_to(edge.pts[0].0, edge.pts[0].1);
+                    if edge.pts.len() == 4 {
+                        ctx.bezier_curve_to(
+                            edge.pts[1].0,
+                            edge.pts[1].1,
+                            edge.pts[2].0,
+                            edge.pts[2].1,
+                            edge.pts[3].0,
+                            edge.pts[3].1,
+                        );
+                    } else {
+                        for p in &edge.pts[1..] {
+                            ctx.line_to(p.0, p.1);
+                        }
+                    }
+                }
+            }
+            if open_batch.is_some() {
+                ctx.stroke();
+            }
+
+            if last_dash != Some(EdgeDashKind::Solid) {
+                ctx.set_line_dash(&dashes.solid);
+            }
+
+            if draw_arrows {
+                type DenseArrowBatchKey = (bool, DenseEdgeTone, u8);
+                type DenseArrowBatchItem = (DenseArrowBatchKey, (f64, f64), (f64, f64), bool);
+                let mut arrow_batch: Option<DenseArrowBatchKey> = None;
+                let mut arrow_items: Vec<DenseArrowBatchItem> = Vec::new();
+                for item in &prepared {
+                    if let Some((tip, dir)) = edge_end_tangent(item.edge) {
+                        arrow_items.push((
+                            (item.hollow_arrow, item.batch.1, item.batch.4),
+                            tip,
+                            dir,
+                            item.active,
+                        ));
+                    }
+                }
+                arrow_items.sort_by_key(|row| row.0);
+                for (key, tip, dir, active) in arrow_items {
+                    let (hollow, tone, alpha_q) = key;
+                    let len = if active { 7.5 } else { 6.5 };
+                    let half_w = if active { 3.4 } else { 2.9 };
+                    let base_x = tip.0 - dir.0 * len;
+                    let base_y = tip.1 - dir.1 * len;
+                    let nx = -dir.1 * half_w;
+                    let ny = dir.0 * half_w;
+                    if hollow {
+                        if arrow_batch.take().is_some() {
+                            ctx.fill();
+                        }
+                        ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
+                        ctx.set_stroke_style(palette_for_tone(pal, tone));
+                        ctx.set_fill_style(&pal.paper);
+                        ctx.set_line_width(1.2);
+                        ctx.begin_path();
+                        ctx.move_to(tip.0, tip.1);
+                        ctx.line_to(base_x + nx, base_y + ny);
+                        ctx.line_to(base_x - nx, base_y - ny);
+                        ctx.close_path();
+                        ctx.fill();
+                        ctx.stroke();
+                    } else {
+                        if arrow_batch != Some(key) {
+                            if arrow_batch.is_some() {
+                                ctx.fill();
+                            }
+                            ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
+                            ctx.set_fill_style(palette_for_tone(pal, tone));
+                            ctx.begin_path();
+                            arrow_batch = Some(key);
+                        }
+                        ctx.move_to(tip.0, tip.1);
+                        ctx.line_to(base_x + nx, base_y + ny);
+                        ctx.line_to(base_x - nx, base_y - ny);
+                        ctx.close_path();
+                    }
+                }
+                if arrow_batch.is_some() {
+                    ctx.fill();
+                }
+            }
+
+            for item in &prepared {
+                let edge = item.edge;
+                if edge.weight > 1 && (item.active || cam.scale >= badge_min_scale) {
+                    if let Some((mx, my)) = edge_midpoint(edge) {
+                        let stroke_col = palette_for_tone(pal, item.batch.1);
+                        let label = edge.weight.to_string();
+                        let bw = ((label.len() as f64) * 6.2 + 8.0).max(16.0);
+                        let bh = 14.0;
+                        let bx = mx - bw * 0.5;
+                        let by = my - bh * 0.5;
+                        ctx.set_global_alpha(item.alpha);
+                        ctx.set_fill_style(&pal.paper);
+                        ctx.fill_rect(bx, by, bw, bh);
+                        ctx.set_line_width(1.0);
+                        ctx.set_stroke_style(stroke_col);
+                        ctx.stroke_rect(bx, by, bw, bh);
+                        if current_font != Some("600 9.5px sans-serif") {
+                            ctx.set_font("600 9.5px sans-serif");
+                            current_font = Some("600 9.5px sans-serif");
+                        }
+                        ctx.set_fill_style(stroke_col);
+                        ctx.fill_text(&label, bx + 4.0, by + 10.5, bw - 8.0);
+                    }
+                }
+            }
+        });
+
+        if draw_nodes {
+            let show_labels = should_show_dense_labels(cam.scale, meta.label_min_scale);
+            let mut paint_node = |node: &DenseNodeSpec| {
+                if node.x + node.w < view_x0
+                    || node.x > view_x1
+                    || node.y + node.h < view_y0
+                    || node.y > view_y1
+                {
+                    return;
+                }
+                if overlay_only && !is_overlay_node(node, hover, hovered_neighbors) {
+                    return;
+                }
+                let nm = meta.nodes.get(&node.index);
+                let in_cycle = nm.is_some_and(|m| m.in_cycle);
+                let has_blast = nm.is_some_and(|m| !m.blast_tag.is_empty());
+                let layer_dim = meta.active_layer.as_deref().is_some_and(|al| {
+                    meta.layer_of_node.get(&node.index).map(String::as_str) != Some(al)
+                });
+                let hovered =
+                    hover == Some((0, node.index)) || hovered_neighbors.contains(&node.index);
+                let hover_dimmed = hover.is_some() && !hovered;
+                ctx.set_global_alpha(
+                    if (node.dim || hover_dimmed || layer_dim)
+                        && !hovered
+                        && !node.selected
+                        && !node.lit
+                    {
+                        0.32
+                    } else {
+                        0.96
+                    },
+                );
+                ctx.set_fill_style(&pal.paper);
+                ctx.fill_rect(node.x, node.y, node.w, node.h);
+
+                let border_col = if node.failed {
+                    &pal.against
+                } else if in_cycle {
+                    &pal.warn
+                } else if node.selected || hovered || node.lit {
+                    &pal.purple
+                } else if node.changed {
+                    &pal.changed
+                } else if node.pinned {
+                    &pal.warn
+                } else {
+                    &pal.line
+                };
+                ctx.set_line_width(if node.selected || hovered { 2.0 } else { 1.1 });
+                ctx.set_stroke_style(border_col);
+                ctx.stroke_rect(node.x, node.y, node.w, node.h);
+
+                let accent_col = if node.failed {
+                    Some(&pal.against)
+                } else if in_cycle || has_blast {
+                    Some(&pal.warn)
+                } else if node.changed {
+                    Some(&pal.changed)
+                } else if node.pinned {
+                    Some(&pal.diff_touched)
+                } else {
+                    None
+                };
+                let label_left_pad = if let Some(col) = accent_col {
+                    ctx.set_fill_style(col);
+                    ctx.fill_rect(node.x + 1.0, node.y + 1.0, 3.0, (node.h - 2.0).max(2.0));
+                    9.0
+                } else {
+                    8.0
+                };
+
+                let mut right_reserve = 8.0;
+                if show_labels && cam.scale >= badge_min_scale {
+                    if let Some(badge) = nm.and_then(dense_node_badge_label) {
+                        if current_font != Some("600 9px sans-serif") {
+                            ctx.set_font("600 9px sans-serif");
+                            current_font = Some("600 9px sans-serif");
+                        }
+                        let text_w =
+                            badge_width_cached_with(&badge, |b| ctx.measure_text(b).width());
+                        let pill_w = (text_w + 8.0).clamp(18.0, 44.0);
+                        if node.w - label_left_pad - pill_w - 10.0 >= 28.0 {
+                            let pill_h = 13.0;
+                            let px = node.x + node.w - pill_w - 5.0;
+                            let py = node.y + (node.h - pill_h) * 0.5;
+                            ctx.set_fill_style(&pal.soft);
+                            ctx.fill_rect(px, py, pill_w, pill_h);
+                            ctx.set_line_width(0.8);
+                            ctx.set_stroke_style(border_col);
+                            ctx.stroke_rect(px, py, pill_w, pill_h);
+                            ctx.set_fill_style(&pal.muted);
+                            ctx.fill_text(&badge, px + 4.0, py + 9.5, (pill_w - 8.0).max(4.0));
+                            right_reserve = pill_w + 10.0;
+                        }
+                    }
+                }
+
+                if show_labels && !node.label.is_empty() {
+                    if current_font != Some("500 11px sans-serif") {
+                        ctx.set_font("500 11px sans-serif");
+                        current_font = Some("500 11px sans-serif");
+                    }
+                    ctx.set_fill_style(if node.dim && !node.selected {
+                        &pal.muted
+                    } else {
+                        &pal.ink
+                    });
+                    let avail_w = (node.w - label_left_pad - right_reserve).max(12.0);
+                    let fitted =
+                        fit_label_cached_with(&node.label, avail_w, "500 11px sans-serif", |s| {
+                            ctx.measure_text(s).width()
+                        });
+                    ctx.fill_text_unscaled(
+                        &fitted,
+                        node.x + label_left_pad,
+                        node.y + node.h * 0.62,
+                    );
+                }
+            };
+            if let Some(node_indices) =
+                grid.visible_node_indices(view_x0, view_y0, view_x1, view_y1)
+            {
+                for node_idx in node_indices {
+                    if let Some(&pos) = meta.node_pos_by_idx.get(&node_idx) {
+                        if let Some(node) = scene.nodes.get(pos) {
+                            paint_node(node);
+                        }
+                    }
+                }
+            } else {
+                for node in &scene.nodes {
+                    paint_node(node);
+                }
+            }
+        }
+        if should_paint_cluster_hull_labels(overlay_only, show_cluster_hulls) {
+            paint_cluster_hull_labels(
+                ctx,
+                &meta.cluster_hulls,
+                pal,
+                cam,
+                dpr,
+                vw,
+                vh,
+                &mut current_font,
+            );
+        }
+        ctx.set_global_alpha(1.0);
+    }
+
     #[allow(unused_variables)]
     pub fn paint_scene(canvas_id: &str, cam: Camera, hover: Option<(u8, usize)>, draw_nodes: bool) {
         #[cfg(target_arch = "wasm32")]
         {
             ensure_theme_watchers();
+            let empty_neighbors: HashSet<usize> = HashSet::new();
+            let empty_edges: HashSet<usize> = HashSet::new();
             let painted = DENSE_SCENES.with(|store| {
                 {
                     let mut mut_guard = store.borrow_mut();
@@ -4425,33 +5372,31 @@ pub(crate) mod canvas2d {
                         let missing_adj = !meta.edges.is_empty() && meta.node_adjacency.is_empty();
                         if missing_bounds || missing_adj {
                             meta.rebuild_caches(scene);
+                            let digest = compute_scene_digest(scene, meta);
+                            SCENE_DIGESTS.with(|d| {
+                                d.borrow_mut().insert(canvas_id.to_owned(), digest);
+                            });
+                            invalidate_offscreen_base_layer(canvas_id);
                         }
                     }
                 }
                 let guard = store.borrow();
-                let Some((scene, grid, meta)) = guard.get(canvas_id) else {
-                    return false;
-                };
-                let Some(host) = dom::get(canvas_id) else {
-                    return false;
-                };
-                let (vw, vh, measured) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
-                if !measured || !cam.scale.is_finite() || cam.scale <= 0.0 {
-                    return false;
+                let (scene, grid, meta) = guard.get(canvas_id)?;
+                let host = dom::get(canvas_id)?;
+                if !cam.scale.is_finite() || cam.scale <= 0.0 {
+                    return None;
                 }
-                LAST_CAMERAS.with(|c| {
-                    c.borrow_mut().insert(canvas_id.to_owned(), cam);
-                });
-                let dpr = dom::window().device_pixel_ratio().clamp(1.0, 2.0);
-                let target_w = ((vw * dpr).round() as u32).max(1);
-                let target_h = ((vh * dpr).round() as u32).max(1);
-
+                if host.scroll_left() != 0 {
+                    host.set_scroll_left(0);
+                }
+                if host.scroll_top() != 0 {
+                    host.set_scroll_top(0);
+                }
+                ensure_resize_watcher(&host);
                 let canvas_el = match host.query_selector("canvas[data-dense-canvas='true']") {
                     Ok(Some(existing)) => existing,
                     _ => {
-                        let Ok(created) = dom::document().create_element("canvas") else {
-                            return false;
-                        };
+                        let created = dom::document().create_element("canvas").ok()?;
                         let _ = created.set_attribute("class", "graph-dense-canvas");
                         let _ = created.set_attribute("data-dense-canvas", "true");
                         let _ = created.set_attribute("aria-hidden", "true");
@@ -4459,6 +5404,11 @@ pub(crate) mod canvas2d {
                         created
                     }
                 };
+                let (vw, vh, dpr, target_w, target_h) =
+                    measure_dense_canvas_box(Some(&canvas_el), canvas_id)?;
+                LAST_CAMERAS.with(|c| {
+                    c.borrow_mut().insert(canvas_id.to_owned(), cam);
+                });
                 let canvas_js: wasm_ctx::CanvasEl = canvas_el.clone().unchecked_into();
                 if canvas_js.width() != target_w {
                     canvas_js.set_width(target_w);
@@ -4466,9 +5416,7 @@ pub(crate) mod canvas2d {
                 if canvas_js.height() != target_h {
                     canvas_js.set_height(target_h);
                 }
-                let Some(ctx) = canvas_js.get_context("2d") else {
-                    return false;
-                };
+                let ctx = canvas_js.get_context("2d")?;
 
                 let pal = resolve_palette(canvas_id, &host);
                 let host_kind_hover = host
@@ -4481,513 +5429,142 @@ pub(crate) mod canvas2d {
                     .map(|s| s.trim().to_ascii_lowercase())
                     .filter(|s| !s.is_empty());
 
-                ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-                ctx.clear_rect(0.0, 0.0, target_w as f64, target_h as f64);
-                ctx.set_transform(
-                    dpr * cam.scale,
-                    0.0,
-                    0.0,
-                    dpr * cam.scale,
-                    dpr * cam.tx,
-                    dpr * cam.ty,
+                let scene_digest = SCENE_DIGESTS
+                    .with(|d| d.borrow().get(canvas_id).copied())
+                    .unwrap_or_else(|| compute_scene_digest(scene, meta));
+                let palette_epoch = PALETTE_THEME_EPOCH.with(|e| e.get());
+                let base_key = build_offscreen_base_key(
+                    scene_digest,
+                    dpr,
+                    vw,
+                    vh,
+                    cam,
+                    palette_epoch,
+                    draw_nodes,
+                    active_kind_hover_lower.as_deref(),
+                    meta.active_layer.as_deref(),
+                    &meta.hidden_kinds,
                 );
 
-                let view_x0 = -cam.tx / cam.scale.max(0.05) - 64.0;
-                let view_y0 = -cam.ty / cam.scale.max(0.05) - 64.0;
-                let view_x1 = view_x0 + vw / cam.scale.max(0.05) + 128.0;
-                let view_y1 = view_y0 + vh / cam.scale.max(0.05) + 128.0;
-                let draw_arrows = cam.scale >= 0.35;
-                let badge_min_scale = 0.55;
-                let mut current_font: Option<&'static str> = None;
-
-                let mut hovered_neighbors: HashSet<usize> = HashSet::new();
-                let mut hovered_edges: HashSet<usize> = HashSet::new();
-                match hover {
-                    Some((0, h_node)) => {
-                        hovered_neighbors.insert(h_node);
-                        if let Some(adj) = meta.node_adjacency.get(&h_node) {
-                            for &(edge_idx, neighbor) in adj {
-                                hovered_edges.insert(edge_idx);
-                                hovered_neighbors.insert(neighbor);
-                            }
-                        }
-                    }
-                    Some((1, h_edge)) => {
-                        hovered_edges.insert(h_edge);
-                        if let Some(em) = meta.edges.get(&h_edge) {
-                            if let Some(from) = em.from_index {
-                                hovered_neighbors.insert(from);
-                            }
-                            if let Some(to) = em.to_index {
-                                hovered_neighbors.insert(to);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                let show_cluster_hulls =
-                    should_render_cluster_hulls(cam.scale) && meta.containers.is_empty();
-                with_dash_arrays(|dashes| {
-                    struct PreparedEdge<'a> {
-                        edge: &'a DenseEdgeSpec,
-                        batch: DenseEdgeBatchKey,
-                        hollow_arrow: bool,
-                        active: bool,
-                        alpha: f64,
-                        width: f64,
-                    }
-
-                    #[allow(clippy::too_many_arguments)]
-                    fn push_prepared_edge<'a>(
-                        out: &mut Vec<PreparedEdge<'a>>,
-                        edge: &'a DenseEdgeSpec,
-                        meta: &DenseSceneMeta,
-                        view_bounds: (f64, f64, f64, f64),
-                        hover: Option<(u8, usize)>,
-                        hovered_edges: &HashSet<usize>,
-                        active_kind_hover_lower: Option<&str>,
-                    ) {
-                        if !meta.hidden_kinds.is_empty()
-                            && meta
-                                .hidden_kinds
-                                .iter()
-                                .any(|hk| edge_matches_kind_lower(hk, edge))
-                        {
-                            return;
-                        }
-                        let Some((ex0, ey0, ex1, ey1)) = meta
-                            .edge_bounds
-                            .get(&edge.index)
-                            .copied()
-                            .or_else(|| edge_bounds(edge))
-                        else {
-                            return;
-                        };
-                        let (view_x0, view_y0, view_x1, view_y1) = view_bounds;
-                        if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
-                            return;
-                        }
-                        let hovered = hovered_edges.contains(&edge.index);
-                        let hover_dimmed = hover.is_some() && !hovered;
-                        let kind_matched = active_kind_hover_lower
-                            .is_some_and(|hk| edge_matches_kind_lower(hk, edge));
-                        let kind_dimmed = active_kind_hover_lower.is_some() && !kind_matched;
-                        let appearance = resolve_dense_edge_stroke(edge, hovered);
-                        let active = hovered || kind_matched || edge.on || edge.lit;
-
-                        let alpha = if (edge.dim || kind_dimmed || hover_dimmed) && !active {
-                            0.15
-                        } else if active {
-                            0.98
-                        } else if edge.portal && !edge.against {
-                            0.22
-                        } else if edge.detour {
-                            0.50
-                        } else if meta.commit_changes_active && !appearance.highlighted {
-                            0.38
-                        } else if appearance.highlighted {
-                            0.94
-                        } else {
-                            0.76
-                        };
-                        let width = if active {
-                            2.4
-                        } else if appearance.highlighted || edge.against {
-                            2.0
-                        } else {
-                            (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
-                        };
-                        let batch = dense_edge_batch_key(active, &appearance, width, alpha);
-                        out.push(PreparedEdge {
-                            edge,
-                            batch,
-                            hollow_arrow: appearance.hollow_arrow,
-                            active,
-                            alpha,
-                            width,
-                        });
-                    }
-
-                    let mut prepared: Vec<PreparedEdge<'_>> =
-                        Vec::with_capacity(scene.edges.len().min(256));
-                    let view_bounds = (view_x0, view_y0, view_x1, view_y1);
-                    paint_dense_containers(
-                        &ctx,
-                        &meta.containers,
-                        &pal,
-                        dashes,
-                        cam.scale,
-                        view_bounds,
-                        &mut current_font,
+                // Ensure offscreen static base canvas matches `base_key` (hover-invariant).
+                let base_drawn = OFFSCREEN_BASE_LAYERS.with(|layers| {
+                    let mut layers_mut = layers.borrow_mut();
+                    let need_rebuild = !should_reuse_offscreen_base(
+                        layers_mut.get(canvas_id).map(|l| &l.key),
+                        &base_key,
                     );
-                    if show_cluster_hulls {
-                        paint_cluster_hulls_underlay(
-                            &ctx,
-                            &meta.cluster_hulls,
-                            &pal,
-                            dashes,
-                            cam.scale,
-                            view_bounds,
-                        );
-                    }
-                    if let Some(edge_indices) = grid.visible_edge_indices(
-                        view_x0 - 8.0,
-                        view_y0 - 8.0,
-                        view_x1 + 8.0,
-                        view_y1 + 8.0,
-                    ) {
-                        for edge_idx in edge_indices {
-                            if let Some(&pos) = meta.edge_pos_by_idx.get(&edge_idx) {
-                                if let Some(edge) = scene.edges.get(pos) {
-                                    push_prepared_edge(
-                                        &mut prepared,
-                                        edge,
-                                        meta,
-                                        view_bounds,
-                                        hover,
-                                        &hovered_edges,
-                                        active_kind_hover_lower.as_deref(),
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        for edge in &scene.edges {
-                            push_prepared_edge(
-                                &mut prepared,
-                                edge,
-                                meta,
-                                view_bounds,
-                                hover,
-                                &hovered_edges,
-                                active_kind_hover_lower.as_deref(),
-                            );
-                        }
-                    }
-
-                    prepared.sort_by_key(|p| p.batch);
-
-                    let mut open_batch: Option<DenseEdgeBatchKey> = None;
-                    let mut last_alpha: Option<u8> = None;
-                    let mut last_tone: Option<DenseEdgeTone> = None;
-                    let mut last_width: Option<u16> = None;
-                    let mut last_dash: Option<EdgeDashKind> = None;
-
-                    for item in &prepared {
-                        if open_batch != Some(item.batch) {
-                            if open_batch.is_some() {
-                                ctx.stroke();
-                            }
-                            let (_, tone, dash, width_q, alpha_q) = item.batch;
-                            if last_alpha != Some(alpha_q) {
-                                ctx.set_global_alpha(item.alpha);
-                                last_alpha = Some(alpha_q);
-                            }
-                            if last_tone != Some(tone) {
-                                ctx.set_stroke_style(palette_for_tone(&pal, tone));
-                                last_tone = Some(tone);
-                            }
-                            if last_width != Some(width_q) {
-                                ctx.set_line_width(item.width);
-                                last_width = Some(width_q);
-                            }
-                            if last_dash != Some(dash) {
-                                ctx.set_line_dash(match dash {
-                                    EdgeDashKind::Solid => &dashes.solid,
-                                    EdgeDashKind::Dashed => &dashes.dashed,
-                                    EdgeDashKind::Dotted => &dashes.dotted,
-                                    EdgeDashKind::DashDot => &dashes.dash_dot,
-                                });
-                                last_dash = Some(dash);
-                            }
-                            ctx.begin_path();
-                            open_batch = Some(item.batch);
-                        }
-
-                        let edge = item.edge;
-                        if !edge.cmds.is_empty() {
-                            for cmd in &edge.cmds {
-                                match *cmd {
-                                    DensePathCmd::Move(x, y) => ctx.move_to(x, y),
-                                    DensePathCmd::Line(x, y) => ctx.line_to(x, y),
-                                    DensePathCmd::Curve { c1, c2, to } => {
-                                        ctx.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1);
-                                    }
-                                }
-                            }
-                        } else if !edge.pts.is_empty() {
-                            ctx.move_to(edge.pts[0].0, edge.pts[0].1);
-                            if edge.pts.len() == 4 {
-                                ctx.bezier_curve_to(
-                                    edge.pts[1].0,
-                                    edge.pts[1].1,
-                                    edge.pts[2].0,
-                                    edge.pts[2].1,
-                                    edge.pts[3].0,
-                                    edge.pts[3].1,
-                                );
+                    if need_rebuild {
+                        let base_canvas: wasm_ctx::CanvasEl =
+                            if let Some(existing) = layers_mut.get(canvas_id) {
+                                existing.canvas.clone().unchecked_into()
                             } else {
-                                for p in &edge.pts[1..] {
-                                    ctx.line_to(p.0, p.1);
-                                }
-                            }
+                                let Ok(el) = dom::document().create_element("canvas") else {
+                                    return None;
+                                };
+                                el.unchecked_into()
+                            };
+                        if base_canvas.width() != target_w {
+                            base_canvas.set_width(target_w);
                         }
-                    }
-                    if open_batch.is_some() {
-                        ctx.stroke();
-                    }
-
-                    if last_dash != Some(EdgeDashKind::Solid) {
-                        ctx.set_line_dash(&dashes.solid);
-                    }
-
-                    if draw_arrows {
-                        // Batch solid arrowheads by `(tone, alpha_q)` into single fill calls.
-                        type DenseArrowBatchKey = (bool, DenseEdgeTone, u8);
-                        type DenseArrowBatchItem =
-                            (DenseArrowBatchKey, (f64, f64), (f64, f64), bool);
-                        let mut arrow_batch: Option<DenseArrowBatchKey> = None;
-                        let mut arrow_items: Vec<DenseArrowBatchItem> = Vec::new();
-                        for item in &prepared {
-                            if let Some((tip, dir)) = edge_end_tangent(item.edge) {
-                                arrow_items.push((
-                                    (item.hollow_arrow, item.batch.1, item.batch.4),
-                                    tip,
-                                    dir,
-                                    item.active,
-                                ));
-                            }
+                        if base_canvas.height() != target_h {
+                            base_canvas.set_height(target_h);
                         }
-                        arrow_items.sort_by_key(|row| row.0);
-                        for (key, tip, dir, active) in arrow_items {
-                            let (hollow, tone, alpha_q) = key;
-                            let len = if active { 7.5 } else { 6.5 };
-                            let half_w = if active { 3.4 } else { 2.9 };
-                            let base_x = tip.0 - dir.0 * len;
-                            let base_y = tip.1 - dir.1 * len;
-                            let nx = -dir.1 * half_w;
-                            let ny = dir.0 * half_w;
-                            if hollow {
-                                if arrow_batch.take().is_some() {
-                                    ctx.fill();
-                                }
-                                ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
-                                ctx.set_stroke_style(palette_for_tone(&pal, tone));
-                                ctx.set_fill_style(&pal.paper);
-                                ctx.set_line_width(1.2);
-                                ctx.begin_path();
-                                ctx.move_to(tip.0, tip.1);
-                                ctx.line_to(base_x + nx, base_y + ny);
-                                ctx.line_to(base_x - nx, base_y - ny);
-                                ctx.close_path();
-                                ctx.fill();
-                                ctx.stroke();
-                            } else {
-                                if arrow_batch != Some(key) {
-                                    if arrow_batch.is_some() {
-                                        ctx.fill();
-                                    }
-                                    ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
-                                    ctx.set_fill_style(palette_for_tone(&pal, tone));
-                                    ctx.begin_path();
-                                    arrow_batch = Some(key);
-                                }
-                                ctx.move_to(tip.0, tip.1);
-                                ctx.line_to(base_x + nx, base_y + ny);
-                                ctx.line_to(base_x - nx, base_y - ny);
-                                ctx.close_path();
-                            }
-                        }
-                        if arrow_batch.is_some() {
-                            ctx.fill();
-                        }
-                    }
-
-                    for item in &prepared {
-                        let edge = item.edge;
-                        if edge.weight > 1 && (item.active || cam.scale >= badge_min_scale) {
-                            if let Some((mx, my)) = edge_midpoint(edge) {
-                                let stroke_col = palette_for_tone(&pal, item.batch.1);
-                                let label = edge.weight.to_string();
-                                let bw = ((label.len() as f64) * 6.2 + 8.0).max(16.0);
-                                let bh = 14.0;
-                                let bx = mx - bw * 0.5;
-                                let by = my - bh * 0.5;
-                                ctx.set_global_alpha(item.alpha);
-                                ctx.set_fill_style(&pal.paper);
-                                ctx.fill_rect(bx, by, bw, bh);
-                                ctx.set_line_width(1.0);
-                                ctx.set_stroke_style(stroke_col);
-                                ctx.stroke_rect(bx, by, bw, bh);
-                                if current_font != Some("600 9.5px sans-serif") {
-                                    ctx.set_font("600 9.5px sans-serif");
-                                    current_font = Some("600 9.5px sans-serif");
-                                }
-                                ctx.set_fill_style(stroke_col);
-                                ctx.fill_text(&label, bx + 4.0, by + 10.5, bw - 8.0);
-                            }
-                        }
-                    }
-                });
-
-                if draw_nodes {
-                    let show_labels = should_show_dense_labels(cam.scale, meta.label_min_scale);
-                    let mut paint_node = |node: &DenseNodeSpec| {
-                        if node.x + node.w < view_x0
-                            || node.x > view_x1
-                            || node.y + node.h < view_y0
-                            || node.y > view_y1
-                        {
-                            return;
-                        }
-                        let nm = meta.nodes.get(&node.index);
-                        let in_cycle = nm.is_some_and(|m| m.in_cycle);
-                        let has_blast = nm.is_some_and(|m| !m.blast_tag.is_empty());
-                        let layer_dim = meta.active_layer.as_deref().is_some_and(|al| {
-                            meta.layer_of_node.get(&node.index).map(String::as_str) != Some(al)
-                        });
-                        let hovered = hover == Some((0, node.index))
-                            || hovered_neighbors.contains(&node.index);
-                        let hover_dimmed = hover.is_some() && !hovered;
-                        ctx.set_global_alpha(
-                            if (node.dim || hover_dimmed || layer_dim)
-                                && !hovered
-                                && !node.selected
-                                && !node.lit
-                            {
-                                0.32
-                            } else {
-                                0.96
-                            },
-                        );
-                        ctx.set_fill_style(&pal.paper);
-                        ctx.fill_rect(node.x, node.y, node.w, node.h);
-
-                        let border_col = if node.failed {
-                            &pal.against
-                        } else if in_cycle {
-                            &pal.warn
-                        } else if node.selected || hovered || node.lit {
-                            &pal.purple
-                        } else if node.changed {
-                            &pal.changed
-                        } else if node.pinned {
-                            &pal.warn
-                        } else {
-                            &pal.line
-                        };
-                        ctx.set_line_width(if node.selected || hovered { 2.0 } else { 1.1 });
-                        ctx.set_stroke_style(border_col);
-                        ctx.stroke_rect(node.x, node.y, node.w, node.h);
-
-                        let accent_col = if node.failed {
-                            Some(&pal.against)
-                        } else if in_cycle || has_blast {
-                            Some(&pal.warn)
-                        } else if node.changed {
-                            Some(&pal.changed)
-                        } else if node.pinned {
-                            Some(&pal.diff_touched)
-                        } else {
-                            None
-                        };
-                        let label_left_pad = if let Some(col) = accent_col {
-                            ctx.set_fill_style(col);
-                            ctx.fill_rect(node.x + 1.0, node.y + 1.0, 3.0, (node.h - 2.0).max(2.0));
-                            9.0
-                        } else {
-                            8.0
-                        };
-
-                        let mut right_reserve = 8.0;
-                        if show_labels && cam.scale >= badge_min_scale {
-                            if let Some(badge) = nm.and_then(dense_node_badge_label) {
-                                if current_font != Some("600 9px sans-serif") {
-                                    ctx.set_font("600 9px sans-serif");
-                                    current_font = Some("600 9px sans-serif");
-                                }
-                                let text_w = badge_width_cached_with(&badge, |b| {
-                                    ctx.measure_text(b).width()
-                                });
-                                let pill_w = (text_w + 8.0).clamp(18.0, 44.0);
-                                if node.w - label_left_pad - pill_w - 10.0 >= 28.0 {
-                                    let pill_h = 13.0;
-                                    let px = node.x + node.w - pill_w - 5.0;
-                                    let py = node.y + (node.h - pill_h) * 0.5;
-                                    ctx.set_fill_style(&pal.soft);
-                                    ctx.fill_rect(px, py, pill_w, pill_h);
-                                    ctx.set_line_width(0.8);
-                                    ctx.set_stroke_style(border_col);
-                                    ctx.stroke_rect(px, py, pill_w, pill_h);
-                                    ctx.set_fill_style(&pal.muted);
-                                    ctx.fill_text(
-                                        &badge,
-                                        px + 4.0,
-                                        py + 9.5,
-                                        (pill_w - 8.0).max(4.0),
-                                    );
-                                    right_reserve = pill_w + 10.0;
-                                }
-                            }
-                        }
-
-                        if show_labels && !node.label.is_empty() {
-                            if current_font != Some("500 11px sans-serif") {
-                                ctx.set_font("500 11px sans-serif");
-                                current_font = Some("500 11px sans-serif");
-                            }
-                            ctx.set_fill_style(if node.dim && !node.selected {
-                                &pal.muted
-                            } else {
-                                &pal.ink
-                            });
-                            let avail_w = (node.w - label_left_pad - right_reserve).max(12.0);
-                            let fitted = fit_label_cached_with(
-                                &node.label,
-                                avail_w,
-                                "500 11px sans-serif",
-                                |s| ctx.measure_text(s).width(),
-                            );
-                            ctx.fill_text_unscaled(
-                                &fitted,
-                                node.x + label_left_pad,
-                                node.y + node.h * 0.62,
-                            );
-                        }
-                    };
-                    if let Some(node_indices) =
-                        grid.visible_node_indices(view_x0, view_y0, view_x1, view_y1)
-                    {
-                        for node_idx in node_indices {
-                            if let Some(&pos) = meta.node_pos_by_idx.get(&node_idx) {
-                                if let Some(node) = scene.nodes.get(pos) {
-                                    paint_node(node);
-                                }
-                            }
-                        }
-                    } else {
-                        for node in &scene.nodes {
-                            paint_node(node);
-                        }
-                    }
-                    if show_cluster_hulls {
-                        paint_cluster_hull_labels(
-                            &ctx,
-                            &meta.cluster_hulls,
+                        let base_ctx = base_canvas.get_context("2d")?;
+                        paint_dense_layer(
+                            &base_ctx,
+                            scene,
+                            grid,
+                            meta,
                             &pal,
                             cam,
                             dpr,
                             vw,
                             vh,
-                            &mut current_font,
+                            target_w,
+                            target_h,
+                            None,
+                            &empty_neighbors,
+                            &empty_edges,
+                            active_kind_hover_lower.as_deref(),
+                            draw_nodes,
+                            false,
                         );
+                        layers_mut.insert(
+                            canvas_id.to_owned(),
+                            OffscreenBaseLayer {
+                                key: base_key.clone(),
+                                canvas: base_canvas.clone().unchecked_into(),
+                            },
+                        );
+                        Some(base_canvas)
+                    } else {
+                        layers_mut
+                            .get(canvas_id)
+                            .map(|l| l.canvas.clone().unchecked_into())
                     }
+                });
+
+                if let Some(ref base_canvas) = base_drawn {
+                    ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+                    ctx.clear_rect(0.0, 0.0, target_w as f64, target_h as f64);
+                    ctx.set_global_alpha(if hover.is_some() { 0.26 } else { 1.0 });
+                    ctx.draw_image(base_canvas, 0.0, 0.0, target_w as f64, target_h as f64);
+                    ctx.set_global_alpha(1.0);
                 }
-                ctx.set_global_alpha(1.0);
-                true
+
+                if hover.is_some() || base_drawn.is_none() {
+                    let mut hovered_neighbors: HashSet<usize> = HashSet::new();
+                    let mut hovered_edges: HashSet<usize> = HashSet::new();
+                    match hover {
+                        Some((0, h_node)) => {
+                            hovered_neighbors.insert(h_node);
+                            if let Some(adj) = meta.node_adjacency.get(&h_node) {
+                                for &(edge_idx, neighbor) in adj {
+                                    hovered_edges.insert(edge_idx);
+                                    hovered_neighbors.insert(neighbor);
+                                }
+                            }
+                        }
+                        Some((1, h_edge)) => {
+                            hovered_edges.insert(h_edge);
+                            if let Some(em) = meta.edges.get(&h_edge) {
+                                if let Some(from) = em.from_index {
+                                    hovered_neighbors.insert(from);
+                                }
+                                if let Some(to) = em.to_index {
+                                    hovered_neighbors.insert(to);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    paint_dense_layer(
+                        &ctx,
+                        scene,
+                        grid,
+                        meta,
+                        &pal,
+                        cam,
+                        dpr,
+                        vw,
+                        vh,
+                        target_w,
+                        target_h,
+                        hover,
+                        &hovered_neighbors,
+                        &hovered_edges,
+                        active_kind_hover_lower.as_deref(),
+                        draw_nodes,
+                        base_drawn.is_some(),
+                    );
+                }
+                Some((target_w, target_h))
             });
-            if painted {
+            if let Some((target_w, target_h)) = painted {
+                LAST_PAINTED_VIEWPORT.with(|v| {
+                    v.borrow_mut()
+                        .insert(canvas_id.to_owned(), (target_w, target_h));
+                });
                 LAST_PAINT_STATE.with(|p| {
                     p.borrow_mut()
                         .insert(canvas_id.to_owned(), (cam, hover, draw_nodes));
@@ -6182,6 +6759,309 @@ mod tests {
         meta.rebuild_caches(&scene);
         assert_eq!(meta.containers.len(), 2);
         assert!(meta.cluster_hulls.is_empty());
+    }
+
+    #[test]
+    fn offscreen_base_key_reuses_hover_only_changes_and_invalidates_on_camera_dpr_scene_or_filters()
+    {
+        let mut scene = canvas2d::DenseScene {
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![
+                canvas2d::DenseNodeSpec {
+                    index: 0,
+                    x: 20.0,
+                    y: 20.0,
+                    w: 140.0,
+                    h: 54.0,
+                    label: "n0".into(),
+                    ..Default::default()
+                },
+                canvas2d::DenseNodeSpec {
+                    index: 1,
+                    x: 240.0,
+                    y: 20.0,
+                    w: 140.0,
+                    h: 54.0,
+                    label: "n1".into(),
+                    lit: true,
+                    ..Default::default()
+                },
+            ],
+            edges: vec![canvas2d::DenseEdgeSpec {
+                index: 0,
+                kind: "calls".into(),
+                pts: vec![(160.0, 47.0), (240.0, 47.0)],
+                weight: 1,
+                ..Default::default()
+            }],
+        };
+        let mut meta = canvas2d::DenseSceneMeta::default();
+        meta.rebuild_caches(&scene);
+        let d0 = canvas2d::compute_scene_digest(&scene, &meta);
+        let cam0 = Camera {
+            scale: 1.0,
+            tx: 10.0,
+            ty: 20.0,
+        };
+        let hidden = HashSet::new();
+        let k_base = canvas2d::build_offscreen_base_key(
+            d0, 2.0, 1024.0, 768.0, cam0, 1, true, None, None, &hidden,
+        );
+        // Transient pointer hover changes do NOT alter OffscreenBaseKey -> offscreen base reuses cache.
+        let k_hover_same = canvas2d::build_offscreen_base_key(
+            d0, 2.0, 1024.0, 768.0, cam0, 1, true, None, None, &hidden,
+        );
+        assert!(canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &k_hover_same
+        ));
+
+        // Any change to pan/scale, viewport, DPR, palette, filters, or scene invalidates base key.
+        assert!(!canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &canvas2d::build_offscreen_base_key(
+                d0,
+                2.0,
+                1024.0,
+                768.0,
+                Camera { tx: 11.0, ..cam0 },
+                1,
+                true,
+                None,
+                None,
+                &hidden,
+            )
+        ));
+        assert!(!canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &canvas2d::build_offscreen_base_key(
+                d0, 1.5, 1024.0, 768.0, cam0, 1, true, None, None, &hidden,
+            )
+        ));
+        assert!(!canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &canvas2d::build_offscreen_base_key(
+                d0, 2.0, 800.0, 768.0, cam0, 1, true, None, None, &hidden,
+            )
+        ));
+        assert!(!canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &canvas2d::build_offscreen_base_key(
+                d0, 2.0, 1024.0, 768.0, cam0, 2, true, None, None, &hidden,
+            )
+        ));
+        let mut hidden_calls = hidden.clone();
+        hidden_calls.insert("calls".into());
+        assert!(!canvas2d::should_reuse_offscreen_base(
+            Some(&k_base),
+            &canvas2d::build_offscreen_base_key(
+                d0,
+                2.0,
+                1024.0,
+                768.0,
+                cam0,
+                1,
+                true,
+                Some("calls"),
+                None,
+                &hidden_calls,
+            )
+        ));
+
+        scene.nodes[0].selected = true;
+        let d1 = canvas2d::compute_scene_digest(&scene, &meta);
+        assert_ne!(d0, d1);
+
+        let mut hov_edges = HashSet::new();
+        hov_edges.insert(0usize);
+        let mut hov_nodes = HashSet::new();
+        hov_nodes.insert(0usize);
+        assert!(canvas2d::is_overlay_edge(&scene.edges[0], &hov_edges, None));
+        assert!(!canvas2d::is_overlay_edge(
+            &scene.edges[0],
+            &HashSet::new(),
+            None
+        ));
+        assert!(canvas2d::is_overlay_node(
+            &scene.nodes[0],
+            Some((0, 0)),
+            &hov_nodes
+        ));
+        assert!(canvas2d::is_overlay_node(
+            &scene.nodes[1],
+            Some((0, 0)),
+            &hov_nodes
+        ));
+    }
+
+    #[test]
+    fn scene_digest_tracks_all_rendered_node_edge_container_and_hull_fields() {
+        let mut scene = canvas2d::DenseScene {
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![canvas2d::DenseNodeSpec {
+                index: 0,
+                x: 20.0,
+                y: 20.0,
+                w: 120.0,
+                h: 48.0,
+                label: "svc".into(),
+                ..Default::default()
+            }],
+            edges: vec![canvas2d::DenseEdgeSpec {
+                index: 0,
+                kind: "calls".into(),
+                pts: vec![(20.0, 20.0), (80.0, 35.0), (140.0, 40.0)],
+                cmds: vec![
+                    canvas2d::DensePathCmd::Move(20.0, 20.0),
+                    canvas2d::DensePathCmd::Line(80.0, 35.0),
+                    canvas2d::DensePathCmd::Line(140.0, 40.0),
+                ],
+                weight: 1,
+                kinds: vec!["calls".into()],
+                ..Default::default()
+            }],
+        };
+        let mut meta = canvas2d::DenseSceneMeta::default();
+        meta.nodes.insert(
+            0,
+            canvas2d::DenseNodeMeta {
+                symbol_kind: "class".into(),
+                visibility: "public".into(),
+                ..Default::default()
+            },
+        );
+        meta.containers.push(canvas2d::DenseContainerSpec {
+            kind: canvas2d::DenseContainerKind::TierBand,
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+            radius: 8.0,
+            label: "Domain".into(),
+        });
+        meta.rebuild_caches(&scene);
+        meta.cluster_hulls.push(canvas2d::DenseClusterHull {
+            key: "c0".into(),
+            label: "Domain".into(),
+            color_slot: 1,
+            node_count: 3,
+            polygon: vec![(10.0, 10.0), (150.0, 10.0), (150.0, 90.0)],
+            centroid: (80.0, 50.0),
+            bounds: (10.0, 10.0, 150.0, 90.0),
+        });
+
+        let base = canvas2d::compute_scene_digest(&scene, &meta);
+
+        // DenseNodeMeta.{symbol_kind, visibility}
+        meta.nodes.get_mut(&0).unwrap().symbol_kind = "interface".into();
+        let d = canvas2d::compute_scene_digest(&scene, &meta);
+        assert_ne!(base, d, "symbol_kind must affect scene_digest");
+        meta.nodes.get_mut(&0).unwrap().symbol_kind = "class".into();
+
+        meta.nodes.get_mut(&0).unwrap().visibility = "private".into();
+        assert_ne!(
+            base,
+            canvas2d::compute_scene_digest(&scene, &meta),
+            "visibility must affect scene_digest"
+        );
+        meta.nodes.get_mut(&0).unwrap().visibility = "public".into();
+
+        // DenseEdgeSpec.{guessed, impact, commit_touched, back, kinds}, interior pts, cmds
+        scene.edges[0].guessed = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].guessed = false;
+
+        scene.edges[0].impact = "high".into();
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].impact.clear();
+
+        scene.edges[0].commit_touched = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].commit_touched = false;
+
+        scene.edges[0].back = true;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].back = false;
+
+        scene.edges[0].kinds.push("imports".into());
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].kinds.pop();
+
+        scene.edges[0].pts[1] = (90.0, 55.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].pts[1] = (80.0, 35.0);
+
+        scene.edges[0].cmds[1] = canvas2d::DensePathCmd::Curve {
+            c1: (50.0, 20.0),
+            c2: (110.0, 40.0),
+            to: (140.0, 40.0),
+        };
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        scene.edges[0].cmds[1] = canvas2d::DensePathCmd::Line(80.0, 35.0);
+
+        // DenseContainerSpec.{kind, radius}
+        meta.containers[0].kind = canvas2d::DenseContainerKind::ServiceFrame;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.containers[0].kind = canvas2d::DenseContainerKind::TierBand;
+
+        meta.containers[0].radius = 16.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.containers[0].radius = 8.0;
+
+        // DenseClusterHull bounds.{1,3}, color_slot, node_count, polygon, centroid
+        meta.cluster_hulls[0].bounds.1 = 15.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].bounds.1 = 10.0;
+
+        meta.cluster_hulls[0].bounds.3 = 95.0;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].bounds.3 = 90.0;
+
+        meta.cluster_hulls[0].color_slot = 2;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].color_slot = 1;
+
+        meta.cluster_hulls[0].node_count = 4;
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].node_count = 3;
+
+        meta.cluster_hulls[0].centroid = (85.0, 50.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].centroid = (80.0, 50.0);
+
+        meta.cluster_hulls[0].polygon[1] = (155.0, 12.0);
+        assert_ne!(base, canvas2d::compute_scene_digest(&scene, &meta));
+        meta.cluster_hulls[0].polygon[1] = (150.0, 10.0);
+
+        assert_eq!(base, canvas2d::compute_scene_digest(&scene, &meta));
+
+        assert!(canvas2d::should_paint_cluster_hull_labels(false, true));
+        assert!(!canvas2d::should_paint_cluster_hull_labels(true, true));
+        assert!(!canvas2d::should_paint_cluster_hull_labels(false, false));
+    }
+
+    #[test]
+    fn dense_bitmap_target_size_scales_and_validates_bounds() {
+        assert_eq!(canvas2d::dense_bitmap_target_size(63.9, 400.0, 2.0), None);
+        assert_eq!(canvas2d::dense_bitmap_target_size(900.0, 63.0, 2.0), None);
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(f64::NAN, 400.0, 2.0),
+            None
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 2.0),
+            Some((1816, 935))
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 3.0),
+            Some((1816, 935))
+        );
+        assert_eq!(
+            canvas2d::dense_bitmap_target_size(908.0, 467.59, 0.5),
+            Some((908, 468))
+        );
     }
 
     trait CameraTestExt {

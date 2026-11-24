@@ -2995,6 +2995,12 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 .graph-map-edge:focus-visible,.graph-map-edge[data-edge-kind]:focus-visible { outline:none; stroke:var(--focus); stroke-width:3px; opacity:1; filter:drop-shadow(0 0 3px var(--focus-glow)); }
 :is(.system-map-canvas,.system-map-plane)[data-lod="far"] :is(.system-node-meta,.system-map-node-meta,.system-map-node-badges),:is(.omni-canvas,.omni-plane)[data-lod="far"] :is(.omni-node-head,.omni-node-foot,.omni-node-meta) { display:none; }
 :is(.graph-map-node,.system-map-node,.omni-node)[data-offscreen="true"] { visibility:hidden; pointer-events:none; }
+.graph-map-canvas:is([data-dense="true"],:has(> .graph-dense-canvas)) { overflow:hidden; }
+.graph-map-plane[data-scale-tier="dense"] { transition:none; }
+.graph-map-canvas[data-dense="true"] .graph-map-plane[data-scale-tier="dense"] :is(.graph-map-node:not(.graph-map-entity-node),.system-map-node,.omni-node) { background:transparent; border-color:transparent; color:transparent; box-shadow:none; outline:none; transform:none; transition:none; animation:none; }
+.graph-map-canvas[data-dense="true"] .graph-map-plane[data-scale-tier="dense"] :is(.graph-map-node:not(.graph-map-entity-node),.system-map-node,.omni-node)::before,.graph-map-canvas[data-dense="true"] .graph-map-plane[data-scale-tier="dense"] :is(.graph-map-node:not(.graph-map-entity-node),.system-map-node,.omni-node)::after { opacity:0; }
+.graph-map-canvas[data-dense="true"] .graph-map-plane[data-scale-tier="dense"] :is(.graph-map-node:not(.graph-map-entity-node),.system-map-node,.omni-node) > :not(.graph-map-node-badges) { opacity:0; pointer-events:none; }
+.graph-map-canvas[data-dense="true"] .graph-map-plane[data-scale-tier="dense"] :is(.graph-map-node:not(.graph-map-entity-node),.system-map-node,.omni-node):focus-visible { outline:2px solid var(--focus); outline-offset:1px; box-shadow:0 0 0 3px var(--focus-glow); }
 .git-graph-row[data-range="start"],.git-graph-row[data-range="between"],.git-graph-row[data-range="end"] { background:var(--purple-tint); border-left-color:var(--purple); }
 .graph-commit-range-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--purple-tint); font-size:var(--text-meta); }
 .omni-node[data-drift="changed"] { border-color:var(--graph-diff-modified-border); }

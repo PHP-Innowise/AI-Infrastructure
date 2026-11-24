@@ -754,3 +754,94 @@ fn gate1_allows_parameterized_multi_call_helper_reuse() {
     let report = gate(&cap, &pkg, None);
     assert!(report.passed, "{:?}", report.violations);
 }
+
+#[test]
+fn gate1_validates_allow_ignored_and_rejects_sensitive_or_traversal_entries() {
+    let valid = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "mu": {"name": "allow-dist", "description": "Read dist artifacts"},
+        "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+        "capabilities": {"network": "none", "runtimes": ["python3"], "allow_ignored": ["dist", "build"]},
+        "bindings": [],
+        "programs": [{
+            "id": "read_dist",
+            "entry": ["python3", "programs/read_dist/main.py"],
+            "inputs": [],
+            "outputs": [],
+            "check": ["python3", "programs/read_dist/main.py", "--check"],
+            "timeout_seconds": 30,
+            "read_only": true
+        }],
+        "steps": [{"kind": "program", "program": "read_dist"}],
+        "verification": []
+    });
+    let mut pkg = Files::new();
+    pkg.insert("programs/read_dist/main.py", b"print('ok')\n".to_vec());
+    let report = gate(&valid, &pkg, None);
+    assert!(report.passed, "{:?}", report.violations);
+
+    for bad_list in [
+        json!([".git"]),
+        json!(["../dist"]),
+        json!(["sub/dir"]),
+        json!(["dist", "dist"]),
+    ] {
+        let mut bad = valid.clone();
+        bad["capabilities"]["allow_ignored"] = bad_list.clone();
+        let report = gate(&bad, &pkg, None);
+        assert!(
+            !report.passed,
+            "expected allow_ignored {bad_list} to be rejected"
+        );
+    }
+}
+
+#[test]
+fn gate1_allows_expanded_generic_short_literals_while_rejecting_specific_ones() {
+    let generic = [
+        "src", "app", "php", "sql", "api", "dir", "run", "log", "bin", "web",
+    ];
+    for word in generic {
+        let mut obs = examples();
+        obs["bindings"]["currency"] = word.into();
+        let mut cap = capsule();
+        cap["mu"]["description"] = format!("Inspect {word} layout safely").into();
+        let mut pkg = Files::new();
+        for (path, content) in files().iter() {
+            let replacement = if path == "programs/summarize/main.py" {
+                format!("TAG = '{word}'\nprint('{{\"status\": \"complete\", \"result\": {{}}}}')\n")
+                    .into_bytes()
+            } else {
+                content.to_vec()
+            };
+            pkg.insert(path, replacement);
+        }
+        let report = gate(&cap, &pkg, Some(&obs));
+        assert!(
+            !report.has("example_value_in_capsule"),
+            "generic short literal `{word}` must not trigger false rejection: {:?}",
+            report.violations
+        );
+
+        // Case-insensitive check (`PHP`, `SQL`, etc.) in Gate 1T as well.
+        let (manifest, _) = support::textual();
+        let observed = infra_skillcache::Examples::from_value(&obs).unwrap();
+        let upper = word.to_ascii_uppercase();
+        let md = format!("# Check\n\n1. Inspect {upper} modules.\n");
+        let report_1t = gate1::check_textual(&bytes(&manifest), md.as_bytes(), Some(&observed));
+        assert!(
+            !report_1t.has("example_value_in_capsule"),
+            "generic short literal `{upper}` must not fail Gate 1T: {:?}",
+            report_1t.violations
+        );
+    }
+
+    // Specific short literals outside GENERIC_SHORT_LITERALS remain rejected.
+    let mut specific_obs = examples();
+    specific_obs["bindings"]["currency"] = "foo".into();
+    let mut specific_cap = capsule();
+    specific_cap["mu"]["description"] = "Inspect foo layout safely".into();
+    let report = gate(&specific_cap, &files(), Some(&specific_obs));
+    assert!(report.has("example_value_in_capsule"));
+}

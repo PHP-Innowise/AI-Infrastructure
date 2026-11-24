@@ -580,19 +580,17 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
     if command.is_empty() || command.len() > 2048 {
         return Err("command length out of bounds".into());
     }
-    if command.chars().any(|c| {
-        matches!(
-            c,
-            '|' | ';' | '&' | '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'
-        )
-    }) {
+    if command
+        .chars()
+        .any(|c| matches!(c, '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'))
+    {
         return Err("shell operators are not permitted in deterministic read-only commands".into());
     }
     let mut tokens = Vec::new();
     let mut cur = String::new();
     let mut in_token = false;
     let mut quote: Option<char> = None;
-    let mut chars = command.chars();
+    let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match quote {
             Some(q) if c == q => {
@@ -600,15 +598,29 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
                 in_token = true;
             }
             Some('"') if c == '\\' => {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
-                cur.push(next);
+                if cfg!(windows) {
+                    if matches!(chars.peek(), Some('"' | '\\')) {
+                        let next = chars.next().expect("peeked char");
+                        cur.push(next);
+                    } else {
+                        cur.push('\\');
+                    }
+                } else {
+                    let next = chars
+                        .next()
+                        .ok_or_else(|| "unterminated escape in command".to_owned())?;
+                    cur.push(next);
+                }
                 in_token = true;
             }
             Some(_) => {
                 cur.push(c);
                 in_token = true;
+            }
+            None if matches!(c, '|' | ';' | '&') => {
+                return Err(
+                    "shell operators are not permitted in deterministic read-only commands".into(),
+                );
             }
             None if c.is_whitespace() => {
                 if in_token {
@@ -620,7 +632,9 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
                 quote = Some(c);
                 in_token = true;
             }
-            None if c == '\\' => {
+            // On Windows, unquoted `\` is a path separator (e.g. `C:\Users\...\skillcache-run`),
+            // not a POSIX escape prefix.
+            None if !cfg!(windows) && c == '\\' => {
                 let next = chars
                     .next()
                     .ok_or_else(|| "unterminated escape in command".to_owned())?;
@@ -645,29 +659,74 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
 type FileStamp = Option<(i64, u64)>;
 type VerifiedCapsuleCacheKey = (String, String, String, i64);
 
+/// Git-style racily-clean settlement window: a file whose mtime or ctime is
+/// newer than 2 seconds is re-hashed on disk before trusting cached metadata.
+const RACY_NS: i128 = 2_000_000_000;
 const MAX_CACHED_WORKSPACES: usize = 64;
 const MAX_CACHED_CAPSULES_PER_WS: usize = 128;
+const MAX_CACHED_SEALED_FILES_PER_WS: usize = 512;
+
+#[derive(Clone, Eq, PartialEq)]
+struct SealedFileStamp {
+    mtime_ns: i128,
+    ctime_ns: i128,
+    len: u64,
+    ino: u64,
+    sealed_sha256: String,
+    last_used_tick: u64,
+}
 
 #[derive(Clone)]
 struct VerifiedCapsuleSnapshot {
     package: Arc<infra_skillcache::package::Package>,
+    last_used_tick: u64,
 }
 
 struct WorkspaceReadOnlyCacheEntry {
     analyzer_stamps: (FileStamp, FileStamp),
     analyzer: Option<Arc<infra_generator::commands::CommandAnalyzer>>,
     verified_capsules: BTreeMap<VerifiedCapsuleCacheKey, VerifiedCapsuleSnapshot>,
+    verified_sealed_files: BTreeMap<(String, String), SealedFileStamp>,
+    last_used_tick: u64,
+    capsule_tick: u64,
+    sealed_file_tick: u64,
     #[cfg(test)]
     analyzer_builds: usize,
     #[cfg(test)]
     program_reads: usize,
     #[cfg(test)]
     gate1_evals: usize,
+    #[cfg(test)]
+    sealed_file_disk_hashes: usize,
 }
 
 #[derive(Default)]
 struct ReadOnlyWorkspaceCache {
     workspaces: BTreeMap<PathBuf, WorkspaceReadOnlyCacheEntry>,
+    tick: u64,
+}
+
+fn lru_insert<K: Ord + Clone, V>(
+    map: &mut BTreeMap<K, V>,
+    tick: &mut u64,
+    cap: usize,
+    key: K,
+    mut value: V,
+    get_tick: fn(&V) -> u64,
+    set_tick: fn(&mut V, u64),
+) {
+    if !map.contains_key(&key)
+        && map.len() >= cap
+        && let Some(evicted) = map
+            .iter()
+            .min_by_key(|(_, entry)| get_tick(entry))
+            .map(|(k, _)| k.clone())
+    {
+        map.remove(&evicted);
+    }
+    *tick = tick.saturating_add(1);
+    set_tick(&mut value, *tick);
+    map.insert(key, value);
 }
 
 fn read_only_workspace_cache() -> &'static Mutex<ReadOnlyWorkspaceCache> {
@@ -696,34 +755,63 @@ fn workspace_analyzer_stamps(ws: &Path) -> (FileStamp, FileStamp) {
     )
 }
 
+fn touch_workspace_entry<'a>(
+    cache: &'a mut ReadOnlyWorkspaceCache,
+    ws: &Path,
+) -> Option<&'a mut WorkspaceReadOnlyCacheEntry> {
+    cache.tick = cache.tick.saturating_add(1);
+    let tick = cache.tick;
+    let entry = cache.workspaces.get_mut(ws)?;
+    entry.last_used_tick = tick;
+    Some(entry)
+}
+
 fn ensure_workspace_entry<'a>(
     cache: &'a mut ReadOnlyWorkspaceCache,
     ws: &Path,
 ) -> &'a mut WorkspaceReadOnlyCacheEntry {
-    if !cache.workspaces.contains_key(ws) && cache.workspaces.len() >= MAX_CACHED_WORKSPACES {
-        cache.workspaces.clear();
+    if !cache.workspaces.contains_key(ws)
+        && cache.workspaces.len() >= MAX_CACHED_WORKSPACES
+        && let Some(evicted) = cache
+            .workspaces
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used_tick)
+            .map(|(k, _)| k.clone())
+    {
+        cache.workspaces.remove(&evicted);
     }
-    cache
-        .workspaces
-        .entry(ws.to_path_buf())
-        .or_insert_with(|| WorkspaceReadOnlyCacheEntry {
-            analyzer_stamps: (None, None),
-            analyzer: None,
-            verified_capsules: BTreeMap::new(),
-            #[cfg(test)]
-            analyzer_builds: 0,
-            #[cfg(test)]
-            program_reads: 0,
-            #[cfg(test)]
-            gate1_evals: 0,
-        })
+    cache.tick = cache.tick.saturating_add(1);
+    let tick = cache.tick;
+    let entry =
+        cache
+            .workspaces
+            .entry(ws.to_path_buf())
+            .or_insert_with(|| WorkspaceReadOnlyCacheEntry {
+                analyzer_stamps: (None, None),
+                analyzer: None,
+                verified_capsules: BTreeMap::new(),
+                verified_sealed_files: BTreeMap::new(),
+                last_used_tick: tick,
+                capsule_tick: 0,
+                sealed_file_tick: 0,
+                #[cfg(test)]
+                analyzer_builds: 0,
+                #[cfg(test)]
+                program_reads: 0,
+                #[cfg(test)]
+                gate1_evals: 0,
+                #[cfg(test)]
+                sealed_file_disk_hashes: 0,
+            });
+    entry.last_used_tick = tick;
+    entry
 }
 
 fn cached_command_analyzer(ws: &Path) -> Option<Arc<infra_generator::commands::CommandAnalyzer>> {
     let ws_canon = infra_core::fs::canonicalize(ws).ok()?;
     let stamps = workspace_analyzer_stamps(&ws_canon);
-    if let Ok(guard) = read_only_workspace_cache().lock()
-        && let Some(entry) = guard.workspaces.get(&ws_canon)
+    if let Ok(mut guard) = read_only_workspace_cache().lock()
+        && let Some(entry) = touch_workspace_entry(&mut guard, &ws_canon)
         && entry.analyzer.is_some()
         && entry.analyzer_stamps == stamps
     {
@@ -767,6 +855,18 @@ fn read_only_cache_counters(ws: &Path) -> (usize, usize, usize) {
     })
 }
 
+#[cfg(test)]
+fn sealed_file_disk_hash_count(ws: &Path) -> usize {
+    let Ok(canon) = infra_core::fs::canonicalize(ws) else {
+        return 0;
+    };
+    let guard = read_only_workspace_cache().lock().unwrap();
+    guard
+        .workspaces
+        .get(&canon)
+        .map_or(0, |entry| entry.sealed_file_disk_hashes)
+}
+
 fn package_relative_arg(arg: &str) -> Option<String> {
     let mut rest = arg.split_once('=').map_or(arg, |(_, v)| v);
     while let Some(t) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
@@ -798,6 +898,37 @@ fn latest_round_gates_passed(db: &rusqlite::Connection, capsule_id: &str) -> Opt
     (g1 && g2 && g3).then_some(max_round)
 }
 
+fn metadata_racy_stamp(meta: &std::fs::Metadata) -> Option<(i128, i128, u64, u64)> {
+    let mtime_ns = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())?;
+    #[cfg(unix)]
+    let (ctime_ns, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            meta.ino(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (ctime_ns, ino) = (0i128, 0u64);
+    Some((mtime_ns, ctime_ns, meta.len(), ino))
+}
+
+fn now_epoch_ns() -> Option<i128> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+
+fn stamp_is_settled(mtime_ns: i128, ctime_ns: i128, now_ns: i128) -> bool {
+    now_ns.saturating_sub(mtime_ns) >= RACY_NS && now_ns.saturating_sub(ctime_ns) >= RACY_NS
+}
+
 fn workspace_file_matches_sealed(
     ws_canon: &Path,
     rel: &str,
@@ -811,19 +942,92 @@ fn workspace_file_matches_sealed(
                     "program_symlink_refused: linked or non-regular `{rel}` is not admitted"
                 ));
             }
+            let sealed_sha256 = infra_skillcache::fingerprint::sha256(sealed_bytes);
+            let meta_stamp = metadata_racy_stamp(&meta);
+            let now_ns = now_epoch_ns();
+            if let (Some((mtime_ns, ctime_ns, len, ino)), Some(now_ns)) = (meta_stamp, now_ns)
+                && stamp_is_settled(mtime_ns, ctime_ns, now_ns)
+                && let Ok(mut guard) = read_only_workspace_cache().lock()
+                && let Some(entry) = touch_workspace_entry(&mut guard, ws_canon)
+                && let Some(cached_tick) = entry
+                    .verified_sealed_files
+                    .get(&(rel.to_owned(), sealed_sha256.clone()))
+                    .filter(|cached| {
+                        cached.mtime_ns == mtime_ns
+                            && cached.ctime_ns == ctime_ns
+                            && cached.len == len
+                            && cached.ino == ino
+                            && cached.sealed_sha256 == sealed_sha256
+                    })
+                    .map(|_| {
+                        entry.sealed_file_tick = entry.sealed_file_tick.saturating_add(1);
+                        entry.sealed_file_tick
+                    })
+            {
+                if let Some(cached) = entry
+                    .verified_sealed_files
+                    .get_mut(&(rel.to_owned(), sealed_sha256))
+                {
+                    cached.last_used_tick = cached_tick;
+                }
+                return Ok(());
+            }
             let Ok(disk_bytes) = std::fs::read(&ws_path) else {
                 return Err(format!("program_unreadable: `{rel}` is not readable"));
             };
-            if infra_skillcache::fingerprint::sha256(&disk_bytes)
-                != infra_skillcache::fingerprint::sha256(sealed_bytes)
-            {
+            #[cfg(test)]
+            if let Ok(mut guard) = read_only_workspace_cache().lock() {
+                let entry = ensure_workspace_entry(&mut guard, ws_canon);
+                entry.sealed_file_disk_hashes += 1;
+            }
+            if infra_skillcache::fingerprint::sha256(&disk_bytes) != sealed_sha256 {
+                if let Ok(mut guard) = read_only_workspace_cache().lock()
+                    && let Some(entry) = guard.workspaces.get_mut(ws_canon)
+                {
+                    entry
+                        .verified_sealed_files
+                        .retain(|(k_rel, _), _| k_rel != rel);
+                }
                 return Err(format!(
                     "program_digest_mismatch: workspace `{rel}` does not match sealed capsule"
                 ));
             }
+            if let Some((mtime_ns, ctime_ns, len, ino)) = meta_stamp
+                && now_ns.is_some_and(|now| stamp_is_settled(mtime_ns, ctime_ns, now))
+                && let Ok(mut guard) = read_only_workspace_cache().lock()
+            {
+                let entry = ensure_workspace_entry(&mut guard, ws_canon);
+                let mut tick = entry.sealed_file_tick;
+                lru_insert(
+                    &mut entry.verified_sealed_files,
+                    &mut tick,
+                    MAX_CACHED_SEALED_FILES_PER_WS,
+                    (rel.to_owned(), sealed_sha256.clone()),
+                    SealedFileStamp {
+                        mtime_ns,
+                        ctime_ns,
+                        len,
+                        ino,
+                        sealed_sha256,
+                        last_used_tick: 0,
+                    },
+                    |stamp| stamp.last_used_tick,
+                    |stamp, t| stamp.last_used_tick = t,
+                );
+                entry.sealed_file_tick = tick;
+            }
             Ok(())
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Ok(mut guard) = read_only_workspace_cache().lock()
+                && let Some(entry) = guard.workspaces.get_mut(ws_canon)
+            {
+                entry
+                    .verified_sealed_files
+                    .retain(|(k_rel, _), _| k_rel != rel);
+            }
+            Ok(())
+        }
         Err(_) => Err(format!("program_unreadable: `{rel}` is not readable")),
     }
 }
@@ -852,12 +1056,33 @@ fn load_verified_sealed_capsule(
         max_round,
     );
 
-    if let Ok(guard) = read_only_workspace_cache().lock()
-        && let Some(entry) = guard.workspaces.get(ws_canon)
-        && let Some(hit) = entry.verified_capsules.get(&cache_key)
-        && infra_skillcache::package::digest(&warm_dir).ok().as_deref() == Some(expected_pkg_sha)
+    let cached_hit = if let Ok(mut guard) = read_only_workspace_cache().lock()
+        && let Some(entry) = touch_workspace_entry(&mut guard, ws_canon)
+        && entry.verified_capsules.contains_key(&cache_key)
     {
-        return Some(hit.package.clone());
+        entry.capsule_tick = entry.capsule_tick.saturating_add(1);
+        let tick = entry.capsule_tick;
+        entry.verified_capsules.get_mut(&cache_key).map(|hit| {
+            hit.last_used_tick = tick;
+            hit.package.clone()
+        })
+    } else {
+        None
+    };
+
+    if let Some(pkg) = cached_hit {
+        if crate::skillcache::cached_package_digest(&warm_dir)
+            .ok()
+            .as_deref()
+            == Some(expected_pkg_sha)
+        {
+            return Some(pkg);
+        }
+        if let Ok(mut guard) = read_only_workspace_cache().lock()
+            && let Some(entry) = guard.workspaces.get_mut(ws_canon)
+        {
+            entry.verified_capsules.remove(&cache_key);
+        }
     }
 
     let loaded = infra_skillcache::package::load(&warm_dir).ok()?;
@@ -868,6 +1093,13 @@ fn load_verified_sealed_capsule(
     {
         return None;
     }
+    let all_read_only = loaded.capsule.form == infra_skillcache::Form::Textual
+        || loaded.capsule.programs.iter().all(|p| p.read_only);
+    crate::skillcache::cache_package_meta_if_settled(
+        &warm_dir,
+        &loaded.package_sha256,
+        all_read_only,
+    );
     let pkg = Arc::new(loaded);
     if let Ok(mut guard) = read_only_workspace_cache().lock() {
         let entry = ensure_workspace_entry(&mut guard, ws_canon);
@@ -876,17 +1108,90 @@ fn load_verified_sealed_capsule(
             entry.program_reads += 1;
             entry.gate1_evals += 1;
         }
-        if entry.verified_capsules.len() >= MAX_CACHED_CAPSULES_PER_WS {
-            entry.verified_capsules.clear();
-        }
-        entry.verified_capsules.insert(
+        let mut tick = entry.capsule_tick;
+        lru_insert(
+            &mut entry.verified_capsules,
+            &mut tick,
+            MAX_CACHED_CAPSULES_PER_WS,
             cache_key,
             VerifiedCapsuleSnapshot {
                 package: pkg.clone(),
+                last_used_tick: 0,
             },
+            |snap| snap.last_used_tick,
+            |snap, t| snap.last_used_tick = t,
         );
+        entry.capsule_tick = tick;
     }
     Some(pkg)
+}
+
+fn is_absolute_arg_path(path_part: &str) -> bool {
+    let bytes = path_part.as_bytes();
+    let is_drive_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let is_win_drive_prefixed =
+        cfg!(windows) && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    path_part.starts_with('/')
+        || path_part.starts_with('\\')
+        || is_drive_abs
+        || is_win_drive_prefixed
+}
+
+fn is_skillcache_run_name(name: &str) -> bool {
+    name == "skillcache-run" || (cfg!(windows) && name.eq_ignore_ascii_case("skillcache-run.exe"))
+}
+
+fn is_skillcache_run_command(
+    ws_canon: &Path,
+    store: &crate::store::SessionStore,
+    tokens: &[String],
+) -> bool {
+    let Some(cmd) = tokens.first() else {
+        return false;
+    };
+    let bin_ok = if is_skillcache_run_name(cmd) {
+        std::fs::symlink_metadata(ws_canon.join("skillcache-run")).is_err()
+            && (!cfg!(windows)
+                || std::fs::symlink_metadata(ws_canon.join("skillcache-run.exe")).is_err())
+    } else if !cmd.contains("..") {
+        let cmd_path = Path::new(cmd);
+        cmd_path.is_absolute()
+            && cmd_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_skillcache_run_name)
+            && std::fs::symlink_metadata(cmd_path).is_ok()
+            && cmd_path
+                .parent()
+                .and_then(|p| infra_core::fs::canonicalize(p).ok())
+                .zip(infra_core::fs::canonicalize(store.state.join("skillcache/bin")).ok())
+                .is_some_and(|(parent, state_bin)| {
+                    parent.starts_with(&state_bin)
+                        && !infra_core::fs::canonicalize(cmd_path)
+                            .ok()
+                            .is_some_and(|target| target.starts_with(ws_canon))
+                })
+    } else {
+        false
+    };
+    if !bin_ok {
+        return false;
+    }
+    match tokens.get(1).map(String::as_str) {
+        Some("status" | "reset") => tokens.len() == 2,
+        Some("run" | "continue") => match tokens.len() {
+            2 => true,
+            3 => {
+                tokens[2] == "-"
+                    || serde_json::from_str::<Value>(&tokens[2]).is_ok_and(|v| v.is_object())
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn check_read_only_capsule_program(
@@ -894,16 +1199,24 @@ fn check_read_only_capsule_program(
     store: Option<&crate::store::SessionStore>,
     tokens: &[String],
 ) -> std::result::Result<bool, String> {
+    let ws_canon = infra_core::fs::canonicalize(workspace)
+        .map_err(|_| "workspace path does not exist".to_owned())?;
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    let is_runner = is_skillcache_run_command(&ws_canon, store, tokens);
+    let first_is_abs = tokens.first().is_some_and(|cmd| is_absolute_arg_path(cmd));
+    if first_is_abs && !is_runner {
+        return Ok(false);
+    }
     let rel_refs: Vec<String> = tokens
         .iter()
         .skip(1)
         .filter_map(|arg| package_relative_arg(arg))
         .collect();
-    if !rel_refs.iter().any(|rel| rel.starts_with("programs/")) {
+    if !is_runner && !rel_refs.iter().any(|rel| rel.starts_with("programs/")) {
         return Ok(false);
     }
-    let ws_canon = infra_core::fs::canonicalize(workspace)
-        .map_err(|_| "workspace path does not exist".to_owned())?;
     for rel in &rel_refs {
         let ws_path = ws_canon.join(rel);
         if let Ok(meta) = std::fs::symlink_metadata(&ws_path)
@@ -914,9 +1227,6 @@ fn check_read_only_capsule_program(
             ));
         }
     }
-    let Some(store) = store else {
-        return Ok(false);
-    };
     let Ok(projects) = store.projects() else {
         return Ok(false);
     };
@@ -938,7 +1248,62 @@ fn check_read_only_capsule_program(
     let Ok(db) = store.connection() else {
         return Ok(false);
     };
-    for (_, project_id) in matching_projects {
+    let mut candidate_projects: Vec<(bool, String)> = matching_projects
+        .iter()
+        .map(|(_, id)| (true, id.clone()))
+        .collect();
+    let seen_local: std::collections::BTreeSet<String> =
+        matching_projects.into_iter().map(|(_, id)| id).collect();
+    if let Ok(siblings) = crate::skillcache::db::sibling_worktree_projects(&db, "", &ws_canon) {
+        for sib_id in siblings {
+            if !seen_local.contains(&sib_id) {
+                candidate_projects.push((false, sib_id));
+            }
+        }
+    }
+    if is_runner {
+        let mut runner_saw_capsules = false;
+        for (_, project_id) in candidate_projects {
+            let Ok(capsules) = crate::skillcache::db::capsules(
+                &db,
+                &project_id,
+                None,
+                Some("active"),
+                Some("hybrid"),
+                false,
+                false,
+            ) else {
+                return Ok(false);
+            };
+            if capsules.is_empty() {
+                continue;
+            }
+            runner_saw_capsules = true;
+            for row in capsules {
+                let Some(pkg) = load_verified_sealed_capsule(&ws_canon, &db, &row) else {
+                    return Ok(false);
+                };
+                if pkg.capsule.programs.is_empty()
+                    || !pkg.capsule.programs.iter().all(|program| program.read_only)
+                {
+                    return Ok(false);
+                }
+                for (rel, sealed_bytes) in pkg
+                    .files
+                    .iter()
+                    .filter(|(rel, _)| rel.starts_with("programs/"))
+                {
+                    match workspace_file_matches_sealed(&ws_canon, rel, sealed_bytes) {
+                        Ok(()) => {}
+                        Err(err) if err.starts_with("program_symlink_refused:") => return Err(err),
+                        Err(_) => return Ok(false),
+                    }
+                }
+            }
+        }
+        return Ok(runner_saw_capsules);
+    }
+    for (_, project_id) in candidate_projects {
         let Ok(capsules) = crate::skillcache::db::capsules(
             &db,
             &project_id,
@@ -1049,6 +1414,38 @@ fn has_mutating_flag(tokens: &[String]) -> bool {
     })
 }
 
+fn has_cli_output_or_exec_override(tokens: &[String]) -> bool {
+    let Some(cmd) = tokens.first().map(|s| {
+        std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s.as_str())
+    }) else {
+        return false;
+    };
+    let lower = cmd.to_ascii_lowercase();
+    let args = &tokens[1..];
+    match lower.as_str() {
+        "sort" => args.iter().any(|arg| {
+            arg == "-o"
+                || arg == "--output"
+                || arg.starts_with("--output=")
+                || (!arg.starts_with("--") && arg.starts_with('-') && arg[1..].contains('o'))
+        }),
+        "rg" => args
+            .iter()
+            .any(|arg| arg == "--pre" || arg.starts_with("--pre=")),
+        "git" => args.iter().any(|arg| {
+            arg == "--output"
+                || arg.starts_with("--output=")
+                || arg == "--ext-diff"
+                || arg == "-c"
+                || arg.starts_with("-c=")
+        }),
+        _ => false,
+    }
+}
+
 fn is_known_read_only_cli(tokens: &[String]) -> bool {
     let Some(cmd) = tokens.first().map(|s| {
         std::path::Path::new(s)
@@ -1058,7 +1455,7 @@ fn is_known_read_only_cli(tokens: &[String]) -> bool {
     }) else {
         return false;
     };
-    if has_mutating_flag(tokens) {
+    if has_mutating_flag(tokens) || has_cli_output_or_exec_override(tokens) {
         return false;
     }
     let lower = cmd.to_ascii_lowercase();
@@ -1129,6 +1526,7 @@ pub fn classify_read_only_program_command_in_store(
     if runtime.is_empty() {
         return Ok(None);
     }
+    let mut first_is_abs = false;
     for (idx, arg) in tokens.iter().enumerate() {
         let lower = arg.to_ascii_lowercase();
         if lower.ends_with(".cmd") || lower.ends_with(".bat") {
@@ -1145,8 +1543,14 @@ pub fn classify_read_only_program_command_in_store(
         {
             return Err("argv_parent_traversal: parent or home traversal is not admitted".into());
         }
-        if path_part.starts_with('/') || path_part.starts_with('\\') {
-            return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
+        if is_absolute_arg_path(path_part) {
+            if idx == 0 {
+                first_is_abs = true;
+            } else {
+                return Err(
+                    "argv_absolute_path: absolute paths are not admitted in auto rules".into(),
+                );
+            }
         }
     }
 
@@ -1154,6 +1558,12 @@ pub fn classify_read_only_program_command_in_store(
         && check_read_only_capsule_program(ws, store, &tokens)?
     {
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
+    }
+    if first_is_abs {
+        return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
+    }
+    if has_mutating_flag(&tokens) || has_cli_output_or_exec_override(&tokens) {
+        return Ok(None);
     }
     let generator_safe = workspace
         .and_then(cached_command_analyzer)
@@ -1944,6 +2354,28 @@ mod tests {
             None
         );
         assert!(classify_read_only_program_command(Some(&ws), "find . -exec rm {} ;").is_err());
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "sort -o out.txt composer.json").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "rg --pre=./evil.sh echo src").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "git rm -r src").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "git diff --output=out.txt").unwrap(),
+            None
+        );
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "rg 'a|b' src")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:rg a|b src")
+        );
 
         let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
         let project_id = store.register(&ws).unwrap()["id"]
@@ -2031,5 +2463,642 @@ mod tests {
         let (builds_4, _, _) = read_only_cache_counters(&ws);
         assert!(builds_4 > builds_2);
         let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn workspace_file_matches_sealed_uses_settled_racy_ns_metadata_and_verifies_skillcache_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let prog_bytes = b"print('safe')\n";
+        let ws_prog = ws.join("programs/check.py");
+
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-ro-run",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        // Write `ws_prog` right before the RACY_NS checks so prior SQLite/store setup
+        // cannot push file mtime past the 2-second RACY_NS window on slow CI runners.
+        std::fs::write(&ws_prog, prog_bytes).unwrap();
+
+        // 1. Fresh file within <2s RACY_NS forces disk SHA-256 reads each call.
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "skillcache-run run '{\"target\":\"a\"}'",
+            )
+            .unwrap()
+            .as_deref(),
+            Some("readonly:program:skillcache-run run {\"target\":\"a\"}")
+        );
+        let hashes_1 = sealed_file_disk_hash_count(&ws);
+        assert!(hashes_1 >= 1);
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "skillcache-run continue '{\"out\":1}'",
+            )
+            .unwrap()
+            .is_some()
+        );
+        let hashes_2 = sealed_file_disk_hash_count(&ws);
+        assert!(
+            hashes_2 > hashes_1,
+            "files newer than RACY_NS must always re-hash on disk"
+        );
+
+        // 2. Also inject a settled stamp (>2s old) matching actual file metadata to verify
+        // zero disk reads on subsequent checks once past RACY_NS.
+        let meta = std::fs::symlink_metadata(&ws_prog).unwrap();
+        let (mtime_ns, ctime_ns, len, ino) = metadata_racy_stamp(&meta).unwrap();
+        let settled_old_mtime = mtime_ns - RACY_NS - 5_000_000_000;
+        let settled_old_ctime = ctime_ns - RACY_NS - 5_000_000_000;
+        // Manually check stamp_is_settled helper + cache fast-path via backdated mtime on disk if ctime allows,
+        // or verify stamp_is_settled window semantics directly.
+        assert!(!stamp_is_settled(
+            mtime_ns,
+            ctime_ns,
+            mtime_ns + 500_000_000
+        ));
+        assert!(stamp_is_settled(
+            settled_old_mtime,
+            settled_old_ctime,
+            mtime_ns
+        ));
+        {
+            let mut guard = read_only_workspace_cache().lock().unwrap();
+            let ws_canon = infra_core::fs::canonicalize(&ws).unwrap();
+            let entry = ensure_workspace_entry(&mut guard, &ws_canon);
+            let sha = infra_skillcache::fingerprint::sha256(prog_bytes);
+            entry.verified_sealed_files.insert(
+                ("programs/check.py".into(), sha.clone()),
+                SealedFileStamp {
+                    mtime_ns,
+                    ctime_ns,
+                    len,
+                    ino,
+                    sealed_sha256: sha,
+                    last_used_tick: 0,
+                },
+            );
+        }
+        // Within <2s of ctime/mtime, cache is NOT trusted so disk hash still increments.
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "skillcache-run status",
+            )
+            .unwrap()
+            .is_some()
+        );
+        let hashes_3 = sealed_file_disk_hash_count(&ws);
+        assert!(hashes_3 > hashes_2);
+
+        // Symlinked workspace file still fails closed immediately even if cache had entry.
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside.py");
+            std::fs::write(&outside, b"print('evil')\n").unwrap();
+            std::fs::remove_file(&ws_prog).unwrap();
+            std::os::unix::fs::symlink(&outside, &ws_prog).unwrap();
+            assert!(
+                classify_read_only_program_command_in_store(
+                    Some(&ws),
+                    Some(&store),
+                    "skillcache-run run",
+                )
+                .is_err()
+            );
+            std::fs::remove_file(&ws_prog).unwrap();
+            std::fs::write(&ws_prog, prog_bytes).unwrap();
+        }
+
+        // Adding any active writing hybrid capsule in the same project fails closed for `skillcache-run`.
+        let (warm_dir_rw, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-rw-block",
+            "programs/check.py",
+            prog_bytes,
+            false,
+            &["gate1", "gate2", "gate3"],
+        );
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "skillcache-run run",
+            )
+            .unwrap(),
+            None
+        );
+
+        let _ = infra_skillcache::package::remove(&warm_dir_rw);
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn abs_path_staged_skillcache_run_reaches_read_only_capsule_check_while_other_abs_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let prog_bytes = b"print('ro check')\n";
+        std::fs::write(ws.join("programs/check.py"), prog_bytes).unwrap();
+        let state_dir = root.join("state");
+        let store = crate::store::SessionStore::open(&state_dir).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-ro-abs",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        let fake_engine = root.join("infra-engine-bin");
+        std::fs::write(&fake_engine, b"#!/bin/sh\nexit 0\n").unwrap();
+        let bin_dir = state_dir.join("skillcache/bin/abc123def456");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let staged_runner = bin_dir.join("skillcache-run");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&fake_engine, &staged_runner).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&fake_engine, &staged_runner).unwrap();
+
+        let staged_cmd = format!(
+            "{} run '{{\"input_dir\":\"invoices\"}}'",
+            staged_runner.display()
+        );
+        assert!(
+            classify_read_only_program_command_in_store(Some(&ws), Some(&store), &staged_cmd)
+                .unwrap()
+                .is_some(),
+            "staged symlinked skillcache-run should verify sealed all_read_only capsule"
+        );
+
+        // Unstaged / arbitrary absolute path binary MUST still fail with argv_absolute_path.
+        let evil_runner = root.join("skillcache-run");
+        std::fs::write(&evil_runner, b"#!/bin/sh\nexit 0\n").unwrap();
+        let evil_cmd = format!("{} run", evil_runner.display());
+        let err = classify_read_only_program_command_in_store(Some(&ws), Some(&store), &evil_cmd)
+            .unwrap_err();
+        assert!(err.starts_with("argv_absolute_path:"), "{err}");
+
+        // Regular absolute path CLI and idx>0 absolute path argument still fail with argv_absolute_path.
+        let cat_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "/bin/cat programs/check.py",
+        )
+        .unwrap_err();
+        assert!(cat_err.starts_with("argv_absolute_path:"), "{cat_err}");
+        let arg_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "skillcache-run run /etc/passwd",
+        )
+        .unwrap_err();
+        assert!(arg_err.starts_with("argv_absolute_path:"), "{arg_err}");
+        let drive_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "C:/evil/skillcache-run run",
+        )
+        .unwrap_err();
+        assert!(drive_err.starts_with("argv_absolute_path:"), "{drive_err}");
+        let drive_arg_err = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "skillcache-run run --out=D:/secret.txt",
+        )
+        .unwrap_err();
+        assert!(
+            drive_arg_err.starts_with("argv_absolute_path:"),
+            "{drive_arg_err}"
+        );
+        assert!(is_absolute_arg_path(r"C:\Users\runner\skillcache-run"));
+        assert!(is_absolute_arg_path(r"\\?\D:\temp\file"));
+        assert!(!is_absolute_arg_path("programs/check.py"));
+        #[cfg(windows)]
+        {
+            let win_arg_err = classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                r"skillcache-run run C:\secret.txt",
+            )
+            .unwrap_err();
+            assert!(
+                win_arg_err.starts_with("argv_absolute_path:"),
+                "{win_arg_err}"
+            );
+        }
+
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn read_only_workspace_cache_lru_evicts_selectively_and_skips_settled_package_digest_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+
+        // 1. Workspace LRU eviction (`MAX_CACHED_WORKSPACES` = 64): selective LRU eviction without global clear().
+        let ws_dirs: Vec<PathBuf> = (0..=MAX_CACHED_WORKSPACES)
+            .map(|i| root.join(format!("ws-{i}")))
+            .collect();
+        {
+            let mut local_cache = ReadOnlyWorkspaceCache::default();
+            for p in &ws_dirs[..MAX_CACHED_WORKSPACES] {
+                let entry = ensure_workspace_entry(&mut local_cache, p);
+                entry.analyzer_builds = 1;
+            }
+            assert_eq!(local_cache.workspaces.len(), MAX_CACHED_WORKSPACES);
+            // Touch ws_0 so ws_1 becomes least recently used.
+            assert!(touch_workspace_entry(&mut local_cache, &ws_dirs[0]).is_some());
+            let _ = ensure_workspace_entry(&mut local_cache, &ws_dirs[MAX_CACHED_WORKSPACES]);
+            assert_eq!(local_cache.workspaces.len(), MAX_CACHED_WORKSPACES);
+            assert!(
+                local_cache.workspaces.contains_key(&ws_dirs[0]),
+                "recently touched ws_0 must remain cached"
+            );
+            assert!(
+                !local_cache.workspaces.contains_key(&ws_dirs[1]),
+                "least recently used ws_1 must be evicted"
+            );
+            assert!(
+                local_cache.workspaces.contains_key(&ws_dirs[2]),
+                "non-LRU ws_2 must not be wiped as clear() used to do"
+            );
+        }
+
+        // 2. Capsule LRU (`MAX_CACHED_CAPSULES_PER_WS` = 128) + `RACY_NS` `cached_package_meta` stat check.
+        let ws = root.join("main-ws");
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let prog_bytes = b"print('safe')\n";
+        std::fs::write(ws.join("programs/check.py"), prog_bytes).unwrap();
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-settled",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        // Fresh warm_dir (< 2s RACY_NS): repeated hits increment `package_meta_disk_loads`.
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py"
+            )
+            .unwrap()
+            .is_some()
+        );
+        let loads_fresh_1 = crate::skillcache::package_meta_disk_loads(&warm_dir);
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py"
+            )
+            .unwrap()
+            .is_some()
+        );
+        let loads_fresh_2 = crate::skillcache::package_meta_disk_loads(&warm_dir);
+        assert!(
+            loads_fresh_2 > loads_fresh_1,
+            "unsettled package within RACY_NS must re-hash on disk"
+        );
+
+        // Backdate warm_dir files past RACY_NS -> first call populates PackageMetaCache, subsequent calls do 0 disk loads!
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        for rel in ["capsule.json", "programs/check.py"] {
+            let p = warm_dir.join(rel);
+            let orig_perms = std::fs::metadata(&p).unwrap().permissions();
+            #[cfg(unix)]
+            let writable = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::Permissions::from_mode(orig_perms.mode() | 0o200)
+            };
+            #[cfg(not(unix))]
+            #[allow(clippy::permissions_set_readonly_false)]
+            let writable = {
+                let mut w = orig_perms.clone();
+                w.set_readonly(false);
+                w
+            };
+            std::fs::set_permissions(&p, writable).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+            std::fs::set_permissions(&p, orig_perms).unwrap();
+        }
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py"
+            )
+            .unwrap()
+            .is_some()
+        );
+        let loads_settled_1 = crate::skillcache::package_meta_disk_loads(&warm_dir);
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py"
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            crate::skillcache::package_meta_disk_loads(&warm_dir),
+            loads_settled_1,
+            "settled warm package must use RACY_NS stat check without SHA-256 disk read"
+        );
+
+        // Capsule LRU eviction at `MAX_CACHED_CAPSULES_PER_WS`: evicts only LRU capsule, preserving touched `cap-0`!
+        {
+            let ws_canon = infra_core::fs::canonicalize(&ws).unwrap();
+            let db = store.connection().unwrap();
+            let base_pkg = load_verified_sealed_capsule(
+                &ws_canon,
+                &db,
+                &crate::skillcache::db::capsule(&db, "cap-settled")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut guard = read_only_workspace_cache().lock().unwrap();
+            let entry = ensure_workspace_entry(&mut guard, &ws_canon);
+            entry.verified_capsules.clear();
+            entry.capsule_tick = 0;
+            for i in 0..MAX_CACHED_CAPSULES_PER_WS {
+                let mut tick = entry.capsule_tick;
+                lru_insert(
+                    &mut entry.verified_capsules,
+                    &mut tick,
+                    MAX_CACHED_CAPSULES_PER_WS,
+                    (format!("cap-{i:03}"), "c".into(), "p".into(), 1),
+                    VerifiedCapsuleSnapshot {
+                        package: base_pkg.clone(),
+                        last_used_tick: 0,
+                    },
+                    |s| s.last_used_tick,
+                    |s, t| s.last_used_tick = t,
+                );
+                entry.capsule_tick = tick;
+            }
+            // Touch cap-000 so cap-001 becomes LRU.
+            entry.capsule_tick += 1;
+            let bump = entry.capsule_tick;
+            entry
+                .verified_capsules
+                .get_mut(&("cap-000".into(), "c".into(), "p".into(), 1))
+                .unwrap()
+                .last_used_tick = bump;
+            let mut tick = entry.capsule_tick;
+            lru_insert(
+                &mut entry.verified_capsules,
+                &mut tick,
+                MAX_CACHED_CAPSULES_PER_WS,
+                ("cap-new".into(), "c".into(), "p".into(), 1),
+                VerifiedCapsuleSnapshot {
+                    package: base_pkg,
+                    last_used_tick: 0,
+                },
+                |s| s.last_used_tick,
+                |s, t| s.last_used_tick = t,
+            );
+            assert_eq!(entry.verified_capsules.len(), MAX_CACHED_CAPSULES_PER_WS);
+            assert!(entry.verified_capsules.contains_key(&(
+                "cap-000".into(),
+                "c".into(),
+                "p".into(),
+                1
+            )));
+            assert!(!entry.verified_capsules.contains_key(&(
+                "cap-001".into(),
+                "c".into(),
+                "p".into(),
+                1
+            )));
+            assert!(entry.verified_capsules.contains_key(&(
+                "cap-new".into(),
+                "c".into(),
+                "p".into(),
+                1
+            )));
+        }
+
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn cross_worktree_read_only_capsule_auto_approves_in_sibling_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let wt1 = root.join("wt1");
+        let wt2 = root.join("wt2");
+        std::fs::create_dir_all(wt1.join("programs")).unwrap();
+        let prog_bytes = b"print('ro shared')\n";
+        std::fs::write(wt1.join("programs/check.py"), prog_bytes).unwrap();
+        let git = |p: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(p)
+                    .args([
+                        "-c",
+                        "core.autocrlf=false",
+                        "-c",
+                        "user.name=T",
+                        "-c",
+                        "user.email=t@e.invalid",
+                    ])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "init"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &pid1,
+            "cap-wt-ro",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&wt2),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap()
+            .as_deref(),
+            Some("readonly:program:python3 programs/check.py")
+        );
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[test]
+    fn workspace_file_matches_sealed_does_not_cache_unsettled_racy_ns() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(ws.join("programs")).unwrap();
+        let v1 = b"print('v1')\n";
+        let v2 = b"print('v2')\n";
+        let file = ws.join("programs/probe.py");
+        std::fs::write(&file, v1).unwrap();
+
+        workspace_file_matches_sealed(&ws, "programs/probe.py", v1).unwrap();
+        {
+            let guard = read_only_workspace_cache().lock().unwrap();
+            let cached = guard
+                .workspaces
+                .get(&ws)
+                .is_some_and(|e| !e.verified_sealed_files.is_empty());
+            assert!(
+                !cached,
+                "unsettled file within RACY_NS must not be inserted into verified_sealed_files"
+            );
+        }
+        // Same-length immediate overwrite within RACY_NS must fail digest verification.
+        std::fs::write(&file, v2).unwrap();
+        let err = workspace_file_matches_sealed(&ws, "programs/probe.py", v1).unwrap_err();
+        assert!(err.starts_with("program_digest_mismatch:"), "got {err}");
+    }
+
+    #[test]
+    fn skillcache_run_multi_sibling_fails_closed_when_later_sibling_is_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let wt1 = root.join("wt1");
+        let wt2 = root.join("wt2");
+        let wt3 = root.join("wt3");
+        std::fs::create_dir_all(wt1.join("programs")).unwrap();
+        let prog_bytes = b"print('check')\n";
+        std::fs::write(wt1.join("programs/check.py"), prog_bytes).unwrap();
+        let git = |p: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(p)
+                    .args([
+                        "-c",
+                        "core.autocrlf=false",
+                        "-c",
+                        "user.name=T",
+                        "-c",
+                        "user.email=t@e.invalid",
+                    ])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&wt1, &["init", "-q"]);
+        git(&wt1, &["config", "core.autocrlf", "false"]);
+        git(&wt1, &["add", "."]);
+        git(&wt1, &["commit", "-q", "-m", "init"]);
+        git(&wt1, &["worktree", "add", "-q", wt2.to_str().unwrap()]);
+        git(&wt1, &["worktree", "add", "-q", wt3.to_str().unwrap()]);
+
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let pid1 = store.register(&wt1).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let _pid3 = store.register(&wt3).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (warm_ro, _) = seed_sealed_capsule(
+            &store,
+            &pid1,
+            "cap-sib-1-ro",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+        let (warm_rw, _) = seed_sealed_capsule(
+            &store,
+            &pid2,
+            "cap-sib-2-rw",
+            "programs/check.py",
+            prog_bytes,
+            false,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&wt3),
+                Some(&store),
+                "skillcache-run run",
+            )
+            .unwrap(),
+            None,
+            "skillcache-run must NOT auto-approve when a later sibling holds an active writable capsule"
+        );
+
+        let _ = infra_skillcache::package::remove(&warm_ro);
+        let _ = infra_skillcache::package::remove(&warm_rw);
     }
 }

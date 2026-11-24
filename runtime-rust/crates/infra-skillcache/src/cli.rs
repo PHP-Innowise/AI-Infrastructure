@@ -269,14 +269,15 @@ pub fn execute_tool(arguments: &[String]) -> i32 {
         .plan()
         .position(|step| step.program() == Some(id));
     let verification = step_index.is_some_and(|index| package.capsule.is_verification(index));
+    let allow_ignored = &package.capsule.capabilities.allow_ignored;
     let before = log_file
         .as_ref()
-        .and_then(|_| executor::workspace_snapshot_for_changes(&workspace));
+        .and_then(|_| executor::workspace_snapshot_for_changes_with(&workspace, allow_ignored));
     let outcome = tool::run(&package, program, mode, &workspace);
     let changed_files = before
         .as_ref()
         .and_then(|prev| {
-            executor::workspace_snapshot_for_changes(&workspace)
+            executor::workspace_snapshot_for_changes_with(&workspace, allow_ignored)
                 .map(|next| executor::diff_workspace_changes(prev, &next, &workspace))
         })
         .unwrap_or_default();

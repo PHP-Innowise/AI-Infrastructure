@@ -48,7 +48,7 @@ pub(super) const RADAR_DRAG_KEY: &str = "system-map-radar-drag";
 pub(super) const SYS_PORT_GAP: f64 = 6.0;
 pub(super) const SYS_PORT_SPREAD: f64 = 18.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SysMapSurface {
     pub id: &'static str,
     pub id_prefix: &'static str,

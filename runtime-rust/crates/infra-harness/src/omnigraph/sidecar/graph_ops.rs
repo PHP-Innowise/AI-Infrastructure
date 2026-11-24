@@ -35,8 +35,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex},
-    time::Instant,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::{Instant, UNIX_EPOCH},
 };
 
 #[derive(Default)]
@@ -51,6 +51,120 @@ const MAX_OVERLAY_IR_EDGES: usize = 250;
 const MAX_OVERLAY_SEMANTIC_EDGES: usize = 250;
 const MAX_OVERLAY_VIOLATIONS: usize = 200;
 const MAX_OVERLAY_BLAST_FILES: usize = 32;
+const MAX_OVERLAY_CACHE_ENTRIES: usize = 16;
+
+#[derive(Clone, PartialEq, Eq)]
+struct OverlayCacheKey {
+    state_dir: PathBuf,
+    project_id: String,
+    project_root: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct CachedSemOverlayRow {
+    file_path: String,
+    kind: String,
+    target: String,
+    source_symbol: String,
+    evidence: String,
+    value: Value,
+}
+
+#[derive(Clone)]
+struct CachedIrOverlayEdge {
+    source_file: String,
+    target_file: String,
+    source_label: String,
+    target_label: String,
+    relation: String,
+    value: Value,
+}
+
+#[derive(Clone)]
+struct CachedViolationItem {
+    kind: String,
+    rule_id: String,
+    from: String,
+    to: String,
+    message: String,
+    value: Value,
+}
+
+struct CachedOverlaySnapshot {
+    key: OverlayCacheKey,
+    write_epoch: Option<u64>,
+    db_stamp: Option<(u64, i128)>,
+    live_json_stamp: Option<(u64, i128)>,
+    rules_stamp: Option<(u64, i128)>,
+    sem_rows: Vec<CachedSemOverlayRow>,
+    ir_edges: Vec<CachedIrOverlayEdge>,
+    index: Option<Arc<crate::graph_map::Index>>,
+    idx_file_set: BTreeSet<String>,
+    cycle_files: BTreeSet<String>,
+    violations: Vec<CachedViolationItem>,
+    viol_counts: BTreeMap<String, usize>,
+    violation_files: BTreeSet<String>,
+    blast_cache: StdMutex<HashMap<String, Option<Value>>>,
+}
+
+fn overlay_snapshot_cache() -> &'static StdMutex<Vec<Arc<CachedOverlaySnapshot>>> {
+    static CACHE: OnceLock<StdMutex<Vec<Arc<CachedOverlaySnapshot>>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+fn file_mtime_len_stamp(path: &Path) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i128);
+    Some((meta.len(), ns))
+}
+
+fn compute_overlay_violations(
+    idx: Option<&Arc<crate::graph_map::Index>>,
+    idx_file_set: &BTreeSet<String>,
+    project_root: Option<&Path>,
+) -> (
+    Vec<CachedViolationItem>,
+    BTreeMap<String, usize>,
+    BTreeSet<String>,
+) {
+    let mut violations = Vec::new();
+    let mut viol_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut violation_files: BTreeSet<String> = BTreeSet::new();
+    let (Some(idx), Some(root)) = (idx, project_root) else {
+        return (violations, viol_counts, violation_files);
+    };
+    if let Ok(Some(rules)) = crate::graph_map::layer_rules::Rules::read(root) {
+        for v in idx.architecture_violations("", true, &rules) {
+            if !v.from.is_empty() && idx_file_set.contains(&v.from) {
+                *viol_counts.entry(v.from.clone()).or_insert(0) += 1;
+                violation_files.insert(v.from.clone());
+            }
+            if matches!(v.kind.as_str(), "layer" | "package")
+                && !v.to.is_empty()
+                && v.to != v.from
+                && idx_file_set.contains(&v.to)
+            {
+                *viol_counts.entry(v.to.clone()).or_insert(0) += 1;
+                violation_files.insert(v.to.clone());
+            }
+            if let Ok(val) = serde_json::to_value(&v) {
+                violations.push(CachedViolationItem {
+                    kind: v.kind,
+                    rule_id: v.rule_id.unwrap_or_default(),
+                    from: v.from,
+                    to: v.to,
+                    message: v.message,
+                    value: val,
+                });
+            }
+        }
+    }
+    (violations, viol_counts, violation_files)
+}
 
 fn matches_optional_query(qf: Option<&str>, fields: &[&str]) -> bool {
     let Some(q) = qf else {
@@ -83,176 +197,327 @@ fn collect_code_graph_overlay(
     kept_files: &BTreeSet<String>,
     q_filter: Option<&str>,
 ) -> CodeGraphOverlay {
-    let mut overlay = CodeGraphOverlay::default();
+    collect_code_graph_overlay_with_hit(state_dir, project_id, project_root, kept_files, q_filter).0
+}
+
+fn collect_code_graph_overlay_with_hit(
+    state_dir: &Path,
+    project_id: &str,
+    project_root: Option<&Path>,
+    kept_files: &BTreeSet<String>,
+    q_filter: Option<&str>,
+) -> (CodeGraphOverlay, bool) {
+    let canon_state = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let canon_root =
+        project_root.map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.to_path_buf()));
+    let cache_key = OverlayCacheKey {
+        state_dir: canon_state,
+        project_id: project_id.to_owned(),
+        project_root: canon_root,
+    };
+
     let ir_opt = crate::graph_ir::GraphIrStore::open_readonly_cached(state_dir, project_id)
         .ok()
         .flatten();
+    let write_epoch = ir_opt.as_ref().map(|ir| ir.current_write_epoch());
+    let db_stamp = ir_opt
+        .as_ref()
+        .and_then(|ir| file_mtime_len_stamp(ir.db_path()));
+    let live_path = state_dir
+        .join("graphs")
+        .join(project_id)
+        .join("live")
+        .join("graph.json");
+    let live_json_stamp = if ir_opt.is_none() {
+        file_mtime_len_stamp(&live_path)
+    } else {
+        None
+    };
+    let rules_stamp = project_root
+        .and_then(|r| file_mtime_len_stamp(&r.join(crate::graph_map::layer_rules::FILE)));
 
-    let mut ir_nodes_links = None;
-    if let Some(ref ir) = ir_opt {
-        if let Ok((_, sem_rows)) = ir.semantic_edges_for_system() {
-            let mut prioritized = Vec::new();
-            let mut secondary = Vec::new();
-            for (idx, (file_path, kind, target, src_sym, line, evidence)) in
-                sem_rows.into_iter().enumerate()
-            {
-                let src_sym_str = src_sym.as_deref().unwrap_or("");
-                if !matches_optional_query(
-                    q_filter,
-                    &[&file_path, &kind, &target, src_sym_str, &evidence],
-                ) {
-                    continue;
+    let cached_hit = if let Ok(mut guard) = overlay_snapshot_cache().lock()
+        && let Some(pos) = guard.iter().position(|entry| {
+            entry.key == cache_key
+                && entry.write_epoch == write_epoch
+                && entry.db_stamp == db_stamp
+                && entry.live_json_stamp == live_json_stamp
+        }) {
+        let entry = guard.remove(pos);
+        let cloned = Arc::clone(&entry);
+        guard.push(entry);
+        Some(cloned)
+    } else {
+        None
+    };
+
+    let (snapshot, index_cache_hit) = match cached_hit {
+        Some(snap) if snap.rules_stamp == rules_stamp => (snap, true),
+        Some(snap) => {
+            // Only `.harness-architecture.json` changed: reuse the cached `Index`, `ir_edges`,
+            // `sem_rows`, and `cycle_files` while refreshing only rule violations.
+            let (violations, viol_counts, violation_files) =
+                compute_overlay_violations(snap.index.as_ref(), &snap.idx_file_set, project_root);
+            let updated = Arc::new(CachedOverlaySnapshot {
+                key: cache_key.clone(),
+                write_epoch,
+                db_stamp,
+                live_json_stamp,
+                rules_stamp,
+                sem_rows: snap.sem_rows.clone(),
+                ir_edges: snap.ir_edges.clone(),
+                index: snap.index.clone(),
+                idx_file_set: snap.idx_file_set.clone(),
+                cycle_files: snap.cycle_files.clone(),
+                violations,
+                viol_counts,
+                violation_files,
+                blast_cache: StdMutex::new(HashMap::new()),
+            });
+            if let Ok(mut guard) = overlay_snapshot_cache().lock() {
+                guard.retain(|entry| entry.key != cache_key);
+                if guard.len() >= MAX_OVERLAY_CACHE_ENTRIES {
+                    guard.remove(0);
                 }
-                let entry = json!({
-                    "id": format!("sem:{file_path}:{kind}:{target}:{line}:{idx}"),
-                    "file_path": file_path,
-                    "source": file_path,
-                    "source_file": file_path,
-                    "source_symbol": src_sym,
-                    "target": target,
-                    "kind": kind,
-                    "relation": kind,
-                    "line": line,
-                    "evidence": evidence,
-                });
-                if kept_files.contains(&file_path) {
-                    prioritized.push(entry);
-                } else {
-                    secondary.push(entry);
+                guard.push(Arc::clone(&updated));
+            }
+            (updated, true)
+        }
+        None => {
+            let mut sem_rows = Vec::new();
+            let mut ir_edges = Vec::new();
+            let mut ir_nodes_links = None;
+            let mut ir_read_failed = false;
+            if let Some(ref ir) = ir_opt {
+                match ir.semantic_edges_for_system() {
+                    Ok((_, raw_sem_rows)) => {
+                        for (idx, (file_path, kind, target, src_sym, line, evidence)) in
+                            raw_sem_rows.into_iter().enumerate()
+                        {
+                            let src_sym_str = src_sym.as_deref().unwrap_or("").to_owned();
+                            let value = json!({
+                                "id": format!("sem:{file_path}:{kind}:{target}:{line}:{idx}"),
+                                "file_path": file_path,
+                                "source": file_path,
+                                "source_file": file_path,
+                                "source_symbol": src_sym,
+                                "target": target,
+                                "kind": kind,
+                                "relation": kind,
+                                "line": line,
+                                "evidence": evidence,
+                            });
+                            sem_rows.push(CachedSemOverlayRow {
+                                file_path,
+                                kind,
+                                target,
+                                source_symbol: src_sym_str,
+                                evidence,
+                                value,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        ir_read_failed = true;
+                    }
+                }
+                match ir.export_ir_graph_elements() {
+                    Ok((nodes, links, _, _)) => {
+                        let node_by_id: HashMap<&str, &crate::graph_ir::IrNodeSpec> =
+                            nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+                        let mut seen_edges = BTreeSet::new();
+                        for link in &links {
+                            let rel = link.relation.as_deref().unwrap_or("depends_on");
+                            if is_semantic_relation(rel) {
+                                continue;
+                            }
+                            let src_node = node_by_id.get(link.source.as_str()).copied();
+                            let dst_node = node_by_id.get(link.target.as_str()).copied();
+                            let src_file = src_node
+                                .map(|n| n.source_file.as_str())
+                                .or(link.source_file.as_deref())
+                                .unwrap_or("");
+                            let dst_file = dst_node.map(|n| n.source_file.as_str()).unwrap_or("");
+                            let src_label = src_node
+                                .map(|n| n.label.as_str())
+                                .unwrap_or(link.source.as_str());
+                            let dst_label = dst_node
+                                .map(|n| n.label.as_str())
+                                .unwrap_or(link.target.as_str());
+                            if !seen_edges.insert((
+                                link.source.clone(),
+                                link.target.clone(),
+                                rel.to_owned(),
+                            )) {
+                                continue;
+                            }
+                            let intra_file = !src_file.is_empty() && src_file == dst_file;
+                            let value = json!({
+                                "id": format!("ir:{}->{}:{}", link.source, link.target, rel),
+                                "source": link.source,
+                                "target": link.target,
+                                "from": link.source,
+                                "to": link.target,
+                                "source_file": src_file,
+                                "target_file": dst_file,
+                                "source_label": src_label,
+                                "target_label": dst_label,
+                                "kind": rel,
+                                "relation": rel,
+                                "confidence": link.confidence,
+                                "intra_file": intra_file,
+                            });
+                            ir_edges.push(CachedIrOverlayEdge {
+                                source_file: src_file.to_owned(),
+                                target_file: dst_file.to_owned(),
+                                source_label: src_label.to_owned(),
+                                target_label: dst_label.to_owned(),
+                                relation: rel.to_owned(),
+                                value,
+                            });
+                        }
+                        ir_nodes_links = Some((nodes, links));
+                    }
+                    Err(_) => {
+                        ir_read_failed = true;
+                    }
                 }
             }
-            overlay.ir_semantic_edges = prioritized
-                .into_iter()
-                .chain(secondary)
-                .take(MAX_OVERLAY_SEMANTIC_EDGES)
-                .collect();
-        }
 
-        if let Ok((nodes, links, _, _)) = ir.export_ir_graph_elements() {
-            let node_by_id: HashMap<&str, &crate::graph_ir::IrNodeSpec> =
-                nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-            let mut prioritized = Vec::new();
-            let mut secondary = Vec::new();
-            let mut seen_edges = BTreeSet::new();
-            for link in &links {
-                let rel = link.relation.as_deref().unwrap_or("depends_on");
-                if is_semantic_relation(rel) {
-                    continue;
-                }
-                let src_node = node_by_id.get(link.source.as_str()).copied();
-                let dst_node = node_by_id.get(link.target.as_str()).copied();
-                let src_file = src_node
-                    .map(|n| n.source_file.as_str())
-                    .or(link.source_file.as_deref())
-                    .unwrap_or("");
-                let dst_file = dst_node.map(|n| n.source_file.as_str()).unwrap_or("");
-                let src_label = src_node
-                    .map(|n| n.label.as_str())
-                    .unwrap_or(link.source.as_str());
-                let dst_label = dst_node
-                    .map(|n| n.label.as_str())
-                    .unwrap_or(link.target.as_str());
-                if !matches_optional_query(
-                    q_filter,
-                    &[src_file, dst_file, src_label, dst_label, rel],
-                ) {
-                    continue;
-                }
-                if !seen_edges.insert((link.source.clone(), link.target.clone(), rel.to_owned())) {
-                    continue;
-                }
-                let intra_file = !src_file.is_empty() && src_file == dst_file;
-                let entry = json!({
-                    "id": format!("ir:{}->{}:{}", link.source, link.target, rel),
-                    "source": link.source,
-                    "target": link.target,
-                    "from": link.source,
-                    "to": link.target,
-                    "source_file": src_file,
-                    "target_file": dst_file,
-                    "source_label": src_label,
-                    "target_label": dst_label,
-                    "kind": rel,
-                    "relation": rel,
-                    "confidence": link.confidence,
-                    "intra_file": intra_file,
-                });
-                if (!src_file.is_empty() && kept_files.contains(src_file))
-                    || (!dst_file.is_empty() && kept_files.contains(dst_file))
-                {
-                    prioritized.push(entry);
+            let idx_opt = project_root.and_then(|root| {
+                if let (Some(ir), Some((nodes, links))) = (ir_opt.as_ref(), ir_nodes_links) {
+                    crate::graph_map::Index::from_ir_parts(
+                        root,
+                        Some(ir.db_path().to_path_buf()),
+                        Some("ir".to_owned()),
+                        nodes,
+                        links,
+                    )
+                    .ok()
+                    .map(Arc::new)
                 } else {
-                    secondary.push(entry);
+                    std::fs::File::open(&live_path)
+                        .ok()
+                        .and_then(|file| crate::graph_map::Index::read(file, root).ok())
+                        .map(Arc::new)
                 }
+            });
+
+            let idx_file_set: BTreeSet<String> = idx_opt
+                .as_ref()
+                .map(|idx| idx.files().iter().cloned().collect())
+                .unwrap_or_default();
+            let cycle_files: BTreeSet<String> = idx_opt
+                .as_ref()
+                .map(|idx| {
+                    idx.scc_groups(true)
+                        .into_iter()
+                        .flatten()
+                        .filter(|p| idx_file_set.contains(p))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (violations, viol_counts, violation_files) =
+                compute_overlay_violations(idx_opt.as_ref(), &idx_file_set, project_root);
+
+            let built = Arc::new(CachedOverlaySnapshot {
+                key: cache_key.clone(),
+                write_epoch,
+                db_stamp,
+                live_json_stamp,
+                rules_stamp,
+                sem_rows,
+                ir_edges,
+                index: idx_opt,
+                idx_file_set,
+                cycle_files,
+                violations,
+                viol_counts,
+                violation_files,
+                blast_cache: StdMutex::new(HashMap::new()),
+            });
+            if !ir_read_failed && let Ok(mut guard) = overlay_snapshot_cache().lock() {
+                guard.retain(|entry| entry.key != cache_key);
+                if guard.len() >= MAX_OVERLAY_CACHE_ENTRIES {
+                    guard.remove(0);
+                }
+                guard.push(Arc::clone(&built));
             }
-            overlay.ir_edges = prioritized
-                .into_iter()
-                .chain(secondary)
-                .take(MAX_OVERLAY_IR_EDGES)
-                .collect();
-            ir_nodes_links = Some((nodes, links));
+            (built, false)
         }
+    };
+
+    let mut overlay = CodeGraphOverlay::default();
+    {
+        let mut prioritized = Vec::new();
+        let mut secondary = Vec::new();
+        for row in &snapshot.sem_rows {
+            if !matches_optional_query(
+                q_filter,
+                &[
+                    &row.file_path,
+                    &row.kind,
+                    &row.target,
+                    &row.source_symbol,
+                    &row.evidence,
+                ],
+            ) {
+                continue;
+            }
+            if kept_files.contains(&row.file_path) {
+                prioritized.push(row.value.clone());
+            } else {
+                secondary.push(row.value.clone());
+            }
+        }
+        overlay.ir_semantic_edges = prioritized
+            .into_iter()
+            .chain(secondary)
+            .take(MAX_OVERLAY_SEMANTIC_EDGES)
+            .collect();
     }
 
-    let Some(root) = project_root else {
-        return overlay;
-    };
-    let idx_opt = if let (Some(ir), Some((nodes, links))) = (ir_opt.as_ref(), ir_nodes_links) {
-        crate::graph_map::Index::from_ir_parts(
-            root,
-            Some(ir.db_path().to_path_buf()),
-            Some("ir".to_owned()),
-            nodes,
-            links,
-        )
-        .ok()
-    } else {
-        let live_path = state_dir
-            .join("graphs")
-            .join(project_id)
-            .join("live")
-            .join("graph.json");
-        std::fs::File::open(live_path)
-            .ok()
-            .and_then(|file| crate::graph_map::Index::read(file, root).ok())
-    };
-
-    let Some(idx) = idx_opt else {
-        return overlay;
-    };
-
-    let mut viol_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let idx_file_set: BTreeSet<&str> = idx.files().iter().map(String::as_str).collect();
-    let cycle_files: BTreeSet<String> = idx
-        .scc_groups(true)
-        .into_iter()
-        .flatten()
-        .filter(|p| idx_file_set.contains(p.as_str()))
-        .collect();
-    let mut violation_files: BTreeSet<String> = BTreeSet::new();
-    if let Ok(Some(rules)) = crate::graph_map::layer_rules::Rules::read(root) {
-        for v in idx.architecture_violations("", true, &rules) {
-            if !v.from.is_empty() && idx_file_set.contains(v.from.as_str()) {
-                *viol_counts.entry(v.from.clone()).or_insert(0) += 1;
-                violation_files.insert(v.from.clone());
-            }
-            if matches!(v.kind.as_str(), "layer" | "package")
-                && !v.to.is_empty()
-                && v.to != v.from
-                && idx_file_set.contains(v.to.as_str())
-            {
-                *viol_counts.entry(v.to.clone()).or_insert(0) += 1;
-                violation_files.insert(v.to.clone());
-            }
-            let rule_id_str = v.rule_id.as_deref().unwrap_or("");
-            if matches_optional_query(
+    {
+        let mut prioritized = Vec::new();
+        let mut secondary = Vec::new();
+        for edge in &snapshot.ir_edges {
+            if !matches_optional_query(
                 q_filter,
-                &[&v.kind, rule_id_str, &v.from, &v.to, &v.message],
-            ) && overlay.architecture_violations.len() < MAX_OVERLAY_VIOLATIONS
-                && let Ok(val) = serde_json::to_value(&v)
-            {
-                overlay.architecture_violations.push(val);
+                &[
+                    &edge.source_file,
+                    &edge.target_file,
+                    &edge.source_label,
+                    &edge.target_label,
+                    &edge.relation,
+                ],
+            ) {
+                continue;
             }
+            if (!edge.source_file.is_empty() && kept_files.contains(&edge.source_file))
+                || (!edge.target_file.is_empty() && kept_files.contains(&edge.target_file))
+            {
+                prioritized.push(edge.value.clone());
+            } else {
+                secondary.push(edge.value.clone());
+            }
+        }
+        overlay.ir_edges = prioritized
+            .into_iter()
+            .chain(secondary)
+            .take(MAX_OVERLAY_IR_EDGES)
+            .collect();
+    }
+
+    let Some(ref idx) = snapshot.index else {
+        return (overlay, index_cache_hit);
+    };
+
+    for v in &snapshot.violations {
+        if matches_optional_query(q_filter, &[&v.kind, &v.rule_id, &v.from, &v.to, &v.message]) {
+            if overlay.architecture_violations.len() >= MAX_OVERLAY_VIOLATIONS {
+                break;
+            }
+            overlay.architecture_violations.push(v.value.clone());
         }
     }
 
@@ -260,8 +525,8 @@ fn collect_code_graph_overlay(
     let mut seen_targets: BTreeSet<String> = BTreeSet::new();
     for p in kept_files
         .iter()
-        .chain(violation_files.iter())
-        .chain(cycle_files.iter())
+        .chain(snapshot.violation_files.iter())
+        .chain(snapshot.cycle_files.iter())
     {
         if matches_optional_query(q_filter, &[p]) && seen_targets.insert(p.clone()) {
             blast_targets.push(p.clone());
@@ -281,9 +546,23 @@ fn collect_code_graph_overlay(
         }
     }
     for path in blast_targets.into_iter().take(MAX_OVERLAY_BLAST_FILES) {
-        let v_count = viol_counts.get(&path).copied().unwrap_or(0);
-        let in_cycle = cycle_files.contains(&path);
-        let blast_val = idx.blast(&path, true);
+        let v_count = snapshot.viol_counts.get(&path).copied().unwrap_or(0);
+        let in_cycle = snapshot.cycle_files.contains(&path);
+        let cached_blast = snapshot
+            .blast_cache
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&path).cloned());
+        let blast_val = match cached_blast {
+            Some(val) => val,
+            None => {
+                let computed = idx.blast(&path, true);
+                if let Ok(mut guard) = snapshot.blast_cache.lock() {
+                    guard.insert(path.clone(), computed.clone());
+                }
+                computed
+            }
+        };
         let blast_files = blast_val
             .as_ref()
             .and_then(|b| b["files"].as_u64())
@@ -317,7 +596,7 @@ fn collect_code_graph_overlay(
         }));
     }
 
-    overlay
+    (overlay, index_cache_hit)
 }
 
 impl OmnigraphManager {
@@ -2969,4 +3248,83 @@ pub(super) async fn summarize_commit_cached(
         guard.insert(c.graph_commit_id.clone(), digest.clone());
     }
     digest
+}
+
+#[cfg(test)]
+mod overlay_cache_tests {
+    use super::*;
+
+    #[test]
+    fn collect_code_graph_overlay_reuses_epoch_cached_snapshot_and_invalidates_on_write_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            root.join(".harness-architecture.json"),
+            r#"{"version":1,"layers":[{"id":"api","name":"API","paths":["src/api.ts"],"forbids":["db"]},{"id":"db","name":"DB","paths":["src/db.ts"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/db.ts"),
+            "export function queryDb(): number { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/api.ts"),
+            "import { queryDb } from './db';\nexport function handle(): number { return queryDb(); }\n",
+        )
+        .unwrap();
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state, "omni-overlay-hit").unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let kept = BTreeSet::from(["src/api.ts".to_owned()]);
+        let (first, hit1) = collect_code_graph_overlay_with_hit(
+            &state,
+            "omni-overlay-hit",
+            Some(&root),
+            &kept,
+            None,
+        );
+        assert!(!hit1, "cold overlay build must miss cache");
+        assert!(!first.ir_edges.is_empty());
+        assert!(!first.architecture_violations.is_empty());
+
+        let (second, hit2) = collect_code_graph_overlay_with_hit(
+            &state,
+            "omni-overlay-hit",
+            Some(&root),
+            &kept,
+            Some("api"),
+        );
+        assert!(
+            hit2,
+            "second call at same write_epoch must hit cached overlay snapshot"
+        );
+        assert!(!second.ir_edges.is_empty());
+        assert!(!second.architecture_violations.is_empty());
+
+        // Bumping IR write_epoch invalidates snapshot cleanly.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(
+            root.join("src/db.ts"),
+            "export function queryDb(): number { return 2; }\nexport function extra(): number { return 3; }\n",
+        )
+        .unwrap();
+        ir.update_paths_with_delta(&root, &["src/db.ts".to_owned()])
+            .unwrap();
+        let (_, hit3) = collect_code_graph_overlay_with_hit(
+            &state,
+            "omni-overlay-hit",
+            Some(&root),
+            &kept,
+            None,
+        );
+        assert!(
+            !hit3,
+            "IR write_epoch bump must invalidate overlay snapshot"
+        );
+    }
 }

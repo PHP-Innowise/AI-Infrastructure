@@ -563,18 +563,66 @@ fn route_contracts_normalize_params_and_wildcard_verbs_across_frameworks() {
         Some("route:* /v1/items/{param}")
     );
     let ts = r#"
-export async function loadOrder(id: string) {
-    return fetch(`/api/orders/${id}/items?full=true`);
+export async function loadOrder(id: string, a: string, b: string) {
+    const a1 = fetch(`/api/orders/${id}/items?full=true`);
+    const a2 = fetch(`${BASE}/orders/${id}`);
+    const a3 = fetch(`/api/prefix-${id}/${a + b}?mode=${id ? 'x' : 'y'}`);
+    return [a1, a2, a3];
 }
 "#;
     let ts_ir = parse_file_ir("web/client.ts", ts).expect("ts ir");
-    assert!(
-        ts_ir
-            .semantic_edges
-            .iter()
-            .any(|e| e.kind == "calls_route" && e.target == "route:GET /api/orders/{param}/items"),
-        "{:?}",
-        ts_ir.semantic_edges
+    for expected in [
+        "route:GET /api/orders/{param}/items",
+        "route:GET /orders/{param}",
+        "route:GET /api/prefix-{param}/{param}",
+    ] {
+        assert!(
+            ts_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "calls_route" && e.target == expected),
+            "missing `{expected}` in {:?}",
+            ts_ir.semantic_edges
+        );
+    }
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${BASE}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(None, "prefix-${id}", false).as_deref(),
+        Some("route:* /prefix-{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(None, "${a + b}", false).as_deref(),
+        Some("route:* /{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(
+            Some("post"),
+            "https://${cond ? 'a/b' : 'c'}/api/prefix-${orderId}/${a + b}?q=${x ? 1 : 0}",
+            true
+        )
+        .as_deref(),
+        Some("route:POST /api/prefix-{param}/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${`foo/${bar}`}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "${PROTO}${HOST}/orders/${id}", true).as_deref(),
+        Some("route:GET /orders/{param}")
+    );
+    assert_eq!(
+        normalize_route_contract(Some("get"), "/users/{id:[0-9]{2,4}}", true).as_deref(),
+        Some("route:GET /users/{param}")
+    );
+    // Bare template expression without `/` and prose whitespace outside `${...}` must stay rejected.
+    assert_eq!(normalize_route_contract(Some("get"), "${url}", true), None);
+    assert_eq!(
+        normalize_route_contract(Some("get"), "/api/orders with space", true),
+        None
     );
 }
 
@@ -841,5 +889,298 @@ fn parses_blade_templates_directives_components_livewire_and_routes() {
                 && r.member.as_deref() == Some("calculate")),
         "expected @php block ref: {:?}",
         ir.calls_and_refs
+    );
+}
+
+#[test]
+fn route_prefix_composition_symfony_laravel_and_express() {
+    // Symfony class-level #[Route('/api/v2')] composes with method #[Route('/orders/{id}')],
+    // without polluting inner Route::get static calls or outgoing calls_route edges.
+    let symfony_src = r#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Attribute\Route;
+
+#[Route('/api/v2')]
+class OrderController {
+    #[Route('/orders/{id}', methods: ['GET'])]
+    public function show(): void {}
+
+    #[Route('health')]
+    public function health(): void {}
+}
+"#;
+    let sym_ir = parse_file_ir("src/Controller/OrderController.php", symfony_src)
+        .expect("parse symfony controller");
+    let sym_routes: Vec<&str> = sym_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        sym_routes
+            .iter()
+            .any(|t| t.ends_with(" /api/v2/orders/{param}")),
+        "expected composed Symfony class+method route: {sym_routes:?}"
+    );
+    assert!(
+        sym_routes.iter().any(|t| t.ends_with(" /api/v2/health")),
+        "expected relative method route composed with class prefix: {sym_routes:?}"
+    );
+
+    // Laravel nested Route::prefix(...)->group(...) + Route::group(['prefix' => ...]).
+    let laravel_src = r#"<?php
+Route::prefix('/api')->group(function () {
+    Route::prefix('v1')->group(function () {
+        Route::get('/invoices', [InvoiceController::class, 'index']);
+    });
+    Route::group(['prefix' => 'admin'], function () {
+        Route::post('/audit', [AuditController::class, 'store']);
+    });
+});
+"#;
+    let lar_ir = parse_file_ir("routes/api.php", laravel_src).expect("parse laravel routes");
+    let lar_routes: Vec<&str> = lar_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        lar_routes.contains(&"route:GET /api/v1/invoices"),
+        "expected nested Route::prefix composition: {lar_routes:?}"
+    );
+    assert!(
+        lar_routes.contains(&"route:POST /api/admin/audit"),
+        "expected Route::group prefix composition: {lar_routes:?}"
+    );
+
+    // Express router.use('/prefix', ...) inline + mounted router + chained .route(...).get(...).
+    let express_src = r#"
+import express from 'express';
+const app = express();
+const users = express.Router();
+users.get('/:id', showUser);
+users.route('/profile').get(getProfile).post(updateProfile);
+app.use('/api/users', users);
+app.use('/api/v1', (req, res, next) => {
+  const sub = express.Router();
+  sub.get('/ping', pingHandler);
+});
+"#;
+    let exp_ir = parse_file_ir("src/server.ts", express_src).expect("parse express routes");
+    let exp_routes: Vec<&str> = exp_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        exp_routes.contains(&"route:GET /api/users/{param}"),
+        "expected mounted router GET route: {exp_routes:?}"
+    );
+    assert!(
+        exp_routes.contains(&"route:GET /api/users/profile")
+            && exp_routes.contains(&"route:POST /api/users/profile"),
+        "expected chained .route().get().post() composition: {exp_routes:?}"
+    );
+    assert!(
+        exp_routes.contains(&"route:GET /api/v1/ping"),
+        "expected inline app.use('/api/v1', ...) callback composition: {exp_routes:?}"
+    );
+}
+
+#[test]
+fn extracts_blade_inline_php_expressions_and_di_container_resolutions() {
+    let blade = r#"
+<div>{{ blade_inline_helper($order->total) }}</div>
+<div>{!! app()->make(\App\Services\HtmlSanitizer::class)->clean($body) !!}</div>
+<script>const raw = @{{ IgnoredClientExpr::run() }};</script>
+{{-- {{ IgnoredComment::skip() }} --}}
+"#;
+    let blade_ir = parse_file_ir("resources/views/orders/receipt.blade.php", blade)
+        .expect("parse blade inline expressions");
+    assert!(
+        blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name == "blade_inline_helper"),
+        "expected inline {{ ... }} PHP call ref: {:?}",
+        blade_ir.calls_and_refs
+    );
+    assert!(
+        blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("HtmlSanitizer")),
+        "expected inline {{!! app()->make(...) !!}} DI resolution: {:?}",
+        blade_ir.calls_and_refs
+    );
+    assert!(
+        !blade_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("IgnoredClientExpr")
+                || r.target_name.contains("IgnoredComment")),
+        "escaped @{{ }} and Blade comment {{----}} must stay ignored: {:?}",
+        blade_ir.calls_and_refs
+    );
+
+    let php_di = r#"<?php
+namespace App\Services;
+
+use App\Contracts\PaymentGateway;
+use App\Support\Ledger;
+use App\Support\Mailer;
+use App\Support\Metrics;
+use Psr\Container\ContainerInterface;
+
+class CheckoutHandler {
+    public function handle(ContainerInterface $container): void {
+        $gw = app()->make(PaymentGateway::class);
+        $ledger = Container::get(Ledger::class);
+        $mailer = resolve(Mailer::class);
+        $metrics = app(Metrics::class);
+    }
+}
+"#;
+    let di_ir = parse_file_ir("app/Services/CheckoutHandler.php", php_di).expect("parse php DI");
+    let refs: Vec<&str> = di_ir
+        .calls_and_refs
+        .iter()
+        .map(|r| r.target_name.as_str())
+        .collect();
+    for expected in ["PaymentGateway", "Ledger", "Mailer", "Metrics"] {
+        assert!(
+            refs.iter().any(|r| r.contains(expected)),
+            "expected DI reference to {expected} in {refs:?}"
+        );
+    }
+    let di_binds: Vec<(Option<&str>, &str)> = di_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "di_binds")
+        .map(|e| (e.source_symbol.as_deref(), e.target.as_str()))
+        .collect();
+    assert!(
+        di_binds.iter().any(|(_, t)| t.contains("PaymentGateway")),
+        "expected di_binds semantic edge for app()->make: {di_binds:?}"
+    );
+}
+
+#[test]
+fn route_di_blade_escaping_nested_routers_and_named_php_attributes_regression() {
+    // 1. Express app.get('/users', UserController) and app.get('port') must not emit DI bindings/resolutions,
+    // while NestJS app.get(UsersService) still works. Also multi-level router propagation must emit /api/u/profile.
+    let ts = r#"
+const uRouter = express.Router();
+uRouter.get('/profile', getProfile);
+const v1Router = express.Router();
+v1Router.use('/u', uRouter);
+app.use('/api', v1Router);
+
+app.get('/users', UserController);
+const port = app.get('port');
+const svc = app.get(UsersService);
+"#;
+    let ts_ir = parse_file_ir("src/routes/multi.ts", ts).expect("parse multi router");
+    let ts_di: Vec<&str> = ts_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "di_binds")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        !ts_di.iter().any(|t| *t == "service:/users"
+            || *t == "service:port"
+            || *t == "service:UserController"),
+        "Express route/config app.get must not emit false DI bindings: {ts_di:?}"
+    );
+    assert!(
+        !ts_ir
+            .calls_and_refs
+            .iter()
+            .any(|r| r.context == "di_resolve" && r.target_name == "UserController"),
+        "Express handler UserController must not become di_resolve: {:?}",
+        ts_ir.calls_and_refs
+    );
+    assert!(
+        ts_di.contains(&"service:UsersService"),
+        "typed container app.get(UsersService) should still emit DI: {ts_di:?}"
+    );
+    let ts_routes: Vec<&str> = ts_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        ts_routes.contains(&"route:GET /api/u/profile"),
+        "expected 2-level mounted router route GET /api/u/profile: {ts_routes:?}"
+    );
+    assert!(
+        ts_routes.contains(&"route:GET /users"),
+        "expected GET /users route: {ts_routes:?}"
+    );
+
+    // 2. Blade mask_blade_comments handles quoted ' }}', nested {a:{b:1}}, and @@{{ / @@{!! live PHP echoes.
+    let blade = r#"
+<div x-data="@{{ { quoted: ' }}', nested: { fn: IgnoredEscaped::skip() } } }}"></div>
+<div>@{!! { raw: '!!}', call: IgnoredRawEsc::skip() } !!}</div>
+<div>@@{{ LiveEcho::run() }}</div>
+<div>@@{!! LiveRaw::exec() !!}</div>
+"#;
+    let blade_ir = parse_file_ir("resources/views/escaped.blade.php", blade)
+        .expect("parse blade escaping edge cases");
+    let blade_refs: Vec<&str> = blade_ir
+        .calls_and_refs
+        .iter()
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert!(
+        !blade_refs
+            .iter()
+            .any(|r| r.contains("IgnoredEscaped") || r.contains("IgnoredRawEsc")),
+        "nested/quoted @{{ }} and @{{!! !!}} must remain masked: {blade_refs:?}"
+    );
+    assert!(
+        blade_refs.iter().any(|r| r.contains("LiveEcho")),
+        "@@{{ }} must remain live PHP: {blade_refs:?}"
+    );
+    assert!(
+        blade_refs.iter().any(|r| r.contains("LiveRaw")),
+        "@@{{!! !!}} must remain live PHP: {blade_refs:?}"
+    );
+
+    // 3. Symfony PHP named #[Route(name: ..., path: ...)] attributes extract `path:`, not `name:`.
+    let php = r#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Annotation\Route;
+
+#[Route(name: 'admin_', path: '/admin')]
+class AdminController {
+    #[Route(name: 'users_list', path: '/users', methods: ['GET'])]
+    public function list(): void {}
+}
+"#;
+    let php_ir =
+        parse_file_ir("src/Controller/AdminController.php", php).expect("parse php named route");
+    let php_routes: Vec<&str> = php_ir
+        .semantic_edges
+        .iter()
+        .filter(|e| e.kind == "exposes_route")
+        .map(|e| e.target.as_str())
+        .collect();
+    assert!(
+        php_routes.contains(&"route:* /admin/users"),
+        "expected composed named Symfony Route /admin/users: {php_routes:?}"
+    );
+    assert!(
+        !php_routes
+            .iter()
+            .any(|r| r.contains("admin_") || r.contains("users_list")),
+        "attribute name: arg must never be mistaken for route path: {php_routes:?}"
     );
 }

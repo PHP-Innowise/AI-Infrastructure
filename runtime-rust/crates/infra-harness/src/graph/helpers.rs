@@ -356,6 +356,303 @@ pub(super) fn workspace_print(root: &Path) -> Option<Print> {
     })
 }
 
+/// Nanosecond filesystem timestamp racy-window guard matching repo-wide `RACY_NS`.
+pub(super) const PRINT_RACY_NS: i128 = 2_000_000_000;
+const PRINT_CACHE_MAX_ENTRIES: usize = 64;
+const PRINT_TRACKED_STAT_LIMIT: usize = 2048;
+const PRINT_DIR_STAT_LIMIT: usize = 512;
+
+#[cfg(test)]
+pub(super) static PRINT_GIT_SPAWN_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static LOCAL_PRINT_GIT_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    exists: bool,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> Self {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Self {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+            };
+        };
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())
+            .unwrap_or(0);
+        Self {
+            exists: true,
+            len: meta.len(),
+            mtime_ns,
+        }
+    }
+
+    fn is_settled_at(&self, now_ns: i128) -> bool {
+        !self.exists
+            || (self.mtime_ns > 0
+                && now_ns > PRINT_RACY_NS
+                && self.mtime_ns <= now_ns - PRINT_RACY_NS)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GitControlStamps {
+    head_path: PathBuf,
+    head_stamp: FileStamp,
+    ref_path: Option<PathBuf>,
+    ref_stamp: FileStamp,
+    packed_refs_path: PathBuf,
+    packed_refs_stamp: FileStamp,
+    index_path: PathBuf,
+    index_stamp: FileStamp,
+}
+
+impl GitControlStamps {
+    fn probe(root: &Path) -> Option<Self> {
+        let mut cursor = Some(root);
+        let mut git_entry = None;
+        while let Some(dir) = cursor {
+            let candidate = dir.join(".git");
+            if candidate.exists() {
+                git_entry = Some(candidate);
+                break;
+            }
+            cursor = dir.parent();
+        }
+        let git_entry = git_entry?;
+        let git_dir = if git_entry.is_dir() {
+            git_entry
+        } else if git_entry.is_file() {
+            let text = std::fs::read_to_string(&git_entry).ok()?;
+            let line = text.lines().next()?.trim();
+            let raw = line.strip_prefix("gitdir:")?.trim();
+            let p = Path::new(raw);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                git_entry.parent()?.join(p)
+            }
+        } else {
+            return None;
+        };
+        let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(|rel| {
+                let p = Path::new(&rel);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    git_dir.join(p)
+                }
+            })
+            .unwrap_or_else(|| git_dir.clone());
+        let head_path = git_dir.join("HEAD");
+        let head_stamp = FileStamp::read(&head_path);
+        let head_text = std::fs::read_to_string(&head_path).ok()?;
+        let ref_path = head_text
+            .trim()
+            .strip_prefix("ref:")
+            .map(|r| common_dir.join(r.trim()));
+        let ref_stamp = ref_path
+            .as_deref()
+            .map(FileStamp::read)
+            .unwrap_or(FileStamp {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+            });
+        let packed_refs_path = common_dir.join("packed-refs");
+        let packed_refs_stamp = FileStamp::read(&packed_refs_path);
+        let index_path = git_dir.join("index");
+        let index_stamp = FileStamp::read(&index_path);
+        Some(Self {
+            head_path,
+            head_stamp,
+            ref_path,
+            ref_stamp,
+            packed_refs_path,
+            packed_refs_stamp,
+            index_path,
+            index_stamp,
+        })
+    }
+
+    fn matches_live_settled(&self, now_ns: i128) -> bool {
+        let head_now = FileStamp::read(&self.head_path);
+        let index_now = FileStamp::read(&self.index_path);
+        let ref_now = self
+            .ref_path
+            .as_deref()
+            .map(FileStamp::read)
+            .unwrap_or(FileStamp {
+                exists: false,
+                len: 0,
+                mtime_ns: 0,
+            });
+        let packed_now = FileStamp::read(&self.packed_refs_path);
+        head_now.exists
+            && head_now == self.head_stamp
+            && ref_now == self.ref_stamp
+            && packed_now == self.packed_refs_stamp
+            && index_now == self.index_stamp
+            && head_now.is_settled_at(now_ns)
+            && ref_now.is_settled_at(now_ns)
+            && packed_now.is_settled_at(now_ns)
+            && index_now.is_settled_at(now_ns)
+    }
+
+    fn all_settled(&self, now_ns: i128) -> bool {
+        self.head_stamp.exists
+            && self.head_stamp.is_settled_at(now_ns)
+            && self.ref_stamp.is_settled_at(now_ns)
+            && self.packed_refs_stamp.is_settled_at(now_ns)
+            && self.index_stamp.is_settled_at(now_ns)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedGitPrint {
+    control: GitControlStamps,
+    print: Print,
+    file_stamps: Option<Vec<(PathBuf, FileStamp)>>,
+    dir_stamps: Option<Vec<(PathBuf, FileStamp)>>,
+}
+
+static GIT_PRINT_CACHE: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, CachedGitPrint>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn now_unix_ns_print() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+fn spawn_git_for_print(root: &Path, arguments: &[&str]) -> Option<infra_core::git::GitOutput> {
+    #[cfg(test)]
+    {
+        PRINT_GIT_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.set(c.get() + 1));
+    }
+    let owned: Vec<String> = arguments.iter().map(|s| (*s).to_owned()).collect();
+    projects::git(root, &owned, 20).ok()
+}
+
+type GitStatSnapshot = (Vec<(PathBuf, FileStamp)>, Vec<(PathBuf, FileStamp)>);
+
+fn collect_git_stat_snapshot(
+    root: &Path,
+    status_paths: &[PathBuf],
+    now_ns: i128,
+) -> Option<GitStatSnapshot> {
+    let ls = spawn_git_for_print(root, &["ls-files", "-z", "--", "."])?;
+    if ls.code != 0 {
+        return None;
+    }
+    let mut all_paths: BTreeSet<PathBuf> = BTreeSet::new();
+    for entry in ls.stdout.split(|b| *b == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let Ok(rel) = std::str::from_utf8(entry) else {
+            return None;
+        };
+        all_paths.insert(root.join(rel));
+        if all_paths.len() > PRINT_TRACKED_STAT_LIMIT {
+            return None;
+        }
+    }
+    for abs in status_paths {
+        all_paths.insert(abs.clone());
+        if all_paths.len() > PRINT_TRACKED_STAT_LIMIT {
+            return None;
+        }
+    }
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut dir_stack = vec![root.to_path_buf()];
+    while let Some(cur_dir) = dir_stack.pop() {
+        if !dirs.insert(cur_dir.clone()) {
+            continue;
+        }
+        if dirs.len() > PRINT_DIR_STAT_LIMIT {
+            return None;
+        }
+        let Ok(entries) = std::fs::read_dir(&cur_dir) else {
+            return None;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return None;
+            };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                return None;
+            };
+            if meta.file_type().is_symlink() {
+                if path.is_dir() {
+                    return None;
+                }
+                continue;
+            }
+            if meta.is_dir() {
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                dir_stack.push(path);
+            }
+        }
+    }
+    let mut file_stamps = Vec::with_capacity(all_paths.len());
+    for abs in all_paths {
+        if abs.is_dir() {
+            return None;
+        }
+        if let Some(parent) = abs.parent() {
+            let mut cur = Some(parent);
+            while let Some(d) = cur {
+                dirs.insert(d.to_path_buf());
+                if d == root || dirs.len() > PRINT_DIR_STAT_LIMIT {
+                    break;
+                }
+                cur = d.parent();
+            }
+            if dirs.len() > PRINT_DIR_STAT_LIMIT {
+                return None;
+            }
+        }
+        let stamp = FileStamp::read(&abs);
+        if !stamp.is_settled_at(now_ns) {
+            return None;
+        }
+        file_stamps.push((abs, stamp));
+    }
+    let mut dir_stamps = Vec::with_capacity(dirs.len());
+    for d in dirs {
+        let stamp = FileStamp::read(&d);
+        if !stamp.is_settled_at(now_ns) {
+            return None;
+        }
+        dir_stamps.push((d, stamp));
+    }
+    Some((file_stamps, dir_stamps))
+}
+
 /// Identity of the project's files: in Git, the commit plus every uncommitted
 /// path with its size and modification time; outside Git, a bounded sorted
 /// fingerprint of non-ignored workspace file paths, sizes, and modification times.
@@ -364,40 +661,63 @@ pub struct Print {
     pub hash: String,
     pub commit: Option<String>,
 }
+
 pub fn print(root: &Path) -> Option<Print> {
-    let git = |arguments: &[&str]| {
-        let arguments = arguments
-            .iter()
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>();
-        projects::git(root, &arguments, 20).ok()
-    };
-    if !git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|out| out.code == 0) {
+    print_with_now(root, now_unix_ns_print())
+}
+
+pub(super) fn print_with_now(root: &Path, now_ns: i128) -> Option<Print> {
+    let cache_key = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if let Ok(guard) = GIT_PRINT_CACHE.lock()
+        && let Some(cached) = guard.get(&cache_key)
+        && cached.control.matches_live_settled(now_ns)
+        && let (Some(f_stamps), Some(d_stamps)) = (&cached.file_stamps, &cached.dir_stamps)
+    {
+        let dirs_clean = d_stamps.iter().all(|(p, prev)| {
+            let cur = FileStamp::read(p);
+            cur == *prev && cur.is_settled_at(now_ns)
+        });
+        let files_clean = dirs_clean
+            && f_stamps.iter().all(|(p, prev)| {
+                let cur = FileStamp::read(p);
+                cur == *prev && cur.is_settled_at(now_ns)
+            });
+        if files_clean {
+            return Some(cached.print.clone());
+        }
+    }
+
+    if !spawn_git_for_print(root, &["rev-parse", "--is-inside-work-tree"])
+        .is_some_and(|out| out.code == 0)
+    {
         return workspace_print(root);
     }
-    let head = git(&["rev-parse", "--verify", "HEAD"])?;
+    let head = spawn_git_for_print(root, &["rev-parse", "--verify", "HEAD"])?;
     let commit = (head.code == 0)
         .then(|| String::from_utf8_lossy(&head.stdout).trim().to_owned())
         .filter(|value| !value.is_empty());
-    let prefix = git(&["rev-parse", "--show-prefix"])
+    let prefix = spawn_git_for_print(root, &["rev-parse", "--show-prefix"])
         .filter(|out| out.code == 0)
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
-    let status = git(&["status", "--porcelain=v1", "-z", "--", "."])?;
+    let status = spawn_git_for_print(root, &["status", "--porcelain=v1", "-z", "--", "."])?;
     if status.code != 0 {
         return None;
     }
     let mut identity = commit.clone().unwrap_or_default().into_bytes();
     identity.push(0);
     identity.extend_from_slice(&status.stdout);
+    let mut status_paths = Vec::new();
     for entry in status.stdout.split(|byte| *byte == 0) {
         let Some(path) = entry.get(3..).and_then(|raw| std::str::from_utf8(raw).ok()) else {
             continue;
         };
         let rel = path.strip_prefix(&prefix).unwrap_or(path);
+        let abs = root.join(rel);
+        status_paths.push(abs.clone());
         // A folder's own time moves when a file inside is replaced, which says
         // nothing about the files Git already lists.
-        if let Ok(meta) = std::fs::metadata(root.join(rel))
+        if let Ok(meta) = std::fs::metadata(&abs)
             && meta.is_file()
         {
             let changed = meta
@@ -408,10 +728,31 @@ pub fn print(root: &Path) -> Option<Print> {
             identity.extend_from_slice(format!("\0{}:{changed}", meta.len()).as_bytes());
         }
     }
-    Some(Print {
+    let result = Print {
         hash: store::sha(&identity),
         commit: commit.map(|value| value.chars().take(12).collect()),
-    })
+    };
+
+    if let Some(control) = GitControlStamps::probe(root)
+        && control.all_settled(now_ns)
+        && let Some((f_stamps, d_stamps)) = collect_git_stat_snapshot(root, &status_paths, now_ns)
+        && let Ok(mut guard) = GIT_PRINT_CACHE.lock()
+    {
+        if guard.len() >= PRINT_CACHE_MAX_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(
+            cache_key,
+            CachedGitPrint {
+                control,
+                print: result.clone(),
+                file_stamps: Some(f_stamps),
+                dir_stamps: Some(d_stamps),
+            },
+        );
+    }
+
+    Some(result)
 }
 pub(super) fn key(project: &str) -> String {
     format!("graph.{project}")
@@ -1401,4 +1742,88 @@ pub(super) fn apply_graph_focus(
         }
     }
     Ok(())
+}
+
+fn light_file_stamp(path: &Path) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i128);
+    Some((meta.len(), ns))
+}
+
+fn push_light_stamp_bytes(buf: &mut Vec<u8>, stamp: Option<(u64, i128)>) {
+    match stamp {
+        Some((len, ns)) => {
+            buf.push(1);
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(&ns.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+impl Graphs {
+    /// Computes lightweight DB/file/setting stamps for `project` without calling `status()` or loading `Index`.
+    /// Returns `(ir_revision, ir_write_epoch, meta_and_flags_xxh3)`.
+    pub(crate) fn lightweight_service_stamp(
+        &self,
+        project: &str,
+        target_spec: Option<&str>,
+    ) -> (u64, u64, u128) {
+        let ir_revision = self.ir_revision_of(project);
+        let ir_write_epoch = self
+            .get_ir_store_readonly(project)
+            .map_or(0, |ir| ir.current_write_epoch());
+        let home = folder(&self.store.state, project);
+        let db_stamp = light_file_stamp(&home.join("graph_ir.sqlite3"));
+        let sys_ir_stamp = light_file_stamp(
+            &self
+                .store
+                .state
+                .join("system-ir")
+                .join(format!("{project}.sqlite")),
+        );
+        let live_stamp = light_file_stamp(&live(&self.store.state, project));
+        let setting_bytes = self
+            .setting(project)
+            .ok()
+            .and_then(|v| serde_json::to_vec(&v).ok())
+            .unwrap_or_default();
+        let setting_hash = xxhash_rust::xxh3::xxh3_128(&setting_bytes);
+        let job_active = self
+            .jobs
+            .lock()
+            .ok()
+            .is_some_and(|jobs| jobs.contains_key(project));
+        let explicit_nonwork = target_spec
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty() && t != "work" && t != "uncommitted");
+        let (revision_stamp, revision_active) = if explicit_nonwork {
+            (
+                light_file_stamp(&home.join("revisions")),
+                self.revisions
+                    .lock()
+                    .ok()
+                    .is_some_and(|revs| revs.contains_key(project)),
+            )
+        } else {
+            (None, false)
+        };
+        let mut buf = Vec::with_capacity(112);
+        push_light_stamp_bytes(&mut buf, db_stamp);
+        push_light_stamp_bytes(&mut buf, sys_ir_stamp);
+        push_light_stamp_bytes(&mut buf, live_stamp);
+        buf.extend_from_slice(&setting_hash.to_le_bytes());
+        buf.push(u8::from(job_active));
+        push_light_stamp_bytes(&mut buf, revision_stamp);
+        buf.push(u8::from(revision_active));
+        (
+            ir_revision,
+            ir_write_epoch,
+            xxhash_rust::xxh3::xxh3_128(&buf),
+        )
+    }
 }

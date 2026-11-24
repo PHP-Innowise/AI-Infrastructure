@@ -806,17 +806,33 @@ pub(crate) fn needs_state(key: &str, read_key: &V, loading: &V, held: &V) -> boo
     !(read || loading == key)
 }
 
-/// Loads the session's traces and compilations when the run shows SkillCache
-/// events the loaded state has not seen. The key holds the session and the
-/// number of events. It is recorded as read only once the state has arrived:
-/// a request that was cut short by a change of session is asked again.
+pub(crate) fn sync_session_key(
+    sid: &str,
+    run_events: usize,
+    stream_events: usize,
+) -> Option<String> {
+    (!sid.is_empty() && (run_events > 0 || stream_events > 0))
+        .then(|| format!("{sid}:{run_events}:{stream_events}"))
+}
+
+/// Loads the session's traces and compilations when the run or rendered stream
+/// shows SkillCache events the loaded state has not seen. The key holds the
+/// session and event counts. It is recorded as read only once the state has
+/// arrived: a request that was cut short by a change of session is asked again.
 pub fn sync_session(run: &V) {
-    let sid = m::read(|s| s.sid.clone());
+    let (sid, stream_events) = m::read(|s| {
+        let count = s
+            .events
+            .iter()
+            .filter(|e| m::text(e, "kind") == "skillcache")
+            .count();
+        (s.sid.clone(), count)
+    });
+    let dom_cards = dom::all("#events .conversation-skillcache").len();
     let events = m::array(&run["skillcache"]).len();
-    if sid.is_empty() || events == 0 {
+    let Some(key) = sync_session_key(&sid, events, stream_events.max(dom_cards)) else {
         return;
-    }
-    let key = format!("{sid}:{events}");
+    };
     if !needs_state(
         &key,
         &m::data("skillcache-session-key"),
@@ -858,20 +874,47 @@ async fn load_session(sid: &str, key: &str) {
     }
 }
 
+pub(crate) fn should_reload_session_for_capsule_sse(
+    sid: &str,
+    run_skillcache: &[V],
+    has_rendered_observed_card: bool,
+    has_session_state: bool,
+) -> bool {
+    !sid.is_empty()
+        && (!run_skillcache.is_empty() || has_rendered_observed_card || has_session_state)
+}
+
 /// A capsule changed somewhere in this project: what is shown may be stale.
 pub fn on_sse_capsule(event: &V) {
-    if m::text(event, "project_id") != m::current_project() {
+    let event_project = m::text(event, "project_id");
+    let current_project = m::current_project();
+    let (sid, selected_project, view) = m::read(|s| {
+        (
+            s.sid.clone(),
+            m::text(&s.selected, "project_id"),
+            s.view.clone(),
+        )
+    });
+    if event_project != current_project && (sid.is_empty() || event_project != selected_project) {
         return;
     }
     invalidate_session();
-    let sid = m::read(|s| s.sid.clone());
-    let view = m::read(|s| s.view.clone());
+    let has_observed_card =
+        !dom::all("#events .conversation-skillcache[data-phase=\"observed\"]").is_empty();
+    let run_skillcache = m::array(&m::data("run")["skillcache"]);
+    let reload_session = should_reload_session_for_capsule_sse(
+        &sid,
+        &run_skillcache,
+        has_observed_card,
+        session_state().is_object(),
+    );
+    let reload_capsules = view == "skill-capsules" && event_project == current_project;
     let capsule = m::text(event, "capsule_id");
     spawn_local(async move {
-        if !sid.is_empty() && !m::array(&m::data("run")["skillcache"]).is_empty() {
+        if reload_session {
             load_session(&sid, "").await;
         }
-        if view == "skill-capsules" {
+        if reload_capsules {
             crate::management::capsule_changed(&capsule).await;
         }
     });
@@ -1312,5 +1355,30 @@ mod tests {
         let (custom_ph, custom_hint) = compiler_copy("codex", Some("codex"));
         assert_eq!(custom_ph, "Codex's default model");
         assert!(custom_hint.contains("compiled by Codex"));
+
+        // Observed cards from earlier turns reload session skillcache state even after later
+        // turns cleared `run["skillcache"]`.
+        assert!(!should_reload_session_for_capsule_sse("", &[], true, true));
+        assert!(!should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            false,
+            false
+        ));
+        assert!(should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            true,
+            false
+        ));
+        assert!(should_reload_session_for_capsule_sse(
+            "s1",
+            &[],
+            false,
+            true
+        ));
+        assert_eq!(sync_session_key("", 1, 1), None);
+        assert_eq!(sync_session_key("s1", 0, 0), None);
+        assert_eq!(sync_session_key("s1", 0, 1).as_deref(), Some("s1:0:1"));
     }
 }

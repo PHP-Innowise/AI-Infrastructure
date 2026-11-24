@@ -99,6 +99,19 @@ pub(crate) fn escape_action_for_top_dialog(top_dialog: Option<&str>) -> TopDialo
     }
 }
 
+fn close_graph_explanation_cleanly() {
+    if let Some(close_btn) = dom::get("graph-explanation-close") {
+        if graph_explanation::click(&close_btn) {
+            return;
+        }
+    }
+    let fallback = dom::el("button", "", "");
+    let _ = fallback.set_attribute("id", "graph-explanation-close");
+    if !graph_explanation::click(&fallback) {
+        dom::dialog("graph-explanation", false);
+    }
+}
+
 fn close_top_dialog_action(
     action: TopDialogEscapeAction<'_>,
     key: &web_sys::KeyboardEvent,
@@ -119,7 +132,7 @@ fn close_top_dialog_action(
         }
         TopDialogEscapeAction::CloseGraphExplanation => {
             if !graph_explanation::key(key) {
-                dom::dialog("graph-explanation", false);
+                close_graph_explanation_cleanly();
             }
             true
         }
@@ -235,6 +248,7 @@ pub fn start() -> Result<(), JsValue> {
             if k == "focusin" {
                 dom::sync_widget_from_target(&target);
                 commands::handle_focus_in(&target);
+                run::sync_permission_rules_for_focus(&target);
                 return;
             }
             if k == "focusout" {
@@ -491,6 +505,10 @@ pub fn start() -> Result<(), JsValue> {
                 run::dismiss_file_card(true);
                 activity::dismiss_file_card(true);
             }
+            "graph-explanation" => {
+                event.prevent_default();
+                close_graph_explanation_cleanly();
+            }
             _ => {}
         }
     });
@@ -623,6 +641,16 @@ async fn dispatch(
         return;
     }
     if commands::event(kind, id, action, &payload, &value).await {
+        return;
+    }
+    if kind == "change"
+        && (action == "permission-rules-session" || id == "permission-rules-session")
+    {
+        run::select_permission_rules_session(&value).await;
+        return;
+    }
+    if kind == "click" && action == "permission-rules-revoke-all" {
+        run::revoke_active_permission_rules().await;
         return;
     }
     if run::event(kind, id, action, &payload, &value).await {

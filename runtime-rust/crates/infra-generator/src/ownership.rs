@@ -1,5 +1,6 @@
 use crate::common::*;
 use infra_core::{Result, RuntimeError, fs};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -599,18 +600,435 @@ pub fn stamp_manifest_if_needed(target: &Path, slice_tag: Option<&str>) -> Resul
     Ok(true)
 }
 
+/// Per-surface dependency manifest stored in `.infra-manifest.json` so `infra-update`
+/// can skip unchanged skill/agent batches pre-generation and always invalidate dependent
+/// slices when watched source globs or composer/package manifests change.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtifactDependencyManifest {
+    pub skill_paths: Vec<String>,
+    pub watched_globs: Vec<String>,
+    pub manifest_files: Vec<String>,
+    pub path_hashes: BTreeMap<String, String>,
+}
+
+const DEFAULT_PACKAGE_MANIFESTS: &[&str] = &[
+    "composer.json",
+    "package.json",
+    "tsconfig.json",
+    "pyproject.toml",
+    "go.mod",
+    "Cargo.toml",
+];
+
+fn watched_glob_matches_or_prefixes(glob: &str, rel: &str) -> Result<bool> {
+    if crate::coverage::matches(glob, "file", rel)? || crate::coverage::matches(glob, "tree", rel)?
+    {
+        return Ok(true);
+    }
+    let trimmed = glob.trim().trim_end_matches('/');
+    let g_parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+    let r_parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if r_parts.is_empty() || g_parts.is_empty() {
+        return Ok(false);
+    }
+    if g_parts[0] == "**" {
+        return Ok(true);
+    }
+    if r_parts.len() > g_parts.len() {
+        return Ok(false);
+    }
+    for (idx, r_seg) in r_parts.iter().enumerate() {
+        let g_seg = g_parts[idx];
+        if g_seg == "**" {
+            return Ok(true);
+        }
+        if !crate::coverage::matches(g_seg, "file", r_seg)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn walk_watched_target_files(
+    target: &Path,
+    watched_globs: &[String],
+) -> Result<BTreeMap<String, String>> {
+    const MAX_WATCHED_FILES: usize = 4096;
+    let mut found = BTreeMap::new();
+    if watched_globs.is_empty() {
+        return Ok(found);
+    }
+    let mut pending = vec![target.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let mut entries = std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            let rel = relative(target, &path)?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let ignored_dir_name = matches!(
+                name_str.as_ref(),
+                ".git" | "vendor" | "node_modules" | "target"
+            );
+            if fs::linked(&meta) || fs::linked_at(&path, &meta)? {
+                let explicitly_watched = !ignored_dir_name
+                    || watched_globs
+                        .iter()
+                        .any(|g| g.trim_start_matches('/').starts_with(name_str.as_ref()));
+                if explicitly_watched
+                    && watched_globs
+                        .iter()
+                        .any(|g| watched_glob_matches_or_prefixes(g, &rel).unwrap_or(true))
+                {
+                    return Err(RuntimeError::policy(format!(
+                        "watched dependency path contains symlink: {rel}"
+                    )));
+                }
+                continue;
+            }
+            if meta.is_dir() {
+                if ignored_dir_name {
+                    continue;
+                }
+                pending.push(path);
+            } else if meta.is_file()
+                && watched_globs
+                    .iter()
+                    .any(|g| crate::coverage::matches(g, "file", &rel).unwrap_or(false))
+            {
+                if found.len() >= MAX_WATCHED_FILES {
+                    return Err(RuntimeError::policy(
+                        "watched surface exceeds 4096 matched dependency files",
+                    ));
+                }
+                let bytes = fs::read_regular(&path)?;
+                found.insert(rel, sha(&bytes));
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn hash_dependency_surface(
+    target: &Path,
+    dep: &ArtifactDependencyManifest,
+) -> Result<BTreeMap<String, String>> {
+    let target = resolve_target(target)?;
+    let mut hashes = walk_watched_target_files(&target, &dep.watched_globs)?;
+    for mf in &dep.manifest_files {
+        let rel = normalize(mf)?;
+        let path = confined(&target, &rel)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if fs::linked(&meta) || fs::linked_at(&path, &meta)? {
+                    return Err(RuntimeError::policy(format!(
+                        "manifest dependency path contains symlink: {rel}"
+                    )));
+                }
+                if !meta.is_file() {
+                    return Err(RuntimeError::policy(format!(
+                        "manifest dependency is not a regular file: {rel}"
+                    )));
+                }
+                let bytes = fs::read_regular(&path)?;
+                hashes.insert(rel, sha(&bytes));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                hashes.insert(rel, "__absent__".into());
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(hashes)
+}
+
+/// Derives per-skill/agent [`ArtifactDependencyManifest`] records from a `skill-generation-plan.json`
+/// and manifest-owned `files`, binding each batch to its watched source globs and package manifests.
+pub fn build_dependency_manifests_from_plan(
+    target: &Path,
+    plan: &Value,
+    manifest: &Value,
+) -> Result<BTreeMap<String, ArtifactDependencyManifest>> {
+    let target = resolve_target(target)?;
+    let owned_files = strings_map(&manifest["files"])?;
+    let mut detected_manifests: Vec<String> = DEFAULT_PACKAGE_MANIFESTS
+        .iter()
+        .filter(|name| target.join(name).is_file())
+        .map(|name| (*name).to_string())
+        .collect();
+    for core_pkg in ["composer.json", "package.json"] {
+        if !detected_manifests.iter().any(|m| m == core_pkg) {
+            detected_manifests.push(core_pkg.into());
+        }
+    }
+    detected_manifests.sort();
+    detected_manifests.dedup();
+
+    let mut out = BTreeMap::new();
+    for skill in plan["skills"].as_array().into_iter().flatten() {
+        let name = text(&skill["name"]).trim();
+        if name.is_empty() {
+            continue;
+        }
+        let mut skill_paths: Vec<String> = owned_files
+            .keys()
+            .filter(|rel| {
+                rel.contains(&format!("/skills/{name}/"))
+                    || rel.ends_with(&format!("/agents/{name}.md"))
+                    || rel.ends_with(&format!("/agents/{name}-agent.md"))
+                    || rel.ends_with(&format!("/commands/{name}.md"))
+            })
+            .cloned()
+            .collect();
+        skill_paths.sort();
+        skill_paths.dedup();
+
+        let mut watched_globs = BTreeSet::new();
+        for p in texts(&skill["writes"]) {
+            watched_globs.insert(p);
+        }
+        for row in skill["ownership"].as_array().into_iter().flatten() {
+            for p in texts(&row["paths"]) {
+                watched_globs.insert(p);
+            }
+        }
+        for row in skill["path_contracts"].as_array().into_iter().flatten() {
+            if nonempty(&row["path"]) {
+                watched_globs.insert(text(&row["path"]).trim().to_string());
+            }
+        }
+
+        let dep = ArtifactDependencyManifest {
+            skill_paths,
+            watched_globs: watched_globs.into_iter().collect(),
+            manifest_files: detected_manifests.clone(),
+            path_hashes: BTreeMap::new(),
+        };
+        out.insert(name.to_string(), dep);
+    }
+    Ok(out)
+}
+
+/// Records per-surface [`ArtifactDependencyManifest`] metadata and live target digests into
+/// `.infra-manifest.json` (`dependency_manifests`).
+pub fn record_dependency_manifests(
+    manifest: &mut Value,
+    target: &Path,
+    dependencies: &BTreeMap<String, ArtifactDependencyManifest>,
+) -> Result<()> {
+    let files = manifest["files"]
+        .as_object()
+        .ok_or_else(|| RuntimeError::invalid("Manifest files must be an object"))?
+        .clone();
+    let mut encoded = serde_json::Map::new();
+    for (surface, dep) in dependencies {
+        if surface.trim().is_empty() {
+            return Err(RuntimeError::invalid(
+                "Dependency manifest surface name must not be empty",
+            ));
+        }
+        let mut normalized = ArtifactDependencyManifest {
+            skill_paths: dep
+                .skill_paths
+                .iter()
+                .map(|p| normalize(p))
+                .collect::<Result<Vec<_>>>()?,
+            watched_globs: dep.watched_globs.clone(),
+            manifest_files: dep
+                .manifest_files
+                .iter()
+                .map(|p| normalize(p))
+                .collect::<Result<Vec<_>>>()?,
+            path_hashes: BTreeMap::new(),
+        };
+        for sp in &normalized.skill_paths {
+            if !files.contains_key(sp) {
+                return Err(RuntimeError::policy(format!(
+                    "dependency manifest references non-manifest skill path: {sp}"
+                )));
+            }
+        }
+        normalized.skill_paths.sort();
+        normalized.skill_paths.dedup();
+        normalized.watched_globs.sort();
+        normalized.watched_globs.dedup();
+        normalized.manifest_files.sort();
+        normalized.manifest_files.dedup();
+        normalized.path_hashes = hash_dependency_surface(target, &normalized)?;
+        encoded.insert(surface.clone(), serde_json::to_value(&normalized)?);
+    }
+    manifest["dependency_manifests"] = Value::Object(encoded);
+    Ok(())
+}
+
+/// Evaluates per-surface [`ArtifactDependencyManifest`] entries in `.infra-manifest.json`
+/// before generation/staging so `infra-update` can skip unchanged skill/agent batches while
+/// always invalidating dependent slices when watched files or composer/package manifests change.
+pub fn partition_pre_generation_batches(
+    target: &Path,
+    manifest: &Value,
+    changed_paths: Option<&[String]>,
+) -> Result<Value> {
+    let target = resolve_target(target)?;
+    let files = strings_map(&manifest["files"])?;
+    let stamps = manifest.get("validation_stamps").and_then(Value::as_object);
+    let mut skipped_batches = Vec::new();
+    let mut pending_batches = Vec::new();
+    let mut skipped_skill_paths = BTreeSet::new();
+    let mut invalidated = BTreeMap::<String, String>::new();
+
+    let Some(deps) = manifest
+        .get("dependency_manifests")
+        .and_then(Value::as_object)
+    else {
+        return Ok(object!({
+            "skipped_batches": skipped_batches,
+            "pending_batches": pending_batches,
+            "skipped_skill_paths": [],
+            "invalidated": invalidated,
+        }));
+    };
+
+    let normalized_changed: Option<Vec<String>> = changed_paths.map(|paths| {
+        paths
+            .iter()
+            .filter_map(|p| normalize(p).ok())
+            .collect::<Vec<_>>()
+    });
+
+    for (surface, raw_dep) in deps {
+        let Ok(dep) = serde_json::from_value::<ArtifactDependencyManifest>(raw_dep.clone()) else {
+            pending_batches.push(surface.clone());
+            invalidated.insert(surface.clone(), "invalid-dependency-manifest".into());
+            continue;
+        };
+        if dep.skill_paths.is_empty() {
+            pending_batches.push(surface.clone());
+            invalidated.insert(surface.clone(), "no-skill-paths".into());
+            continue;
+        }
+        let artifacts_valid = dep.skill_paths.iter().all(|rel| {
+            let Some(expected) = files.get(rel) else {
+                return false;
+            };
+            let Some(stamped) = stamps
+                .and_then(|map| map.get(rel))
+                .and_then(|entry| entry.get("sha256"))
+                .and_then(Value::as_str)
+            else {
+                return false;
+            };
+            if stamped != expected.as_str() {
+                return false;
+            }
+            confined(&target, rel)
+                .and_then(|path| fs::read_regular(&path))
+                .is_ok_and(|bytes| sha(&bytes) == *expected)
+        });
+        if !artifacts_valid {
+            pending_batches.push(surface.clone());
+            invalidated.insert(surface.clone(), "artifact-stamp-missing-or-drifted".into());
+            continue;
+        }
+
+        if let Some(ref changed) = normalized_changed {
+            if let Some(hit) = changed.iter().find(|ch| {
+                dep.manifest_files.iter().any(|mf| {
+                    mf == *ch || crate::coverage::matches(mf, "file", ch).unwrap_or(false)
+                })
+            }) {
+                pending_batches.push(surface.clone());
+                invalidated.insert(surface.clone(), format!("manifest-changed:{hit}"));
+                continue;
+            }
+            if let Some(hit) = changed.iter().find(|ch| {
+                dep.skill_paths.contains(ch)
+                    || dep.watched_globs.iter().any(|g| {
+                        crate::coverage::matches(g, "file", ch).unwrap_or(false)
+                            || crate::coverage::matches(g, "tree", ch).unwrap_or(false)
+                    })
+            }) {
+                pending_batches.push(surface.clone());
+                invalidated.insert(surface.clone(), format!("watched-path-changed:{hit}"));
+                continue;
+            }
+        }
+
+        let live_hashes = match hash_dependency_surface(&target, &dep) {
+            Ok(h) => h,
+            Err(err) => {
+                pending_batches.push(surface.clone());
+                invalidated.insert(surface.clone(), format!("dependency-unreadable:{err}"));
+                continue;
+            }
+        };
+        let manifest_drift = dep.manifest_files.iter().find(|mf| {
+            live_hashes.get(*mf) != dep.path_hashes.get(*mf) || !dep.path_hashes.contains_key(*mf)
+        });
+        if let Some(mf) = manifest_drift {
+            pending_batches.push(surface.clone());
+            invalidated.insert(surface.clone(), format!("manifest-drifted:{mf}"));
+            continue;
+        }
+        if live_hashes != dep.path_hashes {
+            pending_batches.push(surface.clone());
+            invalidated.insert(surface.clone(), "watched-surface-drifted".into());
+            continue;
+        }
+
+        skipped_batches.push(surface.clone());
+        skipped_skill_paths.extend(dep.skill_paths);
+    }
+
+    Ok(object!({
+        "skipped_batches": skipped_batches,
+        "pending_batches": pending_batches,
+        "skipped_skill_paths": skipped_skill_paths.into_iter().collect::<Vec<_>>(),
+        "invalidated": invalidated,
+    }))
+}
+
+pub(crate) fn dependency_invalidated_skill_paths(
+    target: &Path,
+    manifest: &Value,
+) -> Result<BTreeSet<String>> {
+    let Some(deps) = manifest
+        .get("dependency_manifests")
+        .and_then(Value::as_object)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let partition = partition_pre_generation_batches(target, manifest, None)?;
+    let pending: BTreeSet<String> = texts(&partition["pending_batches"]).into_iter().collect();
+    let mut blocked = BTreeSet::new();
+    for surface in pending {
+        if let Some(raw) = deps.get(&surface)
+            && let Ok(dep) = serde_json::from_value::<ArtifactDependencyManifest>(raw.clone())
+        {
+            blocked.extend(dep.skill_paths);
+        }
+    }
+    Ok(blocked)
+}
+
 /// Returns owned relative paths whose on-disk target hash, staged proposal hash, and
-/// `.infra-manifest.json` validation stamp all match, allowing `infra-update` to skip them.
+/// `.infra-manifest.json` validation stamp all match (and whose declared dependency manifest
+/// has not drifted), allowing `infra-update` to skip them.
 pub fn unchanged_verified_slices(
     target: &Path,
     staging: &Path,
     manifest: &Value,
 ) -> Result<Vec<String>> {
+    let invalidated = dependency_invalidated_skill_paths(target, manifest)?;
     let entries = classify_update(target, staging, manifest)?;
     Ok(entries
         .into_iter()
         .filter(|entry| entry["verified_unchanged"] == true)
         .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+        .filter(|path| !invalidated.contains(path))
         .collect())
 }
 
@@ -674,6 +1092,193 @@ mod manifest_stamp_tests {
         );
         let unchanged_after = unchanged_verified_slices(&target, &staging, &refreshed).unwrap();
         assert!(unchanged_after.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dependency_manifests_skip_unchanged_batches_pre_gen_and_invalidate_on_manifest_or_glob_drift()
+     {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-dep-manifests-{}",
+            infra_core::domain::uuid4()
+        ));
+        let target = dir.join("target");
+        let staging = dir.join("staging");
+        std::fs::create_dir_all(target.join(".codex/skills/orders")).unwrap();
+        std::fs::create_dir_all(target.join(".codex/skills/billing")).unwrap();
+        std::fs::create_dir_all(target.join("src/Orders")).unwrap();
+        std::fs::create_dir_all(target.join("src/Billing")).unwrap();
+        std::fs::create_dir_all(staging.join(".codex/skills/orders")).unwrap();
+        std::fs::create_dir_all(staging.join(".codex/skills/billing")).unwrap();
+
+        std::fs::write(target.join("composer.json"), r#"{"name":"acme/shop"}"#).unwrap();
+        std::fs::write(target.join("package.json"), r#"{"name":"shop-ui"}"#).unwrap();
+        std::fs::write(target.join("src/Orders/Order.php"), "<?php\n").unwrap();
+        std::fs::write(target.join("src/Billing/Invoice.php"), "<?php\n").unwrap();
+        let orders_skill = b"# Orders skill\n";
+        let billing_skill = b"# Billing skill\n";
+        std::fs::write(target.join(".codex/skills/orders/SKILL.md"), orders_skill).unwrap();
+        std::fs::write(target.join(".codex/skills/billing/SKILL.md"), billing_skill).unwrap();
+        std::fs::write(staging.join(".codex/skills/orders/SKILL.md"), orders_skill).unwrap();
+        std::fs::write(
+            staging.join(".codex/skills/billing/SKILL.md"),
+            billing_skill,
+        )
+        .unwrap();
+
+        let owned = vec![
+            ".codex/skills/orders/SKILL.md".to_owned(),
+            ".codex/skills/billing/SKILL.md".to_owned(),
+        ];
+        let mut manifest = build_manifest(
+            &target,
+            &owned,
+            &ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-10".into(),
+                profile: "php-core".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: object!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        let stamps = BTreeMap::from([
+            (
+                ".codex/skills/orders/SKILL.md".to_owned(),
+                sha(orders_skill),
+            ),
+            (
+                ".codex/skills/billing/SKILL.md".to_owned(),
+                sha(billing_skill),
+            ),
+        ]);
+        stamp_validated_artifacts(&mut manifest, &stamps, Some("batch")).unwrap();
+
+        let deps = BTreeMap::from([
+            (
+                "orders".to_owned(),
+                ArtifactDependencyManifest {
+                    skill_paths: vec![".codex/skills/orders/SKILL.md".into()],
+                    watched_globs: vec!["src/Orders/**".into()],
+                    manifest_files: vec!["composer.json".into()],
+                    path_hashes: BTreeMap::new(),
+                },
+            ),
+            (
+                "billing".to_owned(),
+                ArtifactDependencyManifest {
+                    skill_paths: vec![".codex/skills/billing/SKILL.md".into()],
+                    watched_globs: vec!["src/Billing/**".into()],
+                    manifest_files: vec!["package.json".into()],
+                    path_hashes: BTreeMap::new(),
+                },
+            ),
+        ]);
+        record_dependency_manifests(&mut manifest, &target, &deps).unwrap();
+
+        // Both batches are skippable pre-generation when nothing changed.
+        let clean = partition_pre_generation_batches(&target, &manifest, None).unwrap();
+        assert_eq!(clean["skipped_batches"], object!(["billing", "orders"]));
+        assert_eq!(clean["pending_batches"], object!([]));
+
+        // Watched-glob change via explicit changed_paths invalidates only orders.
+        let orders_changed = partition_pre_generation_batches(
+            &target,
+            &manifest,
+            Some(&["src/Orders/Order.php".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(orders_changed["skipped_batches"], object!(["billing"]));
+        assert_eq!(orders_changed["pending_batches"], object!(["orders"]));
+
+        // Composer manifest change on disk invalidates composer-dependent orders batch pre-gen AND post-staging.
+        std::fs::write(
+            target.join("composer.json"),
+            r#"{"name":"acme/shop","require":{"php":"^8.3"}}"#,
+        )
+        .unwrap();
+        let composer_drift = partition_pre_generation_batches(&target, &manifest, None).unwrap();
+        assert_eq!(composer_drift["skipped_batches"], object!(["billing"]));
+        assert_eq!(composer_drift["pending_batches"], object!(["orders"]));
+
+        let post_staging =
+            crate::coverage::partition_update_slices(&target, &staging, &manifest).unwrap();
+        assert_eq!(
+            post_staging["skipped_unchanged"],
+            object!([".codex/skills/billing/SKILL.md"])
+        );
+        assert_eq!(
+            post_staging["pending_slices"],
+            object!([".codex/skills/orders/SKILL.md"])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_manifests_fail_closed_on_watched_symlinks_and_dangling_manifests() {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-dep-symlinks-{}",
+            infra_core::domain::uuid4()
+        ));
+        let target = dir.join("target");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(target.join(".codex/skills/orders")).unwrap();
+        std::fs::create_dir_all(target.join("src/Orders")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(target.join("src/Orders/Order.php"), "<?php\n").unwrap();
+        std::fs::write(outside.join("Secret.php"), "<?php\n").unwrap();
+        let orders_skill = b"# Orders skill\n";
+        std::fs::write(target.join(".codex/skills/orders/SKILL.md"), orders_skill).unwrap();
+
+        // 1. Symlinked file inside watched_globs fails closed.
+        std::os::unix::fs::symlink(
+            outside.join("Secret.php"),
+            target.join("src/Orders/Link.php"),
+        )
+        .unwrap();
+        let dep_file_link = ArtifactDependencyManifest {
+            skill_paths: vec![".codex/skills/orders/SKILL.md".into()],
+            watched_globs: vec!["src/Orders/**".into()],
+            manifest_files: vec![],
+            path_hashes: BTreeMap::new(),
+        };
+        let err = hash_dependency_surface(&target, &dep_file_link).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+        std::fs::remove_file(target.join("src/Orders/Link.php")).unwrap();
+
+        // 2. Symlinked directory shadowing watched_globs prefix fails closed.
+        std::fs::remove_dir_all(target.join("src/Orders")).unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("src/Orders")).unwrap();
+        let err_dir = hash_dependency_surface(&target, &dep_file_link).unwrap_err();
+        assert!(err_dir.to_string().contains("symlink"), "got: {err_dir}");
+        std::fs::remove_file(target.join("src/Orders")).unwrap();
+        std::fs::create_dir_all(target.join("src/Orders")).unwrap();
+        std::fs::write(target.join("src/Orders/Order.php"), "<?php\n").unwrap();
+
+        // 3. Dangling symlink at manifest_files fails closed instead of recording "__absent__".
+        std::os::unix::fs::symlink(
+            outside.join("missing-composer.json"),
+            target.join("composer.json"),
+        )
+        .unwrap();
+        let dep_manifest_link = ArtifactDependencyManifest {
+            skill_paths: vec![".codex/skills/orders/SKILL.md".into()],
+            watched_globs: vec!["src/Orders/**".into()],
+            manifest_files: vec!["composer.json".into()],
+            path_hashes: BTreeMap::new(),
+        };
+        let err_mf = hash_dependency_surface(&target, &dep_manifest_link).unwrap_err();
+        assert!(
+            err_mf.to_string().contains("symlink") || err_mf.to_string().contains("Linked"),
+            "got: {err_mf}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

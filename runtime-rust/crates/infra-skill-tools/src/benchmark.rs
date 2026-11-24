@@ -1,6 +1,292 @@
 use crate::{Result, RuntimeError, common};
 use serde_json::{Map, Value, json};
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const BENCHMARK_RACY_NS: i128 = 2_000_000_000;
+const BENCHMARK_CACHE_CAP: usize = 64;
+
+fn benchmark_now_ns() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+fn env_cache_bypassed() -> bool {
+    std::env::var("INFRA_CHECK_NO_CACHE").as_deref() == Ok("1")
+        || std::env::var("INFRA_NO_CACHE").as_deref() == Ok("1")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BenchFileStamp {
+    len: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+    mode: u32,
+}
+
+impl BenchFileStamp {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mtime_ns = (meta.mtime() as i128) * 1_000_000_000 + (meta.mtime_nsec() as i128);
+            let ctime_ns = (meta.ctime() as i128) * 1_000_000_000 + (meta.ctime_nsec() as i128);
+            Self {
+                len: meta.len(),
+                mtime_ns,
+                ctime_ns,
+                mode: meta.mode(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i128)
+                .unwrap_or(0);
+            Self {
+                len: meta.len(),
+                mtime_ns,
+                ctime_ns: mtime_ns,
+                mode: if meta.is_dir() { 0o40755 } else { 0o100644 },
+            }
+        }
+    }
+
+    fn is_settled(&self, now_ns: i128) -> bool {
+        self.mtime_ns > 0
+            && self.ctime_ns > 0
+            && now_ns >= self.mtime_ns + BENCHMARK_RACY_NS
+            && now_ns >= self.ctime_ns + BENCHMARK_RACY_NS
+    }
+}
+
+type BenchStampEntry = (String, bool, BenchFileStamp);
+
+struct BenchmarkStampSnapshot {
+    canon: PathBuf,
+    stamps: Vec<BenchStampEntry>,
+    saw_symlink: bool,
+}
+
+#[derive(Clone)]
+struct CachedBenchmarkRunResults {
+    stamps: Vec<BenchStampEntry>,
+    results: Map<String, Value>,
+    warnings: String,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct BenchmarkResultsCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedBenchmarkRunResults>,
+}
+
+fn benchmark_results_cache() -> &'static Mutex<BenchmarkResultsCache> {
+    static CACHE: OnceLock<Mutex<BenchmarkResultsCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BenchmarkResultsCache::default()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BENCHMARK_JSON_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_benchmark_parses() {
+    TEST_BENCHMARK_JSON_PARSES.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+fn benchmark_parse_count() -> usize {
+    TEST_BENCHMARK_JSON_PARSES.with(std::cell::Cell::get)
+}
+
+fn stat_bench_entry(
+    p: &Path,
+    label: String,
+    stamps: &mut Vec<BenchStampEntry>,
+    saw_symlink: &mut bool,
+) {
+    if let Ok(m) = std::fs::symlink_metadata(p) {
+        if m.file_type().is_symlink() {
+            *saw_symlink = true;
+        } else {
+            stamps.push((label, m.is_dir(), BenchFileStamp::from_metadata(&m)));
+        }
+    }
+}
+
+fn collect_benchmark_stamps(directory: &Path) -> Result<BenchmarkStampSnapshot> {
+    let canon = infra_core::fs::canonicalize(directory)?;
+    let mut stamps = Vec::new();
+    let mut saw_symlink = false;
+
+    stat_bench_entry(&canon, ".".into(), &mut stamps, &mut saw_symlink);
+    let runs_sub = canon.join("runs");
+    stat_bench_entry(&runs_sub, "runs".into(), &mut stamps, &mut saw_symlink);
+
+    let search = if runs_sub.exists() {
+        runs_sub
+    } else if common::sorted(&canon)?.iter().any(|p| {
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("eval-"))
+    }) {
+        canon.clone()
+    } else {
+        stamps.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok(BenchmarkStampSnapshot {
+            canon,
+            stamps,
+            saw_symlink,
+        });
+    };
+
+    for eval in common::sorted(&search)? {
+        let eval_name = eval.file_name().unwrap_or_default().to_string_lossy();
+        if !eval_name.starts_with("eval-") {
+            continue;
+        }
+        stat_bench_entry(
+            &eval,
+            format!("eval/{eval_name}"),
+            &mut stamps,
+            &mut saw_symlink,
+        );
+        stat_bench_entry(
+            &eval.join("eval_metadata.json"),
+            format!("eval/{eval_name}/eval_metadata.json"),
+            &mut stamps,
+            &mut saw_symlink,
+        );
+        if eval.is_dir() {
+            for config in common::sorted(&eval)? {
+                if let Ok(cm) = std::fs::symlink_metadata(&config) {
+                    if cm.file_type().is_symlink() {
+                        saw_symlink = true;
+                        continue;
+                    }
+                    if !cm.is_dir() {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                let cfg_name = config.file_name().unwrap_or_default().to_string_lossy();
+                stat_bench_entry(
+                    &config,
+                    format!("eval/{eval_name}/{cfg_name}"),
+                    &mut stamps,
+                    &mut saw_symlink,
+                );
+                for run in common::sorted(&config)? {
+                    let run_name = run.file_name().unwrap_or_default().to_string_lossy();
+                    if !run_name.starts_with("run-") {
+                        continue;
+                    }
+                    stat_bench_entry(
+                        &run,
+                        format!("eval/{eval_name}/{cfg_name}/{run_name}"),
+                        &mut stamps,
+                        &mut saw_symlink,
+                    );
+                    for fname in ["grading.json", "timing.json"] {
+                        stat_bench_entry(
+                            &run.join(fname),
+                            format!("eval/{eval_name}/{cfg_name}/{run_name}/{fname}"),
+                            &mut stamps,
+                            &mut saw_symlink,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    stamps.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(BenchmarkStampSnapshot {
+        canon,
+        stamps,
+        saw_symlink,
+    })
+}
+
+pub fn load_run_results(directory: &Path, log: &mut String) -> Result<Map<String, Value>> {
+    load_run_results_with_options(directory, log, benchmark_now_ns(), env_cache_bypassed())
+}
+
+pub fn load_run_results_with_options(
+    directory: &Path,
+    log: &mut String,
+    now_ns: i128,
+    bypass: bool,
+) -> Result<Map<String, Value>> {
+    let stamp_snapshot = if !bypass {
+        collect_benchmark_stamps(directory).ok()
+    } else {
+        None
+    };
+    if let Some(snap) = stamp_snapshot.as_ref()
+        && !snap.saw_symlink
+        && snap.stamps.iter().all(|(_, _, s)| s.is_settled(now_ns))
+        && let Ok(mut cache) = benchmark_results_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if let Some(hit) = cache.entries.get_mut(&snap.canon)
+            && hit.stamps == snap.stamps
+        {
+            hit.last_used = seq;
+            log.push_str(&hit.warnings);
+            return Ok(hit.results.clone());
+        }
+    }
+
+    #[cfg(test)]
+    bump_benchmark_parses();
+    let mut captured_warnings = String::new();
+    let results = load_run_results_uncached(directory, &mut captured_warnings)?;
+    log.push_str(&captured_warnings);
+
+    if !bypass
+        && let Some(snap) = stamp_snapshot
+        && !snap.saw_symlink
+        && snap.stamps.iter().all(|(_, _, s)| s.is_settled(now_ns))
+        && let Ok(mut cache) = benchmark_results_cache().lock()
+    {
+        cache.seq = cache.seq.saturating_add(1);
+        let seq = cache.seq;
+        if cache.entries.len() >= BENCHMARK_CACHE_CAP
+            && !cache.entries.contains_key(&snap.canon)
+            && let Some(evict) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&evict);
+        }
+        cache.entries.insert(
+            snap.canon,
+            CachedBenchmarkRunResults {
+                stamps: snap.stamps,
+                results: results.clone(),
+                warnings: captured_warnings,
+                last_used: seq,
+            },
+        );
+    }
+    Ok(results)
+}
+
 pub fn calculate_stats(values: &[f64]) -> Value {
     if values.is_empty() {
         return json!({"mean":0.0,"stddev":0.0,"min":0.0,"max":0.0});
@@ -20,7 +306,7 @@ fn number(v: &Value, key: &str) -> f64 {
 fn fallback(v: &Value, key: &str, default: Value) -> Value {
     v.get(key).cloned().unwrap_or(default)
 }
-pub fn load_run_results(directory: &Path, log: &mut String) -> Result<Map<String, Value>> {
+fn load_run_results_uncached(directory: &Path, log: &mut String) -> Result<Map<String, Value>> {
     let search = if directory.join("runs").exists() {
         directory.join("runs")
     } else if common::sorted(directory)?.iter().any(|p| {
@@ -168,7 +454,25 @@ pub fn generate_benchmark(
     path: &str,
     log: &mut String,
 ) -> Result<Value> {
-    let results = load_run_results(directory, log)?;
+    generate_benchmark_with_options(
+        directory,
+        name,
+        path,
+        log,
+        benchmark_now_ns(),
+        env_cache_bypassed(),
+    )
+}
+
+pub fn generate_benchmark_with_options(
+    directory: &Path,
+    name: &str,
+    path: &str,
+    log: &mut String,
+    now_ns: i128,
+    bypass: bool,
+) -> Result<Value> {
+    let results = load_run_results_with_options(directory, log, now_ns, bypass)?;
     let summary = aggregate_results(&results);
     let mut runs = vec![];
     let mut ids = vec![];
@@ -258,12 +562,15 @@ pub fn execute(v: &Value) -> Result<Value> {
             Value::Null,
         ));
     }
+    let bypass = common::flag(v, "strict") || common::flag(v, "no_cache") || env_cache_bypassed();
     let mut log = String::new();
-    let benchmark = generate_benchmark(
+    let benchmark = generate_benchmark_with_options(
         directory,
         common::text(v, "skill_name").unwrap_or(""),
         common::text(v, "skill_path").unwrap_or(""),
         &mut log,
+        benchmark_now_ns(),
+        bypass,
     )?;
     let output = common::text(v, "output")
         .map(std::path::PathBuf::from)
@@ -292,4 +599,75 @@ pub fn execute(v: &Value) -> Result<Value> {
             .unwrap_or("—")
     ));
     Ok(common::cli(0, log, "", benchmark))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_run_results_caches_settled_json_reads_and_respects_racy_ns_and_bypass() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("bench");
+        let run1 = ws.join("runs/eval-1/with_skill/run-1");
+        std::fs::create_dir_all(&run1).unwrap();
+        let grading = run1.join("grading.json");
+        std::fs::write(
+            &grading,
+            r#"{"summary":{"pass_rate":1.0,"passed":2,"failed":0,"total":2},"execution_metrics":{"total_tool_calls":3,"errors_encountered":0},"timing":{"total_duration_seconds":1.5}}"#,
+        )
+        .unwrap();
+
+        let stamp = BenchFileStamp::from_metadata(&std::fs::symlink_metadata(&grading).unwrap());
+        let racy_now = stamp.mtime_ns + BENCHMARK_RACY_NS - 1;
+        let settled_now = stamp.mtime_ns + BENCHMARK_RACY_NS + 10_000;
+
+        let parses_before = benchmark_parse_count();
+
+        // Inside BENCHMARK_RACY_NS: always re-parses from JSON.
+        let mut log = String::new();
+        let r_racy1 = load_run_results_with_options(&ws, &mut log, racy_now, false).unwrap();
+        let r_racy2 = load_run_results_with_options(&ws, &mut log, racy_now, false).unwrap();
+        assert_eq!(r_racy1, r_racy2);
+        assert_eq!(benchmark_parse_count(), parses_before + 2);
+
+        // Settled beyond BENCHMARK_RACY_NS: first warms, second skips JSON re-reads completely.
+        let r1 = load_run_results_with_options(&ws, &mut log, settled_now, false).unwrap();
+        let r2 = load_run_results_with_options(&ws, &mut log, settled_now + 5, false).unwrap();
+        assert_eq!(r1, r2);
+        assert_eq!(benchmark_parse_count(), parses_before + 3);
+
+        // strict / no_cache bypass forces live JSON parse even when settled.
+        let r_bypass =
+            load_run_results_with_options(&ws, &mut log, settled_now + 10, true).unwrap();
+        assert_eq!(r_bypass, r1);
+        assert_eq!(benchmark_parse_count(), parses_before + 4);
+
+        // Same-length grading edit invalidates settled cache cleanly.
+        std::fs::write(
+            &grading,
+            r#"{"summary":{"pass_rate":0.5,"passed":1,"failed":1,"total":2},"execution_metrics":{"total_tool_calls":3,"errors_encountered":0},"timing":{"total_duration_seconds":1.5}}"#,
+        )
+        .unwrap();
+        let updated_stamp =
+            BenchFileStamp::from_metadata(&std::fs::symlink_metadata(&grading).unwrap());
+        let r3 = load_run_results_with_options(
+            &ws,
+            &mut log,
+            updated_stamp.mtime_ns + BENCHMARK_RACY_NS + 10_000_000,
+            false,
+        )
+        .unwrap();
+        assert_eq!(r3["with_skill"][0]["pass_rate"], json!(0.5));
+        assert_eq!(benchmark_parse_count(), parses_before + 5);
+
+        // execute honors strict / no_cache flags without error.
+        let cli_out = execute(&json!({
+            "benchmark_dir": ws,
+            "strict": true,
+            "output": temp.path().join("out.json")
+        }))
+        .unwrap();
+        assert_eq!(cli_out["_cli"]["code"], json!(0));
+    }
 }

@@ -320,7 +320,9 @@ pub fn tokenize(value: &str) -> Result<Vec<String>> {
                     quote = Some(character);
                     active = true;
                 }
-                '\\' => {
+                // On Windows, unquoted `\` is a path separator (e.g. `C:\repo\src\App.php`),
+                // not a POSIX escape prefix.
+                '\\' if !cfg!(windows) => {
                     token.push(
                         characters
                             .next()
@@ -800,9 +802,52 @@ impl CommandAnalyzer {
                 "formatter defaults to writing without check or dry-run mode",
             );
         }
+        if executable == "sort"
+            && args.iter().any(|arg| {
+                arg == "-o"
+                    || arg == "--output"
+                    || arg.starts_with("--output=")
+                    || (!arg.starts_with("--") && arg.starts_with('-') && arg[1..].contains('o'))
+            })
+        {
+            acc.add(
+                "WORKSPACE_WRITE_FLAG",
+                "workspace_mutation",
+                "sort writes output to a file",
+            );
+        }
+        if executable == "rg"
+            && args
+                .iter()
+                .any(|arg| arg == "--pre" || arg.starts_with("--pre="))
+        {
+            acc.block(
+                "PREPROCESSOR_EXECUTION",
+                "rg --pre delegates execution to an external preprocessor",
+            );
+        }
         if executable == "git" {
+            const GIT_READ_ONLY: &[&str] = &[
+                "status",
+                "diff",
+                "log",
+                "show",
+                "rev-parse",
+                "ls-files",
+                "ls-tree",
+                "cat-file",
+                "rev-list",
+                "shortlog",
+                "blame",
+                "grep",
+                "describe",
+            ];
             let mut at = 0;
+            let mut has_config_override = false;
             while at < args.len() && args[at].starts_with('-') {
+                if args[at] == "-c" || args[at].starts_with("-c=") {
+                    has_config_override = true;
+                }
                 at += if ["-C", "-c", "--git-dir", "--work-tree"].contains(&args[at].as_str()) {
                     2
                 } else {
@@ -810,28 +855,30 @@ impl CommandAnalyzer {
                 };
             }
             let action = args.get(at).map(String::as_str).unwrap_or("");
+            let has_output_flag = args
+                .iter()
+                .any(|arg| arg == "--output" || arg.starts_with("--output="));
             if ["reset", "clean"].contains(&action) {
                 acc.add(
                     "DESTRUCTIVE_GIT",
                     "destructive_database_deploy",
                     "git can destroy workspace state",
                 );
-            } else if [
-                "add", "commit", "checkout", "switch", "merge", "rebase", "restore", "stash", "tag",
-            ]
-            .contains(&action)
-            {
-                acc.add(
-                    "GIT_MUTATION",
-                    "workspace_mutation",
-                    "git command mutates repository state",
-                );
-            }
-            if ["clone", "fetch", "pull", "push", "submodule"].contains(&action) {
+            } else if ["clone", "fetch", "pull", "push", "submodule"].contains(&action) {
                 acc.add(
                     "GIT_NETWORK",
                     "external_provider_network",
                     "git command can access a remote",
+                );
+            } else if has_config_override
+                || has_output_flag
+                || action.is_empty()
+                || !GIT_READ_ONLY.contains(&action)
+            {
+                acc.add(
+                    "GIT_MUTATION",
+                    "workspace_mutation",
+                    "git command can mutate repository or workspace state",
                 );
             }
         }

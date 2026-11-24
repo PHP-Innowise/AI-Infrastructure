@@ -155,6 +155,20 @@ pub(super) fn advance(run: V, event: &V) -> (V, Option<V>) {
     (next, replaced)
 }
 
+fn ensure_object_field<'a>(obj: &'a mut V, key: &str) -> &'a mut serde_json::Map<String, V> {
+    if !obj[key].is_object() {
+        obj[key] = V::Object(serde_json::Map::new());
+    }
+    obj[key].as_object_mut().expect("object field")
+}
+
+fn ensure_array_field<'a>(obj: &'a mut V, key: &str) -> &'a mut Vec<V> {
+    if !obj[key].is_array() {
+        obj[key] = V::Array(Vec::new());
+    }
+    obj[key].as_array_mut().expect("array field")
+}
+
 pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<String>) {
     let launch = m::text(event, "launch_id");
     let mut replaced = None;
@@ -170,11 +184,12 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
         run["started"] = event["at"].clone();
     }
     let kind = m::text(event, "kind");
-    let mut kinds = m::array(&run["kinds"]);
-    if !kinds.iter().any(|k| k == &kind) {
-        kinds.push(json!(kind));
+    {
+        let kinds = ensure_array_field(&mut run, "kinds");
+        if !kinds.iter().any(|k| k.as_str() == Some(kind.as_str())) {
+            kinds.push(V::String(kind.clone()));
+        }
     }
-    run["kinds"] = json!(kinds);
     match kind.as_str() {
         "tool" => {
             let name = tool_name(event);
@@ -189,14 +204,18 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
                 .as_str()
                 .or_else(|| event["detail"].as_str())
                 .unwrap_or("");
-            let mut calls = run["calls"].as_object().cloned().unwrap_or_default();
-            let mut item = calls.get(&call).cloned().unwrap_or(
-                json!({"tool":name,"key":key,"path":event["path"],"detail":event["detail"],"event_id":event["id"],"started":event["at"]}),
-            );
-            item["open"] = json!(start);
-            item["ok"] = json!(event["ok"]
+            let mut item = run
+                .get_mut("calls")
+                .and_then(V::as_object_mut)
+                .and_then(|calls| calls.remove(&call))
+                .unwrap_or_else(|| {
+                    json!({"tool":name,"key":key,"path":event["path"],"detail":event["detail"],"event_id":event["id"],"started":event["at"]})
+                });
+            let ok_val = event["ok"]
                 .as_bool()
-                .unwrap_or(!m::text(event, "text").contains("failed")));
+                .unwrap_or(!m::text(event, "text").contains("failed"));
+            item["open"] = json!(start);
+            item["ok"] = json!(ok_val);
             item["event_id"] = event["id"].clone();
             if start {
                 run["steps"] = json!(run["steps"].as_u64().unwrap_or(0) + 1);
@@ -205,20 +224,17 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
             if !start {
                 settle(&mut run, &mut item, event);
             }
-            calls.insert(call.clone(), item.clone());
-            run["calls"] = json!(calls);
+            ensure_object_field(&mut run, "calls").insert(call.clone(), item);
             if ["grep", "glob", "ls"].contains(&key.as_str()) && start {
-                let mut searches = m::array(&run["searches"]);
-                searches.push(
+                ensure_array_field(&mut run, "searches").push(
                     json!({"pattern":event["detail"],"scope":event["path"],"event_id":event["id"]}),
                 );
-                run["searches"] = json!(searches);
             }
             if ["bash", "shell"].contains(&key.as_str()) {
-                let mut list = m::array(&run["commands"]);
+                let list = ensure_array_field(&mut run, "commands");
                 if let Some(existing) = list.iter_mut().find(|c| c["call"] == call) {
                     existing["running"] = json!(start);
-                    existing["ok"] = item["ok"].clone();
+                    existing["ok"] = json!(ok_val);
                     existing["event_id"] = event["id"].clone();
                 } else {
                     let command = event["detail"].as_str().unwrap_or_else(|| {
@@ -229,9 +245,8 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
                             .map(|(_, s)| s)
                             .unwrap_or("")
                     });
-                    list.push(json!({"call":call,"command":command,"class":classify(command),"running":start,"ok":item["ok"],"event_id":event["id"],"at":event["at"]}));
+                    list.push(json!({"call":call,"command":command,"class":classify(command),"running":start,"ok":ok_val,"event_id":event["id"],"at":event["at"]}));
                 }
-                run["commands"] = json!(list);
             }
         }
         "plan" => {
@@ -247,9 +262,7 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
         "memory" => run["memory"] = event.clone(),
         "omnigraph" => run["omnigraph"] = event.clone(),
         "skillcache" => {
-            let mut list = m::array(&run["skillcache"]);
-            list.push(event.clone());
-            run["skillcache"] = json!(list);
+            ensure_array_field(&mut run, "skillcache").push(event.clone());
         }
         "delegation" => run["delegation"] = event.clone(),
         "status" => {
@@ -280,18 +293,22 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
 /// The call an event without a call id belongs to. Such events are plain labels: a start waits
 /// under its tool's name, and the next completion of that tool closes the oldest one waiting.
 pub(super) fn paired(run: &mut V, key: &str, start: bool, event_id: &str) -> String {
-    let mut waiting = run["uncalled"].as_object().cloned().unwrap_or_default();
-    let mut queue = m::array(&waiting.get(key).cloned().unwrap_or(V::Null));
+    let waiting = ensure_object_field(run, "uncalled");
+    let queue_val = waiting
+        .entry(key.to_owned())
+        .or_insert_with(|| V::Array(Vec::new()));
+    if !queue_val.is_array() {
+        *queue_val = V::Array(Vec::new());
+    }
+    let queue = queue_val.as_array_mut().expect("uncalled queue");
     let call = if start || queue.is_empty() {
         format!("anonymous-{event_id}")
     } else {
         m::string(&queue.remove(0))
     };
     if start {
-        queue.push(json!(call));
+        queue.push(V::String(call.clone()));
     }
-    waiting.insert(key.into(), json!(queue));
-    run["uncalled"] = V::Object(waiting);
     call
 }
 
@@ -302,9 +319,8 @@ pub(super) fn tidy(path: &str) -> String {
 
 /// The files a tool event names and what the call does to each: the files of a change, or the
 /// call's own target.
-fn named(key: &str, target: &str, event: &V) -> Vec<(String, &'static str, bool)> {
-    let changes = m::array(&event["changes"]);
-    if !changes.is_empty() {
+pub(super) fn named(key: &str, target: &str, event: &V) -> Vec<(String, &'static str, bool)> {
+    if let Some(changes) = event["changes"].as_array().filter(|c| !c.is_empty()) {
         return changes
             .iter()
             .map(|change| {
@@ -342,9 +358,9 @@ fn touch(run: &mut V, call: &mut V, named: &[(String, &'static str, bool)], even
     if named.is_empty() {
         return;
     }
-    let mut touched = call["touched"].as_object().cloned().unwrap_or_default();
-    let mut files = run["files"].as_object().cloned().unwrap_or_default();
     let step = run["steps"].clone();
+    let touched = ensure_object_field(call, "touched");
+    let files = ensure_object_field(run, "files");
     let by = if event["parent"].as_str().is_some_and(|id| !id.is_empty()) {
         "helper"
     } else {
@@ -354,14 +370,11 @@ fn touch(run: &mut V, call: &mut V, named: &[(String, &'static str, bool)], even
         if touched.contains_key(path) {
             continue;
         }
-        touched.insert(path.clone(), json!(how));
-        if !files.contains_key(path) {
-            let fresh = json!({"path":path,"reads":0,"edits":0,"outside":outside,"order":files.len(),"first_step":step});
-            files.insert(path.clone(), fresh);
-        }
-        let Some(file) = files.get_mut(path) else {
-            continue;
-        };
+        touched.insert(path.clone(), V::String((*how).to_owned()));
+        let next_order = files.len();
+        let file = files.entry(path.clone()).or_insert_with(|| {
+            json!({"path":path,"reads":0,"edits":0,"outside":outside,"order":next_order,"first_step":step})
+        });
         if *how == "read" {
             file["reads"] = json!(file["reads"].as_u64().unwrap_or(0) + 1);
         }
@@ -369,8 +382,6 @@ fn touch(run: &mut V, call: &mut V, named: &[(String, &'static str, bool)], even
         file["last_step"] = step.clone();
         file["event_id"] = event["id"].clone();
     }
-    call["touched"] = V::Object(touched);
-    run["files"] = V::Object(files);
 }
 
 /// The call's result reaches the files it touched, once: an edit counts when the tool reports it
@@ -380,11 +391,13 @@ fn settle(run: &mut V, call: &mut V, event: &V) {
         return;
     }
     call["settled"] = json!(true);
-    let Some(touched) = call["touched"].as_object() else {
+    let ok = m::yes(&call["ok"]);
+    let Some(touched) = call.get("touched").and_then(V::as_object) else {
         return;
     };
-    let mut files = run["files"].as_object().cloned().unwrap_or_default();
-    let ok = m::yes(&call["ok"]);
+    let Some(files) = run.get_mut("files").and_then(V::as_object_mut) else {
+        return;
+    };
     for (path, how) in touched {
         let Some(file) = files.get_mut(path) else {
             continue;
@@ -405,7 +418,6 @@ fn settle(run: &mut V, call: &mut V, event: &V) {
         file["edits"] = json!(file["edits"].as_u64().unwrap_or(0) + 1);
         file["event_id"] = event["id"].clone();
     }
-    run["files"] = V::Object(files);
 }
 
 pub(super) fn run_strip_now_parts(
@@ -491,12 +503,16 @@ pub fn render() {
         dom::cancel_timer("run-clock");
         return;
     }
-    let calls = run["calls"].as_object().cloned().unwrap_or_default();
-    let open: Vec<_> = calls
-        .values()
-        .filter(|c| m::yes(&c["open"]))
-        .cloned()
-        .collect();
+    let open: Vec<_> = run["calls"]
+        .as_object()
+        .map(|calls| {
+            calls
+                .values()
+                .filter(|c| m::yes(&c["open"]))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     let done = m::yes(&run["finished"]) || !m::active(&session);
     let outcome = run["outcome"]
         .as_str()

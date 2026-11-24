@@ -7,7 +7,8 @@ use infra_skillcache::candidate::Candidate;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Filesystem/IR verification race window (2 seconds in nanoseconds).
@@ -185,6 +186,8 @@ impl ArtifactDependencyManifest {
 pub const TRACE_DAYS: i64 = 30;
 /// A session keeps this many traces nothing was compiled from.
 pub const TRACES_PER_SESSION: usize = 10;
+/// Maximum number of capsules retained per project before LRU eviction runs.
+pub const CAPSULES_PER_PROJECT: usize = 128;
 
 pub(crate) fn initialize(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -208,7 +211,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             dependency_manifest TEXT NOT NULL DEFAULT '{}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
             tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
             needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
-            is_read_only INTEGER);
+            is_read_only INTEGER, git_common_dir TEXT NOT NULL DEFAULT '');
         CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);
         CREATE TABLE IF NOT EXISTS skillcache_pending_requalify(
             capsule_id TEXT PRIMARY KEY,
@@ -245,6 +248,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             edition TEXT NOT NULL,
             skill_name TEXT NOT NULL,
             skill_tree_sha256 TEXT NOT NULL,
+            skill_semantic_sha TEXT NOT NULL DEFAULT '',
             form TEXT NOT NULL CHECK(form IN ('hybrid','textual')),
             mu_name TEXT NOT NULL,
             mu_description TEXT NOT NULL,
@@ -297,7 +301,17 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             "INTEGER NOT NULL DEFAULT 0",
         ),
         ("skillcache_capsules", "is_read_only", "INTEGER"),
+        (
+            "skillcache_capsules",
+            "git_common_dir",
+            "TEXT NOT NULL DEFAULT ''",
+        ),
         ("skillcache_compiles", "eval_arm", "TEXT"),
+        (
+            "skillcache_templates",
+            "skill_semantic_sha",
+            "TEXT NOT NULL DEFAULT ''",
+        ),
     ] {
         let cols = {
             let mut q = db.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -310,6 +324,12 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             ))?;
         }
     }
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS skillcache_templates_semantic
+             ON skillcache_templates(edition, skill_name, skill_semantic_sha);
+         CREATE INDEX IF NOT EXISTS skillcache_capsules_common_dir
+             ON skillcache_capsules(git_common_dir, status);",
+    )?;
     let needs_retired_check = db
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='skillcache_capsules'",
@@ -340,28 +360,241 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
                  dependency_manifest TEXT NOT NULL DEFAULT '{{}}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
                  tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
                  needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
-                 is_read_only INTEGER);
+                 is_read_only INTEGER, git_common_dir TEXT NOT NULL DEFAULT '');
              INSERT INTO skillcache_capsules_new({CAPSULE_COLUMNS},runs_reset_rowid)
              SELECT {CAPSULE_COLUMNS},runs_reset_rowid FROM skillcache_capsules;
              DROP TABLE skillcache_capsules;
              ALTER TABLE skillcache_capsules_new RENAME TO skillcache_capsules;
-             CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);"
+             CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);
+             CREATE INDEX IF NOT EXISTS skillcache_capsules_common_dir ON skillcache_capsules(git_common_dir,status);"
         ))?;
         rebuild.commit()?;
     }
     Ok(())
 }
 
+fn table_exists(db: &Connection, name: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
+}
+
+fn session_pinned_capsule_ids(db: &Connection) -> Result<BTreeSet<String>> {
+    if !table_exists(db, "sessions")? {
+        return Ok(BTreeSet::new());
+    }
+    let mut query = db.prepare(
+        "SELECT DISTINCT json_extract(skillcache, '$.capsule_id')
+         FROM sessions
+         WHERE skillcache IS NOT NULL AND json_extract(skillcache, '$.capsule_id') IS NOT NULL",
+    )?;
+    let rows = query.query_map([], |row| row.get::<_, Option<String>>(0))?;
+    let mut pinned = BTreeSet::new();
+    for row in rows {
+        if let Some(id) = row?
+            && !id.is_empty()
+        {
+            pinned.insert(id);
+        }
+    }
+    Ok(pinned)
+}
+
+fn is_plain_id_component(segment: &str) -> bool {
+    !segment.is_empty() && !matches!(segment, "." | "..") && !segment.contains(['/', '\\', '\0'])
+}
+
+pub(crate) fn state_dir_from_connection(db: &Connection) -> Option<PathBuf> {
+    let raw = db.path().filter(|p| !p.is_empty() && *p != ":memory:")?;
+    Path::new(raw).parent().map(Path::to_path_buf)
+}
+
+pub(crate) fn cleanup_deleted_capsule_artifacts(
+    state_dir: Option<&Path>,
+    deleted: &[(String, String, String)],
+) {
+    let Some(state) = state_dir else {
+        return;
+    };
+    let capsules_root = state.join("skillcache/capsules");
+    let qual_root = state.join("skillcache/qualification");
+    for (project_id, capsule_id, artifact_dir) in deleted {
+        if is_plain_id_component(project_id) && is_plain_id_component(capsule_id) {
+            let cap_dir = capsules_root.join(project_id).join(capsule_id);
+            if cap_dir.exists() {
+                infra_skillcache::package::release(&cap_dir);
+                let _ = std::fs::remove_dir_all(&cap_dir);
+            }
+        }
+        if !artifact_dir.is_empty() {
+            let art_path = Path::new(artifact_dir);
+            if art_path.starts_with(&capsules_root) && art_path.exists() {
+                let target = art_path
+                    .parent()
+                    .filter(|p| p.starts_with(&capsules_root) && *p != capsules_root)
+                    .unwrap_or(art_path);
+                infra_skillcache::package::release(target);
+                let _ = std::fs::remove_dir_all(target);
+            }
+        }
+        if is_plain_id_component(capsule_id) {
+            let qual_dir = qual_root.join(capsule_id);
+            if qual_dir.exists() {
+                infra_skillcache::package::release(&qual_dir);
+                let _ = std::fs::remove_dir_all(&qual_dir);
+            }
+        }
+    }
+}
+
+struct PrunedCapsuleMeta {
+    capsule_id: String,
+    project_id: String,
+    kind: String,
+    skill_name: String,
+    skill_path: String,
+    mu_name: String,
+    eval_arm: Option<String>,
+    artifact_dir: String,
+}
+
+fn capsule_superseded_by_active(
+    candidate: &PrunedCapsuleMeta,
+    active: &[PrunedCapsuleMeta],
+) -> bool {
+    active.iter().any(|act| {
+        act.project_id == candidate.project_id
+            && act.kind == candidate.kind
+            && act.eval_arm == candidate.eval_arm
+            && if candidate.kind == "tool_chain" {
+                !candidate.mu_name.is_empty() && act.mu_name == candidate.mu_name
+            } else {
+                (!candidate.skill_path.is_empty() && act.skill_path == candidate.skill_path)
+                    || (canonical_mirror_skill(&act.skill_path).is_some()
+                        && canonical_mirror_skill(&act.skill_path)
+                            == canonical_mirror_skill(&candidate.skill_path)
+                        && (candidate.skill_name.is_empty()
+                            || act.skill_name == candidate.skill_name))
+            }
+    })
+}
+
+fn enforce_project_capsule_cap_collect(
+    db: &Connection,
+    project_id: &str,
+    max_capsules: usize,
+    pinned: &BTreeSet<String>,
+    deleted: &mut Vec<(String, String, String)>,
+) -> Result<usize> {
+    let mut query = db.prepare(
+        "SELECT capsule_id, status, artifact_dir
+         FROM skillcache_capsules
+         WHERE project_id=?1
+         ORDER BY COALESCE(last_used_at, updated_at, created_at) ASC, rowid ASC",
+    )?;
+    let rows = query
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if rows.len() <= max_capsules {
+        return Ok(0);
+    }
+    let excess = rows.len() - max_capsules;
+    let mut picked: Vec<(String, String)> = Vec::with_capacity(excess);
+    // Evict inactive (`failed`/`retired`/`stale`/`needs_recompile`) capsules first,
+    // preserving pinned and active capsules whenever possible.
+    for (id, status, artifact_dir) in &rows {
+        if picked.len() >= excess {
+            break;
+        }
+        if status != "compiling" && status != "active" && !pinned.contains(id) {
+            picked.push((id.clone(), artifact_dir.clone()));
+        }
+    }
+    if picked.len() < excess {
+        for (id, status, artifact_dir) in &rows {
+            if picked.len() >= excess {
+                break;
+            }
+            if status == "active" && !pinned.contains(id) {
+                picked.push((id.clone(), artifact_dir.clone()));
+            }
+        }
+    }
+    let mut removed = 0usize;
+    for (id, artifact_dir) in picked {
+        if delete_capsule(db, &id)? {
+            deleted.push((project_id.to_owned(), id, artifact_dir));
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Enforces `max_capsules` on `project_id` using `last_used_at` LRU eviction
+/// (preserving session-pinned, compiling, and active capsules before older ones).
+pub(crate) fn enforce_project_capsule_cap(
+    db: &Connection,
+    project_id: &str,
+    max_capsules: usize,
+) -> Result<usize> {
+    let pinned = session_pinned_capsule_ids(db)?;
+    let mut deleted = Vec::new();
+    let count =
+        enforce_project_capsule_cap_collect(db, project_id, max_capsules, &pinned, &mut deleted)?;
+    if !deleted.is_empty() {
+        let state_dir = state_dir_from_connection(db);
+        cleanup_deleted_capsule_artifacts(state_dir.as_deref(), &deleted);
+    }
+    Ok(count)
+}
+
+/// Prunes expired traces (`created_at < cutoff`) and per-session excess traces
+/// no longer pinned by any non-failed, non-retired capsule.
+pub(crate) fn prune_unpinned_traces(db: &Connection, cutoff: &str) -> Result<usize> {
+    let mut removed = db.execute(
+        "DELETE FROM skillcache_traces WHERE created_at<?1
+           AND generation NOT IN (
+               SELECT source_generation FROM skillcache_capsules
+               WHERE source_generation != '' AND status NOT IN ('failed', 'retired')
+           )",
+        [cutoff],
+    )?;
+    let over_cap_sessions = {
+        let mut q = db.prepare(
+            "SELECT session_id FROM skillcache_traces GROUP BY session_id HAVING COUNT(*) > ?1",
+        )?;
+        q.query_map([TRACES_PER_SESSION as i64], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for sid in over_cap_sessions {
+        removed += db.execute(
+            "DELETE FROM skillcache_traces WHERE session_id=?1
+               AND generation NOT IN (
+                   SELECT source_generation FROM skillcache_capsules
+                   WHERE source_generation != '' AND status NOT IN ('failed', 'retired')
+               )
+               AND generation NOT IN (
+                   SELECT generation FROM skillcache_traces
+                   WHERE session_id=?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2
+               )",
+            params![sid, TRACES_PER_SESSION as i64],
+        )?;
+    }
+    Ok(removed)
+}
+
 /// Runs once when the store opens.
 pub(crate) fn recover(db: &Connection) -> Result<()> {
     let cutoff = (chrono::Utc::now() - chrono::Duration::days(TRACE_DAYS))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    // A trace a capsule was compiled from stays as long as that capsule does.
-    db.execute(
-        "DELETE FROM skillcache_traces WHERE created_at<?1
-           AND generation NOT IN (SELECT source_generation FROM skillcache_capsules)",
-        [cutoff],
-    )?;
     // Nothing that was running survives a restart, and nothing is retried.
     db.execute(
         "UPDATE skillcache_compiles SET status='interrupted',finished_at=?1,
@@ -375,6 +608,96 @@ pub(crate) fn recover(db: &Connection) -> Result<()> {
          WHERE status='compiling'",
         [store::now()],
     )?;
+    let pinned = session_pinned_capsule_ids(db)?;
+    let active_capsules = {
+        let mut q = db.prepare(
+            "SELECT capsule_id,project_id,capsule_kind,skill_name,skill_path,mu_name,eval_arm,artifact_dir
+             FROM skillcache_capsules WHERE status='active'",
+        )?;
+        q.query_map([], |row| {
+            Ok(PrunedCapsuleMeta {
+                capsule_id: row.get(0)?,
+                project_id: row.get(1)?,
+                kind: row.get(2)?,
+                skill_name: row.get(3)?,
+                skill_path: row.get(4)?,
+                mu_name: row.get(5)?,
+                eval_arm: row.get(6)?,
+                artifact_dir: row.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let old_non_active = {
+        let mut q = db.prepare(
+            "SELECT capsule_id,project_id,capsule_kind,skill_name,skill_path,mu_name,eval_arm,artifact_dir,status
+             FROM skillcache_capsules
+             WHERE updated_at<?1 AND status IN ('failed','retired','stale','needs_recompile')",
+        )?;
+        q.query_map([&cutoff], |row| {
+            Ok((
+                PrunedCapsuleMeta {
+                    capsule_id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    skill_name: row.get(3)?,
+                    skill_path: row.get(4)?,
+                    mu_name: row.get(5)?,
+                    eval_arm: row.get(6)?,
+                    artifact_dir: row.get(7)?,
+                },
+                row.get::<_, String>(8)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let mut deleted = Vec::new();
+    for (meta, status) in old_non_active {
+        let should_prune = match status.as_str() {
+            "failed" => true,
+            "retired" => !pinned.contains(&meta.capsule_id),
+            "stale" | "needs_recompile" => {
+                !pinned.contains(&meta.capsule_id)
+                    && capsule_superseded_by_active(&meta, &active_capsules)
+            }
+            _ => false,
+        };
+        if should_prune && delete_capsule(db, &meta.capsule_id)? {
+            deleted.push((meta.project_id, meta.capsule_id, meta.artifact_dir));
+        }
+    }
+    db.execute(
+        "DELETE FROM skillcache_compiles
+         WHERE status IN ('failed','interrupted')
+           AND COALESCE(finished_at, started_at) < ?1
+           AND (capsule_id IS NULL OR capsule_id NOT IN (
+               SELECT capsule_id FROM skillcache_capsules WHERE status IN ('active','compiling')
+           ))",
+        [&cutoff],
+    )?;
+    let over_cap_projects = {
+        let mut q = db.prepare(
+            "SELECT project_id FROM skillcache_capsules GROUP BY project_id HAVING COUNT(*)>?1",
+        )?;
+        q.query_map([CAPSULES_PER_PROJECT as i64], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for project_id in over_cap_projects {
+        enforce_project_capsule_cap_collect(
+            db,
+            &project_id,
+            CAPSULES_PER_PROJECT,
+            &pinned,
+            &mut deleted,
+        )?;
+    }
+    prune_unpinned_traces(db, &cutoff)?;
+    if let Some(state_dir) = state_dir_from_connection(db) {
+        cleanup_deleted_capsule_artifacts(Some(&state_dir), &deleted);
+        if let Ok(kept) = trace_generations(db) {
+            super::snapshot::collect(&state_dir, &kept);
+        }
+    }
     Ok(())
 }
 
@@ -417,7 +740,10 @@ pub(crate) fn save_trace(db: &Connection, row: &TraceRow<'_>) -> Result<String> 
     )?;
     db.execute(
         "DELETE FROM skillcache_traces WHERE session_id=?1
-           AND generation NOT IN (SELECT source_generation FROM skillcache_capsules)
+           AND generation NOT IN (
+               SELECT source_generation FROM skillcache_capsules
+               WHERE source_generation != '' AND status NOT IN ('failed', 'retired')
+           )
            AND generation NOT IN
            (SELECT generation FROM skillcache_traces WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT ?2)",
         params![row.session_id, TRACES_PER_SESSION as i64],
@@ -425,11 +751,34 @@ pub(crate) fn save_trace(db: &Connection, row: &TraceRow<'_>) -> Result<String> 
     Ok(digest)
 }
 
-/// The launches whose traces are stored: what keeps a snapshot alive.
+/// The launches whose traces are stored or currently in-flight: what keeps a snapshot alive.
 pub(crate) fn trace_generations(db: &Connection) -> Result<Vec<String>> {
     let mut query = db.prepare("SELECT generation FROM skillcache_traces")?;
     let rows = query.query_map([], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    let mut generations: BTreeSet<String> =
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    let has_active_launch_tables: bool = db
+        .query_row(
+            "SELECT COUNT(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('launches','sessions')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_active_launch_tables {
+        let mut active = db.prepare(
+            "SELECT l.id FROM launches l
+             JOIN sessions s ON s.id = l.session_id
+             WHERE l.status IN ('queued','running')
+               AND s.status IN ('queued','running')",
+        )?;
+        for generation in active
+            .query_map([], |row| row.get::<_, String>(0))?
+            .flatten()
+        {
+            generations.insert(generation);
+        }
+    }
+    Ok(generations.into_iter().collect())
 }
 
 fn trace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -491,7 +840,7 @@ pub(crate) fn delete_trace(db: &Connection, generation: &str) -> Result<bool> {
     )? > 0)
 }
 
-const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha,needs_trace,needs_trace_after_rowid,is_read_only";
+const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha,needs_trace,needs_trace_after_rowid,is_read_only,git_common_dir";
 
 fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -527,6 +876,7 @@ fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "needs_trace": row.get::<_, i64>(30)? != 0,
         "needs_trace_after_rowid": row.get::<_, i64>(31)?,
         "is_read_only": row.get::<_, Option<i64>>(32)?.map(|v| v != 0),
+        "git_common_dir": row.get::<_, String>(33)?,
     }))
 }
 
@@ -813,8 +1163,7 @@ pub(crate) fn set_dependency_manifest(
     manifest: &ArtifactDependencyManifest,
 ) -> Result<()> {
     let mut stored_manifest = manifest.clone();
-    if stored_manifest.path_hashes.is_empty()
-        && let Some(cap) = capsule(db, capsule_id)?
+    if let Some(cap) = capsule(db, capsule_id)?
         && let Some(generation_id) = cap["source_generation"].as_str().filter(|s| !s.is_empty())
         && let Some(source_trace) = trace(db, generation_id)?
         && let Some(obj) = source_trace["redaction"]["tool_chain_manifest_hashes"].as_object()
@@ -823,7 +1172,8 @@ pub(crate) fn set_dependency_manifest(
             if let Some(hash_str) = hash.as_str() {
                 stored_manifest
                     .path_hashes
-                    .insert(path.clone(), hash_str.to_owned());
+                    .entry(path.clone())
+                    .or_insert_with(|| hash_str.to_owned());
             }
         }
     }
@@ -895,6 +1245,102 @@ pub(crate) fn project_accelerator_edition(
     }
 }
 
+/// Resolves the canonical Git common directory for `workspace`, supporting main
+/// checkouts, linked worktrees, and subdirectories inside a repository.
+pub(crate) fn canonical_git_common_dir(workspace: &Path) -> Option<PathBuf> {
+    let ws_canon = infra_core::fs::canonicalize(workspace).ok()?;
+    for ancestor in ws_canon.ancestors() {
+        let dot_git = ancestor.join(".git");
+        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        if meta.is_dir() {
+            return infra_core::fs::canonicalize(&dot_git).ok();
+        }
+        if meta.is_file()
+            && let Ok(raw) = std::fs::read_to_string(&dot_git)
+            && let Some(rel) = raw.trim().strip_prefix("gitdir:").map(str::trim)
+        {
+            let git_dir = if Path::new(rel).is_absolute() {
+                PathBuf::from(rel)
+            } else {
+                ancestor.join(rel)
+            };
+            let common = if let Ok(common_raw) = std::fs::read_to_string(git_dir.join("commondir"))
+            {
+                let trimmed = common_raw.trim();
+                let p = Path::new(trimmed);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    git_dir.join(p)
+                }
+            } else {
+                git_dir
+            };
+            return infra_core::fs::canonicalize(&common).ok();
+        }
+    }
+    infra_core::git::GitFrame::discover(&ws_canon)
+        .ok()
+        .flatten()
+        .and_then(|frame| frame.common_dir().ok())
+        .and_then(|p| infra_core::fs::canonicalize(&p).ok())
+}
+
+/// Returns other registered `project_id`s that share the same canonical Git
+/// common directory (or canonical workspace root) as `workspace`.
+pub(crate) fn sibling_worktree_projects(
+    db: &Connection,
+    project_id: &str,
+    workspace: &Path,
+) -> Result<Vec<String>> {
+    if !table_exists(db, "registered_projects")? {
+        return Ok(Vec::new());
+    }
+    let target_common = canonical_git_common_dir(workspace);
+    let target_root = infra_core::fs::canonicalize(workspace).ok();
+    if target_common.is_none() && target_root.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut query = db.prepare("SELECT id, path FROM registered_projects WHERE id!=?1")?;
+    let rows = query.query_map([project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut siblings = Vec::new();
+    for row in rows {
+        let (other_id, other_path) = row?;
+        let other = Path::new(&other_path);
+        let common_matches = target_common.is_some()
+            && canonical_git_common_dir(other).as_ref() == target_common.as_ref();
+        let root_matches = target_root.is_some()
+            && infra_core::fs::canonicalize(other).ok().as_ref() == target_root.as_ref();
+        if common_matches || root_matches {
+            siblings.push(other_id);
+        }
+    }
+    Ok(siblings)
+}
+
+/// Persists the canonical Git common directory for cross-worktree capsule sharing.
+pub(crate) fn set_capsule_git_common_dir(
+    db: &Connection,
+    capsule_id: &str,
+    git_common_dir: Option<&Path>,
+) -> Result<()> {
+    let value = git_common_dir
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let changed = db.execute(
+        "UPDATE skillcache_capsules SET git_common_dir=?2 WHERE capsule_id=?1",
+        params![capsule_id, value],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
 /// All active `ToolChain` capsules in `project_id` matching `eval_arm`, filtered in-memory
 /// by dependency manifest / touched-path hashes.
 pub(crate) fn active_toolchain_capsules_for_project(
@@ -912,12 +1358,63 @@ pub(crate) fn active_toolchain_capsules_for_project(
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// Active `ToolChain` capsules in `project_id` first, followed by sibling git
+/// worktrees sharing canonical `git_common_dir`.
+pub(crate) fn active_toolchain_capsules_for_worktrees(
+    db: &Connection,
+    project_id: &str,
+    sibling_ids: &[String],
+    common_dir: Option<&Path>,
+    eval_arm: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut out = active_toolchain_capsules_for_project(db, project_id, eval_arm)?;
+    let common_str = common_dir
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if sibling_ids.is_empty() && common_str.is_empty() {
+        return Ok(out);
+    }
+    let sibling_set: BTreeSet<&str> = sibling_ids.iter().map(String::as_str).collect();
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id!=?1 AND capsule_kind='tool_chain' AND status='active'
+           AND ((?2 IS NULL AND eval_arm IS NULL) OR eval_arm=?2)
+         ORDER BY created_at DESC,rowid DESC"
+    ))?;
+    let rows = query.query_map(params![project_id, eval_arm], capsule_row)?;
+    for row in rows {
+        let cap = row?;
+        let cap_project = cap["project_id"].as_str().unwrap_or("");
+        let cap_common = cap["git_common_dir"].as_str().unwrap_or("");
+        if sibling_set.contains(cap_project) || (!common_str.is_empty() && cap_common == common_str)
+        {
+            out.push(cap);
+        }
+    }
+    Ok(out)
+}
+
+const TEMPLATE_COLUMNS: &str = "template_id,edition,skill_name,skill_tree_sha256,skill_semantic_sha,form,mu_name,mu_description,capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at";
+
 /// Stores or updates a portable edition template indexed by `(edition, skill_name, skill_tree_sha256)`.
+#[cfg(test)]
 pub(crate) fn upsert_template(
     db: &Connection,
     edition: &str,
     skill_name: &str,
     skill_tree_sha256: &str,
+    candidate: &Candidate,
+) -> Result<String> {
+    upsert_template_with_semantic(db, edition, skill_name, skill_tree_sha256, "", candidate)
+}
+
+/// Stores or updates a portable edition template along with its normalized `skill_semantic_sha`.
+pub(crate) fn upsert_template_with_semantic(
+    db: &Connection,
+    edition: &str,
+    skill_name: &str,
+    skill_tree_sha256: &str,
+    skill_semantic_sha: &str,
     candidate: &Candidate,
 ) -> Result<String> {
     let files_json = Value::Array(
@@ -942,10 +1439,14 @@ pub(crate) fn upsert_template(
     let now = store::now();
     db.execute(
         "INSERT INTO skillcache_templates(
-            template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
+            template_id,edition,skill_name,skill_tree_sha256,skill_semantic_sha,form,mu_name,mu_description,
             capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
-         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)
          ON CONFLICT(edition,skill_name,skill_tree_sha256) DO UPDATE SET
+            skill_semantic_sha=CASE
+                WHEN excluded.skill_semantic_sha != '' THEN excluded.skill_semantic_sha
+                ELSE skillcache_templates.skill_semantic_sha
+            END,
             form=excluded.form,mu_name=excluded.mu_name,mu_description=excluded.mu_description,
             capsule_json=excluded.capsule_json,files_json=excluded.files_json,markdown=excluded.markdown,
             examples_json=excluded.examples_json,portability_sha256=excluded.portability_sha256,updated_at=excluded.updated_at",
@@ -954,6 +1455,7 @@ pub(crate) fn upsert_template(
             edition,
             skill_name,
             skill_tree_sha256,
+            skill_semantic_sha,
             candidate.capsule.form.as_str(),
             candidate.capsule.mu.name,
             candidate.capsule.mu.description,
@@ -974,34 +1476,48 @@ fn template_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "edition": row.get::<_, String>(1)?,
         "skill_name": row.get::<_, String>(2)?,
         "skill_tree_sha256": row.get::<_, String>(3)?,
-        "form": row.get::<_, String>(4)?,
-        "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
-        "capsule_json": row.get::<_, String>(7)?,
-        "files_json": decoded(row.get(8)?),
-        "markdown": row.get::<_, Option<String>>(9)?,
-        "examples_json": row.get::<_, Option<String>>(10)?,
-        "portability_sha256": row.get::<_, String>(11)?,
-        "created_at": row.get::<_, String>(12)?,
-        "updated_at": row.get::<_, String>(13)?,
+        "skill_semantic_sha": row.get::<_, String>(4)?,
+        "form": row.get::<_, String>(5)?,
+        "mu": {"name": row.get::<_, String>(6)?, "description": row.get::<_, String>(7)?},
+        "capsule_json": row.get::<_, String>(8)?,
+        "files_json": decoded(row.get(9)?),
+        "markdown": row.get::<_, Option<String>>(10)?,
+        "examples_json": row.get::<_, Option<String>>(11)?,
+        "portability_sha256": row.get::<_, String>(12)?,
+        "created_at": row.get::<_, String>(13)?,
+        "updated_at": row.get::<_, String>(14)?,
     }))
 }
 
 /// Looks up portable edition templates matching `(edition, skill_name, skill_tree_sha256)`.
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn find_templates(
     db: &Connection,
     edition: &str,
     skill_name: &str,
     skill_tree_sha256: &str,
 ) -> Result<Vec<Value>> {
-    let mut query = db.prepare(
-        "SELECT template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
-                capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+    find_templates_with_semantic(db, edition, skill_name, skill_tree_sha256, "")
+}
+
+/// Looks up portable edition templates matching exact `skill_tree_sha256` first,
+/// then normalized `skill_semantic_sha` when non-empty.
+pub(crate) fn find_templates_with_semantic(
+    db: &Connection,
+    edition: &str,
+    skill_name: &str,
+    skill_tree_sha256: &str,
+    skill_semantic_sha: &str,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {TEMPLATE_COLUMNS}
          FROM skillcache_templates
-         WHERE edition=?1 AND skill_name=?2 AND skill_tree_sha256=?3
-         ORDER BY updated_at DESC",
-    )?;
+         WHERE edition=?1 AND skill_name=?2
+           AND (skill_tree_sha256=?3 OR (?4 != '' AND skill_semantic_sha=?4))
+         ORDER BY (skill_tree_sha256=?3) DESC, updated_at DESC"
+    ))?;
     let rows = query.query_map(
-        params![edition, skill_name, skill_tree_sha256],
+        params![edition, skill_name, skill_tree_sha256, skill_semantic_sha],
         template_row,
     )?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1009,13 +1525,12 @@ pub(crate) fn find_templates(
 
 /// Lists all portable templates indexed for `edition`.
 pub(crate) fn edition_templates(db: &Connection, edition: &str) -> Result<Vec<Value>> {
-    let mut query = db.prepare(
-        "SELECT template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
-                capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+    let mut query = db.prepare(&format!(
+        "SELECT {TEMPLATE_COLUMNS}
          FROM skillcache_templates
          WHERE edition=?1
-         ORDER BY updated_at DESC",
-    )?;
+         ORDER BY updated_at DESC"
+    ))?;
     let rows = query.query_map([edition], template_row)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -1122,6 +1637,72 @@ pub(crate) fn active_capsules_for_skill_or_mirror(
     for row in rows {
         let cap = row?;
         if capsule_matches_skill_or_mirror(&cap, skill_path, skill_name, tree_sha256) {
+            matched.push(cap);
+        }
+    }
+    Ok(matched)
+}
+
+/// Active capsules in `project_id` first, followed by verified mirror/skill
+/// capsules in sibling git worktrees sharing canonical `git_common_dir` and
+/// exact `tree_sha256`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Worktree skill lookup passes project, siblings, common_dir, mirror path, name, digest, and eval arm."
+)]
+pub(crate) fn active_capsules_for_skill_or_mirror_in_worktrees(
+    db: &Connection,
+    project_id: &str,
+    sibling_ids: &[String],
+    common_dir: Option<&Path>,
+    skill_path: &str,
+    skill_name: &str,
+    tree_sha256: &str,
+    eval_arm: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut matched = active_capsules_for_skill_or_mirror(
+        db,
+        project_id,
+        skill_path,
+        skill_name,
+        tree_sha256,
+        eval_arm,
+    )?;
+    let common_str = common_dir
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if (sibling_ids.is_empty() && common_str.is_empty()) || tree_sha256.is_empty() {
+        return Ok(matched);
+    }
+    let sibling_set: BTreeSet<&str> = sibling_ids.iter().map(String::as_str).collect();
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id!=?1 AND status='active'
+           AND tree_sha256=?2
+           AND (?3 = '' OR skill_name=?3)
+           AND ((?4 IS NULL AND eval_arm IS NULL) OR eval_arm=?4)
+         ORDER BY (skill_path=?5) DESC, created_at DESC, rowid DESC"
+    ))?;
+    let rows = query.query_map(
+        params![project_id, tree_sha256, skill_name, eval_arm, skill_path],
+        capsule_row,
+    )?;
+    for row in rows {
+        let cap = row?;
+        let cap_project = cap["project_id"].as_str().unwrap_or("");
+        let cap_common = cap["git_common_dir"].as_str().unwrap_or("");
+        if !(sibling_set.contains(cap_project)
+            || (!common_str.is_empty() && cap_common == common_str))
+        {
+            continue;
+        }
+        let cap_path = cap["skill_path"].as_str().unwrap_or("");
+        let path_matches = cap_path == skill_path
+            || matches!(
+                (canonical_mirror_skill(cap_path), canonical_mirror_skill(skill_path)),
+                (Some(a), Some(b)) if a == b
+            );
+        if path_matches {
             matched.push(cap);
         }
     }
@@ -2176,5 +2757,521 @@ mod tests {
         assert_eq!(pending_requalify_count(&db).unwrap(), 1);
         delete_pending_requalify(&db, "c1").unwrap();
         assert_eq!(pending_requalify_count(&db).unwrap(), 0);
+    }
+
+    #[test]
+    fn recover_prunes_old_compiles_retired_superseded_and_unpins_snapshots_and_lru_evicts() {
+        let dir = crate::skillcache::test_support::scratch();
+        let state = dir.path().join("state");
+        let ws = dir.path().join("proj");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let store = crate::store::SessionStore::open(&state).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude"}),
+                "gc",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let pinned_session = store
+            .create(
+                &json!({
+                    "project_id": project_id,
+                    "provider": "claude",
+                    "skillcache": {"mode": "auto", "capsule_id": "cap-pinned-retired"}
+                }),
+                "pinned",
+                &[],
+            )
+            .unwrap();
+        let _pinned_sid = pinned_session["id"].as_str().unwrap().to_owned();
+
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(TRACE_DAYS + 5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mk_snapshot = |generation: &str| {
+            let p = state.join("skillcache/snapshots").join(generation);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("blob.bin"), b"snapshot-bytes").unwrap();
+            p
+        };
+        let mk_artifacts = |capsule_id: &str| {
+            let art = state
+                .join("skillcache/capsules")
+                .join(&project_id)
+                .join(capsule_id)
+                .join("1");
+            std::fs::create_dir_all(art.join("warm")).unwrap();
+            std::fs::write(art.join("warm/capsule.json"), b"{}").unwrap();
+            let qual = state
+                .join("skillcache/qualification")
+                .join(capsule_id)
+                .join("1");
+            std::fs::create_dir_all(&qual).unwrap();
+            std::fs::write(qual.join("examples.json"), b"{}").unwrap();
+            (art, qual)
+        };
+
+        {
+            let db = store.connection().unwrap();
+            let skill_pdf =
+                json!({"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": "a"});
+            let skill_solo =
+                json!({"name": "solo", "path": ".claude/skills/solo/SKILL.md", "tree_sha256": "b"});
+
+            // 1. Old failed capsule + compile + snapshot -> pruned & snapshot deleted.
+            let (art_fail, qual_fail) = mk_artifacts("cap-fail-old");
+            let snap_fail = mk_snapshot("gen-fail-old");
+            keep(&db, "gen-fail-old", &sid);
+            begin_capsule(
+                &db,
+                "cap-fail-old",
+                "cmp-fail-old",
+                &project_id,
+                &sid,
+                "gen-fail-old",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            begin_compile(
+                &db,
+                "cmp-fail-old",
+                "cap-fail-old",
+                &project_id,
+                &sid,
+                "gen-fail-old",
+                "claude",
+                None,
+                None,
+            )
+            .unwrap();
+            finish_compile(
+                &db,
+                "cmp-fail-old",
+                "failed",
+                1,
+                "boom",
+                &json!({}),
+                &json!({}),
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_capsules SET status='failed', artifact_dir=?2, updated_at=?3 WHERE capsule_id=?1",
+                params!["cap-fail-old", art_fail.to_string_lossy().as_ref(), &old_ts],
+            ).unwrap();
+            db.execute(
+                "UPDATE skillcache_compiles SET finished_at=?2 WHERE compile_id=?1",
+                params!["cmp-fail-old", &old_ts],
+            )
+            .unwrap();
+
+            // 2. Old interrupted compile without surviving capsule -> pruned.
+            begin_compile(
+                &db,
+                "cmp-int-old",
+                "cap-missing",
+                &project_id,
+                &sid,
+                "gen-fail-old",
+                "claude",
+                None,
+                None,
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_compiles SET status='interrupted', started_at=?2, finished_at=?2 WHERE compile_id=?1",
+                params!["cmp-int-old", &old_ts],
+            ).unwrap();
+
+            // 3. Old retired capsule -> pruned & snapshot deleted.
+            let (art_ret, _) = mk_artifacts("cap-ret-old");
+            let snap_ret = mk_snapshot("gen-ret-old");
+            keep(&db, "gen-ret-old", &sid);
+            begin_capsule(
+                &db,
+                "cap-ret-old",
+                "cmp-ret-old",
+                &project_id,
+                &sid,
+                "gen-ret-old",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_capsules SET status='retired', artifact_dir=?2, updated_at=?3 WHERE capsule_id=?1",
+                params!["cap-ret-old", art_ret.to_string_lossy().as_ref(), &old_ts],
+            ).unwrap();
+
+            // 4. Recently retired capsule (< TRACE_DAYS) with an OLD trace (> TRACE_DAYS) -> capsule kept, snapshot unpinned & deleted!
+            let snap_ret_recent = mk_snapshot("gen-ret-recent");
+            keep(&db, "gen-ret-recent", &sid);
+            begin_capsule(
+                &db,
+                "cap-ret-recent",
+                "cmp-ret-recent",
+                &project_id,
+                &sid,
+                "gen-ret-recent",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            set_capsule_status(&db, "cap-ret-recent", "retired", Some("retired today")).unwrap();
+
+            // 5. Session-pinned old retired capsule -> preserved.
+            begin_capsule(
+                &db,
+                "cap-pinned-retired",
+                "cmp-pin-ret",
+                &project_id,
+                &sid,
+                "gen-pin-ret",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_capsules SET status='retired', updated_at=?2 WHERE capsule_id=?1",
+                params!["cap-pinned-retired", &old_ts],
+            ).unwrap();
+
+            // 6. Old active replacement + old superseded stale capsule + old non-superseded stale capsule.
+            let snap_active = mk_snapshot("gen-active-old");
+            keep(&db, "gen-active-old", &sid);
+            begin_capsule(
+                &db,
+                "cap-active-old",
+                "cmp-act-old",
+                &project_id,
+                &sid,
+                "gen-active-old",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            activate_capsule(
+                &db,
+                &Qualified {
+                    capsule_id: "cap-active-old",
+                    mu_name: "pdf",
+                    mu_description: "d",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "p",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "d",
+                    artifact_dir: "/tmp/act",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+
+            let (art_sup, _) = mk_artifacts("cap-superseded");
+            let snap_sup = mk_snapshot("gen-superseded");
+            keep(&db, "gen-superseded", &sid);
+            begin_capsule(
+                &db,
+                "cap-superseded",
+                "cmp-sup",
+                &project_id,
+                &sid,
+                "gen-superseded",
+                &skill_pdf,
+                None,
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_capsules SET status='stale', artifact_dir=?2, updated_at=?3 WHERE capsule_id=?1",
+                params!["cap-superseded", art_sup.to_string_lossy().as_ref(), &old_ts],
+            ).unwrap();
+
+            let snap_solo = mk_snapshot("gen-solo-stale");
+            keep(&db, "gen-solo-stale", &sid);
+            begin_capsule(
+                &db,
+                "cap-solo-stale",
+                "cmp-solo",
+                &project_id,
+                &sid,
+                "gen-solo-stale",
+                &skill_solo,
+                None,
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE skillcache_capsules SET status='stale', updated_at=?2 WHERE capsule_id=?1",
+                params!["cap-solo-stale", &old_ts],
+            )
+            .unwrap();
+
+            db.execute("UPDATE skillcache_traces SET created_at=?1", [&old_ts])
+                .unwrap();
+
+            recover(&db).unwrap();
+
+            assert!(capsule(&db, "cap-fail-old").unwrap().is_none());
+            assert!(compile(&db, "cmp-fail-old").unwrap().is_none());
+            assert!(compile(&db, "cmp-int-old").unwrap().is_none());
+            assert!(capsule(&db, "cap-ret-old").unwrap().is_none());
+            assert!(capsule(&db, "cap-superseded").unwrap().is_none());
+            assert!(capsule(&db, "cap-ret-recent").unwrap().is_some());
+            assert!(capsule(&db, "cap-pinned-retired").unwrap().is_some());
+            assert!(capsule(&db, "cap-active-old").unwrap().is_some());
+            assert!(capsule(&db, "cap-solo-stale").unwrap().is_some());
+
+            assert!(
+                !snap_fail.exists(),
+                "failed snapshot must be unpinned and deleted"
+            );
+            assert!(
+                !snap_ret.exists(),
+                "pruned retired snapshot must be deleted"
+            );
+            assert!(
+                !snap_ret_recent.exists(),
+                "retired capsule must not pin >TRACE_DAYS snapshot"
+            );
+            assert!(!snap_sup.exists(), "superseded snapshot must be deleted");
+            assert!(
+                snap_active.exists(),
+                "active capsule snapshot must stay pinned"
+            );
+            assert!(
+                snap_solo.exists(),
+                "un-superseded stale capsule snapshot stays"
+            );
+            assert!(
+                !art_fail.parent().unwrap().exists(),
+                "pruned artifact dir must be removed"
+            );
+            assert!(
+                !qual_fail.parent().unwrap().exists(),
+                "pruned qualification dir must be removed"
+            );
+        }
+
+        // Now test per-project LRU eviction by `last_used_at`, preserving pinned & active capsules.
+        {
+            let db = store.connection().unwrap();
+            let skill =
+                json!({"name": "k", "path": ".claude/skills/k/SKILL.md", "tree_sha256": "c"});
+            for i in 0..8 {
+                let id = format!("lru-stale-{i}");
+                begin_capsule(
+                    &db,
+                    &id,
+                    &format!("cmp-s-{i}"),
+                    &project_id,
+                    &sid,
+                    "gen-active-old",
+                    &skill,
+                    None,
+                )
+                .unwrap();
+                db.execute(
+                    "UPDATE skillcache_capsules SET status='stale', last_used_at=?2 WHERE capsule_id=?1",
+                    params![&id, format!("2026-01-{:02}T00:00:00Z", i + 1)],
+                ).unwrap();
+            }
+            for i in 0..5 {
+                let id = format!("lru-act-{i}");
+                begin_capsule(
+                    &db,
+                    &id,
+                    &format!("cmp-a-{i}"),
+                    &project_id,
+                    &sid,
+                    "gen-active-old",
+                    &skill,
+                    None,
+                )
+                .unwrap();
+                db.execute(
+                    "UPDATE skillcache_capsules SET status='active', last_used_at=?2 WHERE capsule_id=?1",
+                    params![&id, format!("2026-02-{:02}T00:00:00Z", i + 1)],
+                ).unwrap();
+            }
+            // 4 existing (`cap-ret-recent`, `cap-pinned-retired`, `cap-active-old`, `cap-solo-stale`)
+            // + 8 `lru-stale-*` + 5 `lru-act-*` = 17 total (6 active + 1 pinned + 10 non-active).
+            // Cap=8 evicts 9 oldest non-active first, preserving pinned and all active capsules.
+            let evicted1 = enforce_project_capsule_cap(&db, &project_id, 8).unwrap();
+            assert_eq!(evicted1, 9);
+            assert!(
+                capsule(&db, "cap-pinned-retired").unwrap().is_some(),
+                "pinned capsule must be preserved"
+            );
+            for i in 0..5 {
+                assert!(
+                    capsule(&db, &format!("lru-act-{i}")).unwrap().is_some(),
+                    "active lru-act-{i} preserved"
+                );
+            }
+            // Cap=4 evicts remaining non-active (`cap-ret-recent`) and oldest 3 active (`lru-act-0..2`),
+            // preserving `cap-pinned-retired`, `lru-act-3`, `lru-act-4`, and `cap-active-old`.
+            let _ = enforce_project_capsule_cap(&db, &project_id, 4).unwrap();
+            let remaining = capsules(&db, &project_id, None, None, None, true, true).unwrap();
+            assert_eq!(remaining.len(), 4);
+            assert!(
+                capsule(&db, "cap-pinned-retired").unwrap().is_some(),
+                "pinned stays even under tighter cap"
+            );
+            assert!(
+                capsule(&db, "lru-act-4").unwrap().is_some(),
+                "most recently used active stays"
+            );
+            assert!(
+                capsule(&db, "lru-act-0").unwrap().is_none(),
+                "oldest last_used_at active evicted"
+            );
+        }
+    }
+
+    #[test]
+    fn worktree_sibling_discovery_and_semantic_template_matching_work() {
+        let dir = crate::skillcache::test_support::scratch();
+        let repo = dir.path().join("repo");
+        let wt2 = dir.path().join("wt2");
+        let other = dir.path().join("other");
+        for p in [&repo, &other] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::write(p.join("README.md"), "hi\n").unwrap();
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                    "init",
+                    "-q",
+                ])
+                .status()
+                .unwrap();
+            assert!(st.success());
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                    "add",
+                    ".",
+                ])
+                .status()
+                .unwrap();
+            assert!(st.success());
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                ])
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["worktree", "add", "-q", wt2.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(st.success());
+
+        let store = crate::store::SessionStore::open(&dir.path().join("state")).unwrap();
+        let p1 = store.register(&repo).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let p2 = store.register(&wt2).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let p3 = store.register(&other).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = store.connection().unwrap();
+
+        assert_eq!(
+            canonical_git_common_dir(&repo),
+            canonical_git_common_dir(&wt2)
+        );
+        assert_ne!(
+            canonical_git_common_dir(&repo),
+            canonical_git_common_dir(&other)
+        );
+        let sibs_p2 = sibling_worktree_projects(&db, &p2, &wt2).unwrap();
+        assert_eq!(sibs_p2, vec![p1.clone()]);
+        assert!(
+            sibling_worktree_projects(&db, &p3, &other)
+                .unwrap()
+                .is_empty()
+        );
+
+        let answer = json!({
+            "form": "textual",
+            "capsule": {
+                "mu": {"name": "php-lint", "description": "Check PHP syntax"},
+                "source": {"skills": [{"name": "php-lint", "path": ".claude/skills/php-lint/SKILL.md"}]}
+            },
+            "markdown": "# Lint\n\n1. Run `php -l`.\n"
+        });
+        let known = vec![infra_skillcache::candidate::KnownSkill {
+            name: "php-lint".into(),
+            path: ".claude/skills/php-lint/SKILL.md".into(),
+            tree_sha256: "a".repeat(64),
+        }];
+        let cand = infra_skillcache::candidate::from_answer(
+            &answer,
+            &known,
+            infra_skillcache::Form::Textual,
+        )
+        .unwrap();
+        let tpl = infra_skillcache::candidate::as_portable_template(&cand, "Laravel");
+        upsert_template_with_semantic(
+            &db,
+            "Laravel",
+            "php-lint",
+            &"a".repeat(64),
+            &"s".repeat(64),
+            &tpl,
+        )
+        .unwrap();
+
+        // Semantic lookup matches when exact tree differs; empty semantic hash does NOT falsely match.
+        let by_sem = find_templates_with_semantic(
+            &db,
+            "Laravel",
+            "php-lint",
+            &"b".repeat(64),
+            &"s".repeat(64),
+        )
+        .unwrap();
+        assert_eq!(by_sem.len(), 1);
+        assert_eq!(by_sem[0]["skill_semantic_sha"], "s".repeat(64));
+        assert!(
+            find_templates_with_semantic(&db, "Laravel", "php-lint", &"b".repeat(64), "")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

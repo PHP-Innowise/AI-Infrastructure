@@ -1,10 +1,15 @@
 use crate::{HarnessError, Result, store};
-use serde::Serialize;
+use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
-    sync::{Mutex, OnceLock},
+    path::{Path, PathBuf},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub const PHASES: &[(&str, &str)] = &[
     ("initialize", "Initialize"),
@@ -85,7 +90,7 @@ pub fn artifacts(root: &Path, settings: &Value) -> Result<Vec<Value>> {
   }
  }).collect()
 }
-fn needed_for_phase(phase: &str) -> usize {
+pub(crate) fn needed_for_phase(phase: &str) -> usize {
     match phase {
         "plan" => 1,
         "tasks" => 2,
@@ -141,7 +146,7 @@ pub(crate) fn require_documents_in(
 }
 
 /// Structured bounded-repair diagnostic emitted by [`validate_dataflow_diagnostics`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Violation {
     pub code: String,
     pub path: String,
@@ -216,6 +221,209 @@ pub fn validate_dataflow_diagnostics(
     validate_dataflow_diagnostics_in(None, None, files, phase, needed)
 }
 
+const SDD_RACY_NS: u128 = 2_000_000_000;
+const MAX_PERSISTED_SDD_ROWS: usize = 512;
+
+static SDD_SQLITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_sdd_cache_seq() -> i64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX / 2))
+        .unwrap_or(0);
+    let mut cur = SDD_SQLITE_SEQ.load(Ordering::Relaxed);
+    loop {
+        let candidate = cur.max(nanos).saturating_add(1);
+        match SDD_SQLITE_SEQ.compare_exchange_weak(
+            cur,
+            candidate,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return i64::try_from(candidate & (i64::MAX as u64)).unwrap_or(i64::MAX),
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
+fn sdd_cache_db_path(state_dir: &Path) -> PathBuf {
+    state_dir
+        .join("cache")
+        .join("sdd")
+        .join("dataflow_cache.sqlite3")
+}
+
+fn open_sdd_cache_db(state_dir: &Path) -> Result<rusqlite::Connection> {
+    let db_path = sdd_cache_db_path(state_dir);
+    if let Some(parent) = db_path.parent() {
+        infra_core::fs::ensure_directory(parent, true)?;
+    }
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_secs(2))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sdd_dataflow_cache(
+            ir_revision INTEGER NOT NULL,
+            spec_sha256 TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT '',
+            root_key TEXT NOT NULL DEFAULT '',
+            claimed_files_json TEXT NOT NULL DEFAULT '[]',
+            has_symbol_only_claims INTEGER NOT NULL DEFAULT 0,
+            violations_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_used_at INTEGER NOT NULL,
+            PRIMARY KEY (ir_revision, spec_sha256)
+        );
+        CREATE INDEX IF NOT EXISTS sdd_dataflow_cache_lru
+            ON sdd_dataflow_cache(last_used_at ASC);
+        CREATE INDEX IF NOT EXISTS sdd_dataflow_cache_scope
+            ON sdd_dataflow_cache(project_id, root_key);",
+    )?;
+    Ok(conn)
+}
+
+fn load_persisted_sdd_eval(
+    state_dir: &Path,
+    ir_revision: u64,
+    spec_sha256: &str,
+) -> Option<Vec<Violation>> {
+    let db_path = sdd_cache_db_path(state_dir);
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = open_sdd_cache_db(state_dir).ok()?;
+    let rev_i64 = i64::try_from(ir_revision).ok()?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT violations_json FROM sdd_dataflow_cache
+             WHERE ir_revision = ?1 AND spec_sha256 = ?2",
+            params![rev_i64, spec_sha256],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let raw = raw?;
+    let parsed = serde_json::from_str::<Vec<Violation>>(&raw).ok()?;
+    let _ = conn.execute(
+        "UPDATE sdd_dataflow_cache SET last_used_at = ?3
+         WHERE ir_revision = ?1 AND spec_sha256 = ?2",
+        params![rev_i64, spec_sha256, next_sdd_cache_seq()],
+    );
+    Some(parsed)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SQLite cache persistence tracks exact invalidation scope columns alongside (ir_revision, spec_sha256)."
+)]
+fn save_persisted_sdd_eval(
+    state_dir: &Path,
+    ir_revision: u64,
+    spec_sha256: &str,
+    project_id: &str,
+    root_key: Option<&str>,
+    claimed_files: &BTreeSet<String>,
+    has_symbol_only_claims: bool,
+    violations: &[Violation],
+) {
+    let Ok(rev_i64) = i64::try_from(ir_revision) else {
+        return;
+    };
+    let Ok(conn) = open_sdd_cache_db(state_dir) else {
+        return;
+    };
+    let claimed_json = serde_json::to_string(claimed_files).unwrap_or_else(|_| "[]".into());
+    let violations_json = serde_json::to_string(violations).unwrap_or_else(|_| "[]".into());
+    let seq = next_sdd_cache_seq();
+    let _ = conn.execute(
+        "INSERT INTO sdd_dataflow_cache(
+             ir_revision, spec_sha256, project_id, root_key,
+             claimed_files_json, has_symbol_only_claims, violations_json,
+             updated_at, last_used_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+         ON CONFLICT(ir_revision, spec_sha256) DO UPDATE SET
+             project_id = excluded.project_id,
+             root_key = excluded.root_key,
+             claimed_files_json = excluded.claimed_files_json,
+             has_symbol_only_claims = excluded.has_symbol_only_claims,
+             violations_json = excluded.violations_json,
+             updated_at = excluded.updated_at,
+             last_used_at = excluded.last_used_at",
+        params![
+            rev_i64,
+            spec_sha256,
+            project_id,
+            root_key.unwrap_or(""),
+            claimed_json,
+            i64::from(has_symbol_only_claims),
+            violations_json,
+            seq,
+        ],
+    );
+    let _ = conn.execute(
+        "DELETE FROM sdd_dataflow_cache
+         WHERE rowid IN (
+             SELECT rowid FROM sdd_dataflow_cache
+             ORDER BY last_used_at DESC
+             LIMIT -1 OFFSET ?1
+         )",
+        params![i64::try_from(MAX_PERSISTED_SDD_ROWS).unwrap_or(512)],
+    );
+}
+
+fn invalidate_persisted_sdd_cache(
+    state_dir: &Path,
+    project_id: &str,
+    root_str: &str,
+    delta: &crate::graph_ir::IrUpdateDelta,
+    touched: &BTreeSet<&str>,
+) {
+    let db_path = sdd_cache_db_path(state_dir);
+    if !db_path.is_file() {
+        return;
+    }
+    let Ok(conn) = open_sdd_cache_db(state_dir) else {
+        return;
+    };
+    let rows: Vec<(i64, String, String, i64)> = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT ir_revision, spec_sha256, claimed_files_json, has_symbol_only_claims
+             FROM sdd_dataflow_cache
+             WHERE project_id = ?1 OR (root_key != '' AND root_key = ?2)",
+        ) else {
+            return;
+        };
+        let Ok(mapped) = stmt.query_map(params![project_id, root_str], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        }) else {
+            return;
+        };
+        mapped.flatten().collect()
+    };
+    for (rev, sha, claimed_raw, sym_only) in rows {
+        let stale_rev = delta.ir_revision > 0
+            && u64::try_from(rev)
+                .ok()
+                .is_some_and(|r| r < delta.ir_revision);
+        let claimed: Vec<String> = serde_json::from_str(&claimed_raw).unwrap_or_default();
+        let evict = delta.manifest_changed
+            || stale_rev
+            || sym_only != 0
+            || claimed.iter().any(|f| touched.contains(f.as_str()));
+        if evict {
+            let _ = conn.execute(
+                "DELETE FROM sdd_dataflow_cache WHERE ir_revision = ?1 AND spec_sha256 = ?2",
+                params![rev, sha],
+            );
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CachedSddEval {
     root_key: Option<String>,
@@ -225,8 +433,8 @@ struct CachedSddEval {
     violations: Vec<Violation>,
 }
 
-fn dataflow_cache() -> &'static Mutex<BTreeMap<String, CachedSddEval>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, CachedSddEval>>> = OnceLock::new();
+fn dataflow_cache() -> &'static Mutex<BTreeMap<(u64, String), CachedSddEval>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<(u64, String), CachedSddEval>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -247,15 +455,52 @@ pub fn validate_dataflow_diagnostics_in(
             .ok()
             .flatten()
     });
+    let ir_revision = ir_store
+        .as_deref()
+        .map(|ir| ir.current_write_epoch())
+        .unwrap_or(0);
     let claims = extract_checked_claims(files);
     let context_stamp = workspace_ir_claim_stamp(root, ir_store.as_deref(), &claims);
 
     let cache = dataflow_cache();
-    let digest = dataflow_cache_digest(files, phase, needed, &context_stamp);
+    let spec_sha256 = dataflow_cache_digest(files, phase, needed, &context_stamp);
+    let l1_key = (ir_revision, spec_sha256.clone());
     if let Ok(guard) = cache.lock()
-        && let Some(hit) = guard.get(&digest)
+        && let Some(hit) = guard.get(&l1_key)
     {
         return hit.violations.clone();
+    }
+
+    let mut claimed_files = BTreeSet::new();
+    let mut has_symbol_only_claims = false;
+    for claim in &claims {
+        claimed_files.extend(claim.files.iter().cloned());
+        if claim.files.is_empty() && !claim.symbols.is_empty() {
+            has_symbol_only_claims = true;
+        }
+    }
+    let root_key = root.map(|r| r.to_string_lossy().into_owned());
+    let project_key = ir_context.map(|(_, p)| p.to_owned());
+
+    if let Some((state_dir, _)) = ir_context
+        && let Some(persisted) = load_persisted_sdd_eval(state_dir, ir_revision, &spec_sha256)
+    {
+        if let Ok(mut guard) = cache.lock() {
+            if guard.len() >= 128 {
+                guard.clear();
+            }
+            guard.insert(
+                l1_key,
+                CachedSddEval {
+                    root_key,
+                    project_key,
+                    claimed_files,
+                    has_symbol_only_claims,
+                    violations: persisted.clone(),
+                },
+            );
+        }
+        return persisted;
     }
 
     #[cfg(test)]
@@ -266,23 +511,27 @@ pub fn validate_dataflow_diagnostics_in(
         verify_checked_claims(root, ir_store.as_deref(), &claims, &mut result);
         result.truncate(16);
     }
-    let mut claimed_files = BTreeSet::new();
-    let mut has_symbol_only_claims = false;
-    for claim in &claims {
-        claimed_files.extend(claim.files.iter().cloned());
-        if claim.files.is_empty() && !claim.symbols.is_empty() {
-            has_symbol_only_claims = true;
-        }
+    if let Some((state_dir, project_id)) = ir_context {
+        save_persisted_sdd_eval(
+            state_dir,
+            ir_revision,
+            &spec_sha256,
+            project_id,
+            root_key.as_deref(),
+            &claimed_files,
+            has_symbol_only_claims,
+            &result,
+        );
     }
     if let Ok(mut guard) = cache.lock() {
         if guard.len() >= 128 {
             guard.clear();
         }
         guard.insert(
-            digest,
+            l1_key,
             CachedSddEval {
-                root_key: root.map(|r| r.to_string_lossy().into_owned()),
-                project_key: ir_context.map(|(_, p)| p.to_owned()),
+                root_key,
+                project_key,
                 claimed_files,
                 has_symbol_only_claims,
                 violations: result.clone(),
@@ -313,13 +562,15 @@ pub(crate) fn on_ir_paths_updated(
     }
     let root_str = root.to_string_lossy();
     if let Ok(mut guard) = dataflow_cache().lock() {
-        guard.retain(|_, entry| {
+        guard.retain(|(rev, _), entry| {
             let same_scope = entry.project_key.as_deref() == Some(project_id)
                 || entry.root_key.as_deref() == Some(root_str.as_ref());
             if !same_scope {
                 return true;
             }
+            let stale_rev = delta.ir_revision > 0 && *rev < delta.ir_revision;
             !(delta.manifest_changed
+                || stale_rev
                 || entry.has_symbol_only_claims
                 || entry
                     .claimed_files
@@ -327,6 +578,7 @@ pub(crate) fn on_ir_paths_updated(
                     .any(|f| touched.contains(f.as_str())))
         });
     }
+    invalidate_persisted_sdd_cache(&store.state, project_id, root_str.as_ref(), delta, &touched);
 
     let Ok(db) = store.connection() else {
         return 0;
@@ -334,7 +586,10 @@ pub(crate) fn on_ir_paths_updated(
     let rows: Vec<(String, String, String)> = {
         let Ok(mut stmt) = db.prepare(
             "SELECT id, project_path, sdd FROM sessions
-             WHERE project_id = ?1 AND sdd IS NOT NULL AND sdd != ''
+             WHERE project_id = ?1
+               AND sdd IS NOT NULL
+               AND sdd != ''
+               AND status NOT IN ('completed', 'cancelled')
              ORDER BY updated_at DESC LIMIT 32",
         ) else {
             return 0;
@@ -411,32 +666,158 @@ pub(crate) fn on_ir_paths_updated(
 }
 
 #[derive(Clone, Debug)]
-struct CheckedClaimLine {
-    doc_path: String,
-    line_no: usize,
-    files: Vec<String>,
-    symbols: Vec<String>,
+pub(crate) struct CheckedClaimLine {
+    pub(crate) doc_path: String,
+    pub(crate) line_no: usize,
+    pub(crate) files: Vec<String>,
+    pub(crate) symbols: Vec<String>,
 }
 
-fn is_claim_file_token(token: &str) -> bool {
+pub(crate) fn is_claim_file_token(token: &str) -> bool {
     const EXTS: &[&str] = &[
-        ".rs", ".php", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".md", ".json", ".toml",
-        ".yaml", ".yml", ".sql", ".sh",
+        ".rs", ".php", ".ts", ".tsx", ".mts", ".cts", ".cjs", ".mjs", ".js", ".jsx", ".py", ".pyi",
+        ".go", ".java", ".kt", ".kts", ".cs", ".rb", ".swift", ".scala", ".sc", ".phtml", ".inc",
+        ".md", ".json", ".jsonc", ".toml", ".yaml", ".yml", ".sql", ".sh", ".bash", ".zsh", ".css",
+        ".scss", ".sass", ".less", ".html", ".htm", ".svg", ".vue", ".svelte", ".astro",
+        ".graphql", ".gql", ".proto", ".lock", ".sum", ".mod", ".env", ".ini", ".conf", ".cfg",
+        ".xml", ".csv", ".txt", ".log", ".hcl", ".tf", ".tfvars", ".prisma", ".sol", ".ex", ".exs",
+        ".erl", ".hrl", ".lua", ".r", ".jl", ".hs", ".ml", ".mli", ".zig", ".nim", ".dart", ".c",
+        ".h", ".cc", ".cpp", ".hpp", ".hh", ".m", ".mm", ".wasm",
+    ];
+    const EXACT_BASENAMES: &[&str] = &[
+        "Dockerfile",
+        "Containerfile",
+        "Makefile",
+        "Gemfile",
+        "Rakefile",
+        "Procfile",
+        "Cargo.lock",
+        "go.sum",
+        "go.mod",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "composer.lock",
+        "poetry.lock",
+        "Gemfile.lock",
+        "Pipfile.lock",
+        "LICENSE",
+        "README",
+        "CHANGELOG",
     ];
     let trimmed = token.trim().trim_start_matches("./");
-    !trimmed.is_empty()
-        && trimmed.contains('/')
-        && !trimmed.starts_with('/')
-        && !trimmed.contains("://")
-        && !trimmed.contains('\\')
-        && !trimmed.contains("..")
-        && !trimmed
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains("://")
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.split('/').any(str::is_empty)
+        || trimmed
             .chars()
             .any(|c| c.is_whitespace() || "*?[]{}<>\"'$()".contains(c))
-        && EXTS.iter().any(|ext| trimmed.ends_with(ext))
+    {
+        return false;
+    }
+    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    EXACT_BASENAMES.contains(&basename)
+        || EXTS
+            .iter()
+            .any(|ext| trimmed.ends_with(ext) && basename.len() > ext.len())
 }
 
-fn is_claim_symbol_token(token: &str) -> bool {
+fn is_valid_claim_ident_segment(part: &str) -> bool {
+    let mut bytes = part.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn is_ignored_bare_claim_word(token: &str) -> bool {
+    if token.len() >= 2
+        && token.starts_with(['T', 't'])
+        && token[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    if matches!(
+        token,
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    ) {
+        return true;
+    }
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "true"
+            | "false"
+            | "null"
+            | "none"
+            | "nil"
+            | "undefined"
+            | "void"
+            | "nan"
+            | "ok"
+            | "yes"
+            | "no"
+            | "todo"
+            | "wip"
+            | "fixme"
+            | "id"
+            | "any"
+            | "unknown"
+            | "never"
+            | "completed"
+            | "cancelled"
+            | "canceled"
+            | "pending"
+            | "running"
+            | "waiting"
+            | "idle"
+            | "failed"
+            | "ready"
+            | "stale"
+            | "building"
+            | "updated"
+            | "active"
+            | "archived"
+            | "draft"
+            | "done"
+            | "skipped"
+            | "passed"
+            | "blocked"
+            | "status"
+            | "state"
+            | "reason"
+            | "action"
+            | "kind"
+            | "mode"
+            | "error"
+            | "warning"
+            | "info"
+            | "debug"
+            | "default"
+            | "enabled"
+            | "disabled"
+            | "off"
+            | "on"
+            | "ir_delta"
+            | "graph_status"
+            | "system_graph_status"
+            | "session_status"
+            | "sdd_staleness"
+            | "waiting_counts"
+            | "project_id"
+            | "session_id"
+            | "config_path"
+            | "direct_dispatch"
+            | "read_only"
+            | "allow_ignored"
+    )
+}
+
+pub(crate) fn is_claim_symbol_token(token: &str) -> bool {
     let trimmed = token.trim();
     if trimmed.is_empty()
         || trimmed.contains(['/', ' ', '\t', '\n', '(', ')', '{', '}', '*', '$'])
@@ -445,63 +826,107 @@ fn is_claim_symbol_token(token: &str) -> bool {
         return false;
     }
     // Qualified symbol reference (`Owner::member`, `ns\Class::method`) with valid identifier segments.
-    trimmed.contains("::")
-        && trimmed.split("::").all(|part| {
+    if trimmed.contains("::") {
+        return trimmed.split("::").all(|part| {
             let p = part.trim_start_matches('\\');
             !p.is_empty()
                 && p.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'\\'))
-        })
+        });
+    }
+    // Dot-qualified member reference (`Owner.member`, `pkg.Type.method`) after ruling out filenames.
+    if trimmed.contains('.') {
+        let mut parts = trimmed.split('.');
+        let first = parts.next();
+        let second = parts.next();
+        return first.is_some_and(is_valid_claim_ident_segment)
+            && second.is_some_and(is_valid_claim_ident_segment)
+            && parts.all(is_valid_claim_ident_segment);
+    }
+    trimmed.len() >= 2
+        && is_valid_claim_ident_segment(trimmed)
+        && !is_ignored_bare_claim_word(trimmed)
 }
 
-fn extract_checked_claims(files: &[Value]) -> Vec<CheckedClaimLine> {
+fn resolve_claimed_file_on_disk(
+    root: &Path,
+    doc_path: &str,
+    rel: &str,
+) -> Option<(String, std::path::PathBuf)> {
+    let is_regular_non_symlink = |candidate: &Path| {
+        infra_core::fs::admit_descendant(root, candidate).is_ok()
+            && std::fs::symlink_metadata(candidate)
+                .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+    };
+    let direct = root.join(rel);
+    if is_regular_non_symlink(&direct) {
+        return Some((rel.to_owned(), direct));
+    }
+    if !rel.contains('/')
+        && let Some(parent) = Path::new(doc_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+    {
+        let sibling_rel = format!("{}/{rel}", parent.to_string_lossy().replace('\\', "/"));
+        let sibling = root.join(&sibling_rel);
+        if is_regular_non_symlink(&sibling) {
+            return Some((sibling_rel, sibling));
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_checked_claims(files: &[Value]) -> Vec<CheckedClaimLine> {
     static BACKTICK_RE: OnceLock<regex::Regex> = OnceLock::new();
     let backtick_re = BACKTICK_RE
         .get_or_init(|| regex::Regex::new(r"`([^`\n]{2,180})`").expect("valid backtick regex"));
 
     let mut out = Vec::new();
     for suffix in ["tasks.md", "progress.md"] {
-        let Some((doc_path, text)) = files.iter().find_map(|f| {
-            let p = f["path"].as_str()?;
-            (p.ends_with(suffix) && f["available"] == true)
-                .then(|| f["text"].as_str().map(|t| (p, t)))
-                .flatten()
-        }) else {
-            continue;
-        };
-        for (idx, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            let is_done = trimmed.starts_with("- [x]")
-                || trimmed.starts_with("- [X]")
-                || trimmed.starts_with("* [x]")
-                || trimmed.starts_with("* [X]");
-            if !is_done {
+        for f in files {
+            let Some(doc_path) = f["path"].as_str() else {
+                continue;
+            };
+            if !(doc_path.ends_with(suffix) && f["available"] == true) {
                 continue;
             }
-            let mut claimed_files = Vec::new();
-            let mut claimed_symbols = Vec::new();
-            for cap in backtick_re.captures_iter(trimmed) {
-                let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                let token = raw.trim();
-                if is_claim_file_token(token) {
-                    let norm = token.trim_start_matches("./").to_owned();
-                    if !claimed_files.contains(&norm) {
-                        claimed_files.push(norm);
-                    }
-                } else if is_claim_symbol_token(token) {
-                    let sym = token.to_owned();
-                    if !claimed_symbols.contains(&sym) {
-                        claimed_symbols.push(sym);
+            let Some(text) = f["text"].as_str() else {
+                continue;
+            };
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                let is_done = trimmed.starts_with("- [x]")
+                    || trimmed.starts_with("- [X]")
+                    || trimmed.starts_with("* [x]")
+                    || trimmed.starts_with("* [X]");
+                if !is_done {
+                    continue;
+                }
+                let mut claimed_files = Vec::new();
+                let mut claimed_symbols = Vec::new();
+                for cap in backtick_re.captures_iter(trimmed) {
+                    let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let token = raw.trim();
+                    if is_claim_file_token(token) {
+                        let norm = token.trim_start_matches("./").to_owned();
+                        if !claimed_files.contains(&norm) {
+                            claimed_files.push(norm);
+                        }
+                    } else if is_claim_symbol_token(token) {
+                        let sym = token.to_owned();
+                        if !claimed_symbols.contains(&sym) {
+                            claimed_symbols.push(sym);
+                        }
                     }
                 }
-            }
-            if !claimed_files.is_empty() || !claimed_symbols.is_empty() {
-                out.push(CheckedClaimLine {
-                    doc_path: doc_path.to_owned(),
-                    line_no: idx + 1,
-                    files: claimed_files,
-                    symbols: claimed_symbols,
-                });
+                if !claimed_files.is_empty() || !claimed_symbols.is_empty() {
+                    out.push(CheckedClaimLine {
+                        doc_path: doc_path.to_owned(),
+                        line_no: idx + 1,
+                        files: claimed_files,
+                        symbols: claimed_symbols,
+                    });
+                }
             }
         }
     }
@@ -518,28 +943,45 @@ fn workspace_ir_claim_stamp(
     }
     let mut unique_files = BTreeSet::new();
     for line in claims {
-        unique_files.extend(line.files.iter().cloned());
+        for rel in &line.files {
+            unique_files.insert((line.doc_path.clone(), rel.clone()));
+        }
     }
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let file_stamps: Vec<String> = unique_files
         .into_iter()
-        .map(|rel| {
-            let meta = root
-                .and_then(|r| {
-                    let p = r.join(&rel);
-                    infra_core::fs::admit_descendant(r, &p).ok()?;
-                    std::fs::symlink_metadata(&p).ok()
-                })
-                .filter(|m| !m.file_type().is_symlink() && m.is_file());
-            match meta {
-                Some(m) => {
+        .map(|(doc_path, rel)| {
+            let resolved = root
+                .and_then(|r| resolve_claimed_file_on_disk(r, &doc_path, &rel))
+                .and_then(|(_, p)| {
+                    std::fs::symlink_metadata(&p)
+                        .ok()
+                        .filter(|m| !m.file_type().is_symlink() && m.is_file())
+                        .map(|m| (p, m))
+                });
+            match resolved {
+                Some((p, m)) => {
                     let mtime_ns = m
                         .modified()
                         .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                         .map_or(0, |d| d.as_nanos());
-                    format!("{rel}:1:{}:{mtime_ns}", m.len())
+                    let racy = mtime_ns == 0 || now_ns.saturating_sub(mtime_ns) < SDD_RACY_NS;
+                    if racy && m.len() <= 512 * 1024 {
+                        let content_sha = std::fs::read(&p)
+                            .ok()
+                            .map(|b| store::sha(&b))
+                            .unwrap_or_else(|| "unreadable".into());
+                        format!("{doc_path}::{rel}:1:{}:{mtime_ns}:{content_sha}", m.len())
+                    } else if racy {
+                        format!("{doc_path}::{rel}:racy:{now_ns}")
+                    } else {
+                        format!("{doc_path}::{rel}:1:{}:{mtime_ns}", m.len())
+                    }
                 }
-                None => format!("{rel}:0"),
+                None => format!("{doc_path}::{rel}:0"),
             }
         })
         .collect();
@@ -560,7 +1002,7 @@ fn workspace_ir_claim_stamp(
     )
 }
 
-fn verify_checked_claims(
+pub(crate) fn verify_checked_claims(
     root: Option<&Path>,
     ir: Option<&crate::graph_ir::GraphIrStore>,
     claims: &[CheckedClaimLine],
@@ -586,15 +1028,22 @@ fn verify_checked_claims(
     for claim in claims {
         let mut verified_files: Vec<(String, bool)> = Vec::new();
         for rel in &claim.files {
-            let on_disk = root.is_some_and(|r| {
-                let candidate = r.join(rel);
-                infra_core::fs::admit_descendant(r, &candidate).is_ok()
-                    && std::fs::symlink_metadata(&candidate)
-                        .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
-            });
-            let in_ir = check_file_in_ir(rel);
+            let resolved_disk =
+                root.and_then(|r| resolve_claimed_file_on_disk(r, &claim.doc_path, rel));
+            let on_disk = resolved_disk.is_some();
+            let resolved_rel = resolved_disk
+                .as_ref()
+                .map(|(norm_rel, _)| norm_rel.as_str())
+                .unwrap_or(rel.as_str());
+            let in_ir =
+                check_file_in_ir(rel) || (resolved_rel != rel && check_file_in_ir(resolved_rel));
             if on_disk || in_ir {
-                verified_files.push((rel.clone(), in_ir));
+                let effective_rel = if check_file_in_ir(rel) || resolved_disk.is_none() {
+                    rel.clone()
+                } else {
+                    resolved_rel.to_owned()
+                };
+                verified_files.push((effective_rel, in_ir));
             } else {
                 violations.push(Violation {
                     code: "SDD_CLAIMED_FILE_MISSING".into(),
@@ -624,6 +1073,14 @@ fn verify_checked_claims(
             .collect();
 
         for sym in &claim.symbols {
+            if sym.contains('.')
+                && !sym.contains("::")
+                && root.is_some_and(|r| {
+                    resolve_claimed_file_on_disk(r, &claim.doc_path, sym).is_some()
+                })
+            {
+                continue;
+            }
             if let Some(store) = ir
                 && ir_has_symbols
             {
@@ -670,7 +1127,8 @@ fn verify_checked_claims(
             {
                 let (owner, member) = sym
                     .rsplit_once("::")
-                    .map(|(o, m)| (o.rsplit('\\').next().unwrap_or(o), m))
+                    .or_else(|| sym.rsplit_once('.'))
+                    .map(|(o, m)| (o.rsplit(['\\', '.']).next().unwrap_or(o), m))
                     .unwrap_or(("", sym.as_str()));
                 let found_on_disk = disk_targets.iter().any(|rel| {
                     infra_core::fs::read_regular(&r.join(rel))
@@ -1201,7 +1659,7 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
-                 VALUES(?1,'SDD Bus',?2,?3,'claude','plan','sdd',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+                 VALUES(?1,'SDD Bus',?2,?3,'claude','plan','sdd',0,'running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
                 rusqlite::params![
                     sid,
                     pid,
@@ -1243,5 +1701,325 @@ mod tests {
             }
         }
         assert!(saw_stale, "expected sdd_staleness SSE event");
+    }
+
+    #[test]
+    fn claim_token_parsers_support_root_files_multi_lang_exts_dot_and_bare_symbols() {
+        for file_tok in [
+            "Cargo.toml",
+            "README.md",
+            "Dockerfile",
+            "Makefile",
+            "src/App.java",
+            "src/Main.kt",
+            "Order.cs",
+            "lib/worker.rb",
+            "Sources/App.swift",
+            "src/mod.mts",
+            "config.cjs",
+            "spec.md",
+            "styles.css",
+            "index.html",
+            "schema.graphql",
+            "user.proto",
+            "Cargo.lock",
+            "go.sum",
+        ] {
+            assert!(
+                is_claim_file_token(file_tok),
+                "expected file token: {file_tok}"
+            );
+            assert!(
+                !is_claim_symbol_token(file_tok),
+                "file token must not classify as symbol: {file_tok}"
+            );
+        }
+        assert!(!is_claim_file_token(".rs"));
+        assert!(!is_claim_file_token("src/.rs"));
+        assert!(!is_claim_file_token("../escape.rs"));
+
+        for sym_tok in [
+            "TokenService::issue",
+            r"App\Auth\Guard::check",
+            "UserService.create",
+            "pkg.AuthService.verify",
+            "TokenService",
+            "create_token",
+            "handler",
+        ] {
+            assert!(
+                is_claim_symbol_token(sym_tok),
+                "expected symbol token: {sym_tok}"
+            );
+        }
+
+        for non_sym in [
+            "T001",
+            "t42",
+            "FR-001",
+            "GET",
+            "POST",
+            "true",
+            "null",
+            "id",
+            ".rs",
+            "completed",
+            "ir_delta",
+            "styles.css",
+            "index.html",
+            "schema.graphql",
+            "Cargo.lock",
+        ] {
+            assert!(
+                !is_claim_symbol_token(non_sym),
+                "unexpected symbol match: {non_sym}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_checked_claims_checks_root_filenames_new_exts_dot_and_bare_symbols_with_ir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM rust:1.80\n").unwrap();
+        std::fs::write(
+            root.join("app.mts"),
+            "export class UserService {\n  create() { return true; }\n}\nexport function create_token() { return 'ok'; }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/App.java"), "class App { void run() {} }\n").unwrap();
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state, "sdd-claims-ext").unwrap();
+        ir.sync_workspace(&root).unwrap();
+        drop(ir);
+
+        let files = vec![
+            json!({"path": "specs/001-ext/spec.md", "available": true, "text": "# Spec\n- FR-001: Multi-lang\n"}),
+            json!({"path": "specs/001-ext/plan.md", "available": true, "text": "# Plan\nCovers FR-001\n"}),
+            json!({
+                "path": "specs/001-ext/tasks.md",
+                "available": true,
+                "text": "- [x] T001 Containerized with `Dockerfile`, `app.mts`, `src/App.java`, `UserService.create`, and `create_token` (`T001`, `true`, `GET`)\n"
+            }),
+            json!({"path": "specs/001-ext/progress.md", "available": true, "text": "- [x] T001 Done\n"}),
+        ];
+        let valid = validate_dataflow_diagnostics_in(
+            Some(&root),
+            Some((&state, "sdd-claims-ext")),
+            &files,
+            "review",
+            3,
+        );
+        assert!(
+            valid.is_empty(),
+            "expected valid multi-lang claims: {valid:?}"
+        );
+
+        let bogus_files = vec![
+            json!({"path": "specs/001-ext/spec.md", "available": true, "text": "# Spec\n- FR-001: Multi-lang\n"}),
+            json!({"path": "specs/001-ext/plan.md", "available": true, "text": "# Plan\nCovers FR-001\n"}),
+            json!({
+                "path": "specs/001-ext/tasks.md",
+                "available": true,
+                "text": "- [x] T001 Missing `Order.cs` and `UserService.nonexistent` and `GhostHelper` in `app.mts`\n"
+            }),
+            json!({"path": "specs/001-ext/progress.md", "available": true, "text": "- [x] T001 Done\n"}),
+        ];
+        let violations = validate_dataflow_diagnostics_in(
+            Some(&root),
+            Some((&state, "sdd-claims-ext")),
+            &bogus_files,
+            "review",
+            3,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.code == "SDD_CLAIMED_FILE_MISSING" && v.message.contains("Order.cs"))
+        );
+        assert!(violations.iter().any(|v| {
+            v.code == "SDD_CLAIMED_SYMBOL_MISSING" && v.message.contains("UserService.nonexistent")
+        }));
+        assert!(violations.iter().any(|v| {
+            v.code == "SDD_CLAIMED_SYMBOL_MISSING" && v.message.contains("GhostHelper")
+        }));
+    }
+
+    #[test]
+    fn on_ir_paths_updated_ignores_completed_and_cancelled_sessions_without_crowding_out_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("specs/003-active")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(root.join("src/auth.rs"), "pub struct TokenService;\n").unwrap();
+        std::fs::write(
+            root.join("specs/003-active/spec.md"),
+            "# Spec\n- FR-001: Active\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("specs/003-active/plan.md"), "# Plan\nFR-001\n").unwrap();
+        std::fs::write(
+            root.join("specs/003-active/tasks.md"),
+            "- [x] T001 Claim `TokenService` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("specs/003-active/progress.md"),
+            "- [x] T001 Done\n",
+        )
+        .unwrap();
+
+        let store = crate::store::SessionStore::open(&state).unwrap();
+        let proj = store.register(&root).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&state, &pid).unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let conn = store.connection().unwrap();
+        // Insert an older active session plus 40 newer completed/cancelled sessions so LIMIT 32
+        // only preserves the active one if completed/cancelled rows are filtered out in SQL.
+        conn.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
+             VALUES(?1,'Active SDD',?2,?3,'claude','plan','sdd',0,'waiting','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+            rusqlite::params![
+                store::id(),
+                pid,
+                root.to_string_lossy().as_ref(),
+                json!({"feature": "003-active", "phase": "review"}).to_string(),
+            ],
+        )
+        .unwrap();
+        for idx in 0..40 {
+            let status = if idx % 2 == 0 {
+                "completed"
+            } else {
+                "cancelled"
+            };
+            conn.execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
+                 VALUES(?1,'Archived SDD',?2,?3,'claude','plan','sdd',0,?4,'2026-02-01T00:00:00Z',?5,?6)",
+                rusqlite::params![
+                    store::id(),
+                    pid,
+                    root.to_string_lossy().as_ref(),
+                    status,
+                    format!("2026-02-01T00:{:02}:00Z", idx % 60),
+                    json!({"feature": "003-active", "phase": "review"}).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        std::fs::write(root.join("src/auth.rs"), "pub struct ReplacedService;\n").unwrap();
+        let delta = ir
+            .update_paths_with_delta(&root, &["src/auth.rs".to_owned()])
+            .unwrap();
+        assert_eq!(
+            on_ir_paths_updated(&store, &pid, &root, &delta),
+            1,
+            "only active/waiting session must be evaluated and emit"
+        );
+    }
+
+    #[test]
+    fn dataflow_cache_persists_in_sqlite_keyed_by_ir_revision_and_spec_sha256() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("specs/004-sqlite")).unwrap();
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "pub struct TokenService;\nimpl TokenService {\n    pub fn issue(&self) {}\n}\n",
+        )
+        .unwrap();
+        let files = vec![
+            json!({"path": "specs/004-sqlite/spec.md", "available": true, "text": "# Spec\n- FR-001: Persist\n"}),
+            json!({"path": "specs/004-sqlite/plan.md", "available": true, "text": "# Plan\nCovers FR-001.\n"}),
+            json!({"path": "specs/004-sqlite/tasks.md", "available": true, "text": "- [x] T001 Wire `TokenService::issue` in `src/auth.rs`\n"}),
+            json!({"path": "specs/004-sqlite/progress.md", "available": true, "text": "- [x] T001 Done\n"}),
+        ];
+
+        let pid = "sdd-sqlite-persist";
+        let ir = crate::graph_ir::GraphIrStore::open(&state, pid).unwrap();
+        ir.sync_workspace(&root).unwrap();
+        let rev1 = ir.current_write_epoch();
+        assert!(rev1 > 0);
+
+        let first =
+            validate_dataflow_diagnostics_in(Some(&root), Some((&state, pid)), &files, "review", 3);
+        assert!(first.is_empty(), "{first:?}");
+
+        // Verify persisted in SQLite keyed by (ir_revision, spec_sha256).
+        let conn = open_sdd_cache_db(&state).unwrap();
+        let count_rev1: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sdd_dataflow_cache WHERE project_id = ?1 AND ir_revision = ?2",
+                params![pid, i64::try_from(rev1).unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_rev1, 1);
+
+        // Evict ONLY this project's L1 cache entries (simulating process restart) and verify SQLite hit.
+        {
+            let mut guard = dataflow_cache().lock().unwrap();
+            guard.retain(|_, entry| entry.project_key.as_deref() != Some(pid));
+        }
+        let persisted =
+            validate_dataflow_diagnostics_in(Some(&root), Some((&state, pid)), &files, "review", 3);
+        assert!(persisted.is_empty(), "{persisted:?}");
+        // L1 should have been re-hydrated from SQLite without adding duplicate rows.
+        assert!(
+            dataflow_cache()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|((rev, _), e)| *rev == rev1 && e.project_key.as_deref() == Some(pid))
+        );
+
+        // Advance IR revision (drop symbol) -> misses old rev1 key, computes violation, persists under rev2.
+        std::fs::write(root.join("src/auth.rs"), "pub struct TokenService;\n").unwrap();
+        let delta = ir
+            .update_paths_with_delta(&root, &["src/auth.rs".to_owned()])
+            .unwrap();
+        let rev2 = ir.current_write_epoch();
+        assert!(rev2 > rev1);
+        let after_ir_change =
+            validate_dataflow_diagnostics_in(Some(&root), Some((&state, pid)), &files, "review", 3);
+        assert!(
+            after_ir_change
+                .iter()
+                .any(|v| v.code == "SDD_CLAIMED_SYMBOL_MISSING"),
+            "{after_ir_change:?}"
+        );
+        let count_rev2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sdd_dataflow_cache WHERE project_id = ?1 AND ir_revision = ?2",
+                params![pid, i64::try_from(rev2).unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_rev2, 1);
+
+        // Calling on_ir_paths_updated prunes persisted rows matching project/touched path.
+        let store = crate::store::SessionStore::open(&state).unwrap();
+        let mut bus_delta = delta;
+        bus_delta.ir_revision = rev2.saturating_add(1);
+        on_ir_paths_updated(&store, pid, &root, &bus_delta);
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sdd_dataflow_cache WHERE project_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }

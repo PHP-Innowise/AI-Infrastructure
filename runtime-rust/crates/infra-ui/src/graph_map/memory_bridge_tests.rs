@@ -429,10 +429,18 @@ fn side_only_click_actions_skip_canvas_rerender_and_selection_patch_preserves_st
 
 #[test]
 fn large_and_dense_scale_thresholds_elide_details_and_cull_viewport() {
+    assert_eq!(LARGE_GRAPH_NODE_THRESHOLD, 24);
+    assert_eq!(LARGE_GRAPH_EDGE_THRESHOLD, 60);
+    assert_eq!(DENSE_GRAPH_NODE_THRESHOLD, 32);
+    assert_eq!(DENSE_GRAPH_EDGE_THRESHOLD, 80);
     assert_eq!(graph_scale_tier(10, 20), GraphScaleTier::Normal);
     assert_eq!(
         graph_scale_tier(LARGE_GRAPH_NODE_THRESHOLD, 10),
         GraphScaleTier::Large
+    );
+    assert_eq!(
+        graph_scale_tier(DENSE_GRAPH_NODE_THRESHOLD, 10),
+        GraphScaleTier::Dense
     );
     assert_eq!(
         graph_scale_tier(10, DENSE_GRAPH_EDGE_THRESHOLD),
@@ -441,14 +449,14 @@ fn large_and_dense_scale_thresholds_elide_details_and_cull_viewport() {
 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    for i in 0..85usize {
+    for i in 0..30usize {
         nodes.push(json!({
             "path": format!("src/File{i}.php"),
             "name": format!("File{i}.php"),
             "out": 1,
             "in": 1
         }));
-        if i + 1 < 85 {
+        if i + 1 < 30 {
             edges.push(json!({
                 "from": format!("src/File{i}.php"),
                 "to": format!("src/File{}.php", i + 1),
@@ -463,6 +471,23 @@ fn large_and_dense_scale_thresholds_elide_details_and_cull_viewport() {
     let rendered = canvas_with_overlays(&view, "graph-map", CanvasOverlayContext::default());
     assert!(rendered.html.contains("data-scale-tier=\"large\""));
     assert!(!rendered.html.contains("graph-map-edge-chevron"));
+
+    // >= 32 nodes (including default 40-node paginated File/Symbol views) enters Dense mode with Canvas2D scene and lazy DOM html slots.
+    let mut dense_nodes = Vec::new();
+    for i in 0..40usize {
+        dense_nodes.push(json!({
+            "path": format!("src/Dense{i}.php"),
+            "name": format!("Dense{i}.php"),
+            "out": 1,
+            "in": 1
+        }));
+    }
+    let dense_view = json!({ "nodes": dense_nodes, "edges": [] });
+    let dense_rendered =
+        canvas_with_overlays(&dense_view, "graph-map", CanvasOverlayContext::default());
+    assert!(dense_rendered.html.contains("data-scale-tier=\"dense\""));
+    assert!(dense_rendered.dense_scene.is_some());
+    assert!(dense_rendered.dense_node_htmls.iter().all(|h| h.is_empty()));
 
     let bounds = visible_viewport_bounds((0.0, 0.0), 1.0, (400.0, 300.0), 20.0).unwrap();
     let visible = count_nodes_in_viewport(&rendered.plan_nodes, bounds);

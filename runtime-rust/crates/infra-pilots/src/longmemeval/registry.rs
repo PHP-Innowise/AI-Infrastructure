@@ -27,6 +27,9 @@ impl<T: NativeRuntime + ?Sized> NativeRuntime for Box<T> {
     ) -> Result<super::projection::NativeResponse> {
         (**self).refresh_and_render(r, q)
     }
+    fn close(&mut self) -> Result<()> {
+        (**self).close()
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

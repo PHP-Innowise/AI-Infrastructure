@@ -11,6 +11,35 @@ pub(super) fn results_relevant() -> bool {
         })
 }
 
+pub(super) fn set_delivery_loading(loading: bool) {
+    for id in ["delivery-section", "delivery-options"] {
+        if let Some(el) = dom::get(id) {
+            if loading {
+                let _ = el.set_attribute("data-loading", "true");
+            } else {
+                let _ = el.remove_attribute("data-loading");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeliveryUpfrontPlan {
+    Clear,
+    KeepWithLoading,
+    Ignore,
+}
+
+pub(super) fn plan_delivery_upfront(sid: &str, result_view: bool) -> DeliveryUpfrontPlan {
+    if sid.trim().is_empty() {
+        DeliveryUpfrontPlan::Clear
+    } else if result_view {
+        DeliveryUpfrontPlan::KeepWithLoading
+    } else {
+        DeliveryUpfrontPlan::Ignore
+    }
+}
+
 pub(super) fn reset_results() {
     dom::cancel_timer("results-poll");
     m::next("results");
@@ -23,6 +52,7 @@ pub(super) fn reset_results() {
         s.diff_view.focused_file.clear();
     });
     invalidate_delivery();
+    set_delivery_loading(false);
     dom::hidden("delivery-options", true);
     dom::clear("delivery-files");
     dom::set_value("delivery-message", "");
@@ -168,18 +198,245 @@ pub(super) fn render_results_files_into(container_id: &str, scope_id: &str, file
     }
 }
 
+pub(super) fn launch_metric_summary(launch: &V) -> String {
+    let settings = &launch["settings"];
+    let usage = &launch["usage"];
+    let mut parts = Vec::new();
+    let provider = m::text(settings, "provider");
+    let model = m::text(settings, "model");
+    let kind = m::text(launch, "kind");
+    let status = m::text(launch, "status");
+    if !provider.is_empty() && !model.is_empty() {
+        parts.push(format!("{provider} ({model})"));
+    } else if !provider.is_empty() {
+        parts.push(provider);
+    } else if !model.is_empty() {
+        parts.push(model);
+    }
+    if !kind.is_empty() {
+        parts.push(kind);
+    }
+    if !status.is_empty() {
+        parts.push(status);
+    }
+    if let Some(tokens) = usage["tokens"].as_u64() {
+        parts.push(format!("{tokens} tokens"));
+    }
+    if let Some(cost) = usage["cost_usd"]
+        .as_f64()
+        .filter(|c| c.is_finite() && *c >= 0.0)
+    {
+        parts.push(format!("${cost:.4}"));
+    }
+    if let Some(secs) = usage["seconds"]
+        .as_f64()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+    {
+        parts.push(format!("{secs:.2}s"));
+    }
+    if parts.is_empty() {
+        let id = m::text(launch, "id");
+        if id.is_empty() {
+            "Launch".into()
+        } else {
+            id
+        }
+    } else {
+        parts.join(" · ")
+    }
+}
+
+pub(super) fn render_launch_metrics_html(launch: &V) -> String {
+    let settings = &launch["settings"];
+    let usage = &launch["usage"];
+    let context = &launch["context"];
+    let receipt = &launch["receipt"];
+    let mut rows = String::new();
+    let push_row = |buf: &mut String, label: &str, value: &str| {
+        if !value.trim().is_empty() {
+            buf.push_str(&format!(
+                "<dt>{}</dt><dd>{}</dd>",
+                dom::escape_html(label),
+                dom::escape_html(value.trim())
+            ));
+        }
+    };
+
+    let id = m::text(launch, "id");
+    let kind = m::text(launch, "kind");
+    let status = m::text(launch, "status");
+    let mut run_bits = Vec::new();
+    if !id.is_empty() {
+        run_bits.push(id);
+    }
+    if !kind.is_empty() {
+        run_bits.push(kind);
+    }
+    if !status.is_empty() {
+        run_bits.push(status);
+    }
+    push_row(&mut rows, "Launch", &run_bits.join(" · "));
+
+    let mut cfg_bits = Vec::new();
+    for field in [
+        "provider",
+        "workflow",
+        "model",
+        "mode",
+        "permissions",
+        "thinking_effort",
+    ] {
+        let v = m::text(settings, field);
+        if !v.is_empty() {
+            cfg_bits.push(if field == "thinking_effort" {
+                format!("effort {v}")
+            } else {
+                v
+            });
+        }
+    }
+    push_row(&mut rows, "Configuration", &cfg_bits.join(" · "));
+
+    let started = m::text(launch, "started_at");
+    let finished = m::text(launch, "finished_at");
+    let secs = usage["seconds"]
+        .as_f64()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(|s| format!("{s:.2}s"));
+    let timing = match (started.as_str(), finished.as_str(), secs.as_deref()) {
+        ("", "", Some(s)) => s.to_owned(),
+        (a, "", Some(s)) => format!("{a} ({s})"),
+        (a, b, Some(s)) if !a.is_empty() && !b.is_empty() => format!("{a} → {b} ({s})"),
+        (a, b, None) if !a.is_empty() && !b.is_empty() => format!("{a} → {b}"),
+        (a, "", None) if !a.is_empty() => a.to_owned(),
+        ("", b, _) if !b.is_empty() => b.to_owned(),
+        _ => String::new(),
+    };
+    push_row(&mut rows, "Timing", &timing);
+
+    let mut token_bits = Vec::new();
+    if let Some(total) = usage["tokens"].as_u64() {
+        token_bits.push(format!("{total} total"));
+    }
+    for (field, label) in [
+        ("input_tokens", "in"),
+        ("output_tokens", "out"),
+        ("cache_read_input_tokens", "cache read"),
+        ("cache_creation_input_tokens", "cache write"),
+    ] {
+        if let Some(n) = usage[field].as_u64() {
+            token_bits.push(format!("{n} {label}"));
+        }
+    }
+    push_row(&mut rows, "Tokens", &token_bits.join(" · "));
+
+    if let Some(cost) = usage["cost_usd"]
+        .as_f64()
+        .filter(|c| c.is_finite() && *c >= 0.0)
+    {
+        push_row(&mut rows, "Cost", &format!("${cost:.4}"));
+    }
+
+    if let Some(ctx_obj) = context.as_object() {
+        let mut ctx_bits = Vec::new();
+        for (k, v) in ctx_obj {
+            if let Some(n) = v.as_u64() {
+                ctx_bits.push(format!("{}: {n}", m::label(k)));
+            } else if let Some(n) = v.as_f64().filter(|n| n.is_finite()) {
+                ctx_bits.push(format!("{}: {n:.1}", m::label(k)));
+            } else if let Some(s) = v.as_str().filter(|s| !s.is_empty()) {
+                ctx_bits.push(format!("{}: {s}", m::label(k)));
+            }
+        }
+        push_row(&mut rows, "Context", &ctx_bits.join(" · "));
+    }
+
+    let sc = &settings["skillcache"];
+    if sc.is_object() {
+        let mut sc_bits = Vec::new();
+        for (field, prefix) in [
+            ("decision", ""),
+            ("mode", "mode "),
+            ("reason", "reason "),
+            ("capsule_id", "capsule "),
+        ] {
+            let val = m::text(sc, field);
+            if !val.is_empty() {
+                sc_bits.push(format!("{prefix}{val}"));
+            }
+        }
+        push_row(&mut rows, "SkillCache", &sc_bits.join(" · "));
+    }
+
+    if receipt.is_object() {
+        let mut rec_bits = Vec::new();
+        for field in ["outcome", "stop_reason", "stopped", "reason", "error"] {
+            let val = m::text(receipt, field);
+            if !val.is_empty() {
+                rec_bits.push(format!("{}: {val}", m::label(field)));
+            }
+        }
+        push_row(&mut rows, "Receipt", &rec_bits.join(" · "));
+    }
+
+    format!("<dl class=\"skill-capsule-facts-grid\">{rows}</dl>")
+}
+
+fn render_results_launches(launches: &[V]) {
+    let keyed: Vec<V> = launches
+        .iter()
+        .enumerate()
+        .map(|(index, launch)| {
+            let id = m::text(launch, "id");
+            let status = m::text(launch, "status");
+            let usage_sig = format!(
+                "{}:{}:{}",
+                launch["usage"]["tokens"].as_u64().unwrap_or(0),
+                launch["usage"]["cost_usd"].as_f64().unwrap_or(0.0),
+                launch["usage"]["seconds"].as_f64().unwrap_or(0.0)
+            );
+            json!({
+                "key": format!("{index}:{id}:{status}:{usage_sig}"),
+                "launch": launch,
+            })
+        })
+        .collect();
+    dom::keyed_render(
+        "results-launches",
+        &keyed,
+        |item| m::text(item, "key"),
+        |item| {
+            let launch = &item["launch"];
+            let d = dom::el("details", "setup-file launch-metric-row", "");
+            dom::add(&d, &dom::el("summary", "", &launch_metric_summary(launch)));
+            let body = dom::el("div", "launch-metrics-body", "");
+            body.set_inner_html(&render_launch_metrics_html(launch));
+            dom::add(&d, &body);
+            d
+        },
+    );
+}
+
 pub async fn results() {
     dom::cancel_timer("results-poll");
     if !results_relevant() {
         return;
     }
-    if result_view() {
-        m::take("delivery");
-        invalidate_delivery();
-        dom::hidden("delivery-options", true);
-        result_controls();
-    }
     let sid = m::read(|s| s.sid.clone());
+    match plan_delivery_upfront(&sid, result_view()) {
+        DeliveryUpfrontPlan::Clear => {
+            m::take("delivery");
+            invalidate_delivery();
+            set_delivery_loading(false);
+            dom::hidden("delivery-options", true);
+            result_controls();
+        }
+        DeliveryUpfrontPlan::KeepWithLoading => {
+            set_delivery_loading(true);
+            result_controls();
+        }
+        DeliveryUpfrontPlan::Ignore => {}
+    }
     if sid.is_empty() {
         dom::error("results-error", "Choose a session first.");
         set_workspace_note_error(
@@ -431,7 +688,7 @@ pub async fn results() {
                 }
             }
             if view == "usage" {
-                dom::rows("results-launches", &m::array(&v["launches"]));
+                render_results_launches(&m::array(&v["launches"]));
                 knowledge::usage(&v);
                 crate::skillcache::render_usage(&m::array(&v["launches"]));
             }
@@ -441,6 +698,8 @@ pub async fn results() {
                     return;
                 }
                 sync_results_memory_prefill(&sid);
+            } else {
+                set_delivery_loading(false);
             }
             if result_view() {
                 result_controls();
@@ -461,6 +720,7 @@ pub async fn results() {
         }
         Ok(_) => {}
         Err(e) if !e.aborted && m::read(|s| s.sid == sid) && results_relevant() => {
+            set_delivery_loading(false);
             dom::error("results-error", &e.message);
             set_workspace_note_error("workspace-diff-note", &e.message, true);
             set_workspace_note_error("workspace-checks-status", &e.message, true);
@@ -621,49 +881,59 @@ pub(super) fn result_controls() {
 }
 pub(super) async fn delivery_load(sid: &str) {
     let key = "delivery";
+    set_delivery_loading(true);
     let response = api::scoped(key, &format!("/api/sessions/{}/delivery", dom::enc(sid))).await;
-    if let Ok((epoch, v)) = response {
-        if !m::current(key, epoch) || !m::read(|s| s.sid == sid) || !result_view() {
-            return;
-        }
-        m::set("delivery", v.clone());
-        dom::hidden(
-            "delivery-options",
-            !m::yes(&v["available"]) && !v["preview"].is_object(),
-        );
-        dom::text(
-            "delivery-availability",
-            v["notice"]
-                .as_str()
-                .or_else(|| v["reason"].as_str())
-                .unwrap_or(""),
-        );
-        dom::clear("delivery-files");
-        for file in m::array(&v["files"]) {
-            dom::append(
-                "delivery-files",
-                &dom::check(
-                    &format!("{} · {}", m::text(&file, "path"), m::text(&file, "status")),
-                    "delivery-file",
-                    &m::text(&file, "path"),
-                    false,
-                ),
+    match response {
+        Ok((epoch, v)) => {
+            if !m::current(key, epoch) || !m::read(|s| s.sid == sid) || !result_view() {
+                return;
+            }
+            set_delivery_loading(false);
+            m::set("delivery", v.clone());
+            dom::hidden(
+                "delivery-options",
+                !m::yes(&v["available"]) && !v["preview"].is_object(),
             );
+            dom::text(
+                "delivery-availability",
+                v["notice"]
+                    .as_str()
+                    .or_else(|| v["reason"].as_str())
+                    .unwrap_or(""),
+            );
+            dom::clear("delivery-files");
+            for file in m::array(&v["files"]) {
+                dom::append(
+                    "delivery-files",
+                    &dom::check(
+                        &format!("{} · {}", m::text(&file, "path"), m::text(&file, "status")),
+                        "delivery-file",
+                        &m::text(&file, "path"),
+                        false,
+                    ),
+                );
+            }
+            let mut commits = vec![json!({"id":"","name":"Choose a commit"})];
+            commits.extend(m::array(&v["commits"]).into_iter().map(|x|json!({"id":x["sha"],"name":format!("{} · {}",m::text(&x,"sha"),m::text(&x,"subject"))})));
+            dom::options("delivery-source", &commits, m::summary, None);
+            let mut branches = vec![json!({"id":"","name":"Choose a local branch"})];
+            branches.extend(
+                m::array(&v["branches"])
+                    .into_iter()
+                    .map(|x| json!({"id":x["name"],"name":x["name"]})),
+            );
+            dom::options("delivery-target", &branches, m::summary, None);
+            if v["preview"].is_object() {
+                render_delivery(&v["preview"]);
+            } else {
+                clear_delivery_preview();
+            }
+            result_controls();
         }
-        let mut commits = vec![json!({"id":"","name":"Choose a commit"})];
-        commits.extend(m::array(&v["commits"]).into_iter().map(|x|json!({"id":x["sha"],"name":format!("{} · {}",m::text(&x,"sha"),m::text(&x,"subject"))})));
-        dom::options("delivery-source", &commits, m::summary, None);
-        let mut branches = vec![json!({"id":"","name":"Choose a local branch"})];
-        branches.extend(
-            m::array(&v["branches"])
-                .into_iter()
-                .map(|x| json!({"id":x["name"],"name":x["name"]})),
-        );
-        dom::options("delivery-target", &branches, m::summary, None);
-        if v["preview"].is_object() {
-            render_delivery(&v["preview"]);
+        Err(e) if !e.aborted && m::read(|s| s.sid == sid) => {
+            set_delivery_loading(false);
         }
-        result_controls();
+        Err(_) => {}
     }
 }
 pub(super) fn render_delivery(v: &V) {
@@ -722,8 +992,7 @@ pub(super) fn render_delivery(v: &V) {
         &m::text(&v["target_check"], "output"),
     );
 }
-pub(super) fn invalidate_delivery() {
-    m::next("delivery");
+pub(super) fn clear_delivery_preview() {
     m::take("delivery-preview");
     dom::hidden("delivery-preview", true);
     dom::hidden("delivery-commit-preview", true);
@@ -733,6 +1002,10 @@ pub(super) fn invalidate_delivery() {
     }
     dom::disabled("delivery-commit", true);
     dom::disabled("delivery-apply", true);
+}
+pub(super) fn invalidate_delivery() {
+    m::next("delivery");
+    clear_delivery_preview();
 }
 pub(super) async fn delivery(action: &str, body: V) {
     let sid = m::read(|s| s.sid.clone());
@@ -1059,5 +1332,27 @@ pub(crate) fn localize_failure_on_map(request: &V) {
     }
     for handler in handlers {
         handler(request);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_refresh_plan_is_non_destructive_for_active_session_result_views() {
+        assert_eq!(
+            plan_delivery_upfront("sess-1", true),
+            DeliveryUpfrontPlan::KeepWithLoading
+        );
+        assert_eq!(
+            plan_delivery_upfront("sess-1", false),
+            DeliveryUpfrontPlan::Ignore
+        );
+        assert_eq!(plan_delivery_upfront("", true), DeliveryUpfrontPlan::Clear);
+        assert_eq!(
+            plan_delivery_upfront("   ", false),
+            DeliveryUpfrontPlan::Clear
+        );
     }
 }

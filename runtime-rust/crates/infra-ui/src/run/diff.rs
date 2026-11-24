@@ -192,23 +192,124 @@ pub(crate) fn render_diff_preview_lines_html(diff: &str) -> String {
     out
 }
 
+fn unescape_git_c_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(after_open) = trimmed.strip_prefix('"') {
+        let bytes = after_open.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => break,
+                b'\\' if i + 1 < bytes.len() => {
+                    i += 1;
+                    match bytes[i] {
+                        b'\\' => out.push(b'\\'),
+                        b'"' => out.push(b'"'),
+                        b't' => out.push(b'\t'),
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b'a' => out.push(0x07),
+                        b'b' => out.push(0x08),
+                        b'f' => out.push(0x0c),
+                        b'v' => out.push(0x0b),
+                        d @ b'0'..=b'7' => {
+                            let mut val = (d - b'0') as u16;
+                            for _ in 0..2 {
+                                if i + 1 < bytes.len() && (b'0'..=b'7').contains(&bytes[i + 1]) {
+                                    i += 1;
+                                    val = val * 8 + (bytes[i] - b'0') as u16;
+                                } else {
+                                    break;
+                                }
+                            }
+                            out.push((val & 0xff) as u8);
+                        }
+                        other => out.push(other),
+                    }
+                }
+                b => out.push(b),
+            }
+            i += 1;
+        }
+        return String::from_utf8_lossy(&out).into_owned();
+    }
+    trimmed
+        .split('\t')
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_owned()
+}
+
 fn strip_diff_prefix(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('"');
-    let without_tab = trimmed.split('\t').next().unwrap_or(trimmed).trim();
-    if without_tab == "/dev/null" {
+    let clean_path = unescape_git_c_path(raw);
+    if clean_path == "/dev/null" {
         return String::new();
     }
-    without_tab
+    clean_path
         .strip_prefix("a/")
-        .or_else(|| without_tab.strip_prefix("b/"))
-        .unwrap_or(without_tab)
+        .or_else(|| clean_path.strip_prefix("b/"))
+        .unwrap_or(&clean_path)
         .to_owned()
+}
+
+fn scan_quoted_git_token(s: &str) -> Option<(&str, &str)> {
+    let bytes = s.as_bytes();
+    if bytes.first().copied() != Some(b'"') {
+        return None;
+    }
+    let mut i = 1usize;
+    let mut escaped = false;
+    while i < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[i] == b'\\' {
+            escaped = true;
+        } else if bytes[i] == b'"' {
+            return Some((&s[..=i], s[i + 1..].trim_start()));
+        }
+        i += 1;
+    }
+    None
 }
 
 fn parse_git_header_paths(header: &str) -> (String, String) {
     let rest = header.trim_start_matches("diff --git ").trim();
-    if let Some((left, right)) = rest.split_once(" b/") {
-        return (strip_diff_prefix(left), strip_diff_prefix(right));
+    if rest.starts_with('"') {
+        if let Some((lhs, after_lhs)) = scan_quoted_git_token(rest) {
+            let rhs = if after_lhs.starts_with('"') {
+                scan_quoted_git_token(after_lhs).map_or(after_lhs, |(tok, _)| tok)
+            } else {
+                after_lhs
+            };
+            return (strip_diff_prefix(lhs), strip_diff_prefix(rhs));
+        }
+    }
+    let mut first_split: Option<(String, String)> = None;
+    for (idx, _) in rest.match_indices(" b/") {
+        let left = &rest[..idx];
+        let right = &rest[idx + 1..];
+        let old = strip_diff_prefix(left);
+        let new = strip_diff_prefix(right);
+        if !old.is_empty() && old == new {
+            return (old, new);
+        }
+        if first_split.is_none() {
+            first_split = Some((old, new));
+        }
+    }
+    if let Some((idx, _)) = rest.match_indices(" \"b/").next() {
+        let left = &rest[..idx];
+        let right = &rest[idx + 1..];
+        let old = strip_diff_prefix(left);
+        let new = strip_diff_prefix(right);
+        if !old.is_empty() && !new.is_empty() {
+            return (old, new);
+        }
+    }
+    if let Some(pair) = first_split {
+        return pair;
     }
     let mut parts = rest.split_whitespace();
     let old = parts.next().map(strip_diff_prefix).unwrap_or_default();
@@ -313,6 +414,18 @@ pub(crate) fn parse_diff_files(diff: &str) -> Vec<DiffFileSection> {
             status = "added".into();
         } else if line.starts_with("deleted file mode") {
             status = "deleted".into();
+        } else if let Some(after) = line.strip_prefix("rename from ") {
+            status = "renamed".into();
+            let p = unescape_git_c_path(after);
+            if !p.is_empty() {
+                old_path = p;
+            }
+        } else if let Some(after) = line.strip_prefix("rename to ") {
+            status = "renamed".into();
+            let p = unescape_git_c_path(after);
+            if !p.is_empty() {
+                new_path = p;
+            }
         } else if line.starts_with("rename ") {
             status = "renamed".into();
         } else if line.starts_with('+') && !line.starts_with("+++") {
@@ -337,6 +450,7 @@ pub(crate) fn parse_diff_files(diff: &str) -> Vec<DiffFileSection> {
 const DIFF_PREVIEW_MAX_LINES: usize = 250;
 const DIFF_EXPAND_CHUNK_LINES: usize = 300;
 const DIFF_FILE_BATCH_SIZE: usize = 24;
+const DIFF_EXPAND_ALL_BATCH_SIZE: usize = 16;
 const DIFF_AUTO_OPEN_MAX_FILES: usize = 8;
 const DIFF_AUTO_OPEN_MAX_LINES: usize = 400;
 
@@ -358,6 +472,12 @@ struct PendingExpandLines {
     offset: usize,
 }
 
+struct PendingExpandAll {
+    generation: u64,
+    groups: Vec<web_sys::Element>,
+    next_idx: usize,
+}
+
 thread_local! {
     static EXPANDED_DIFF_FILES: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
@@ -370,6 +490,8 @@ thread_local! {
     static PENDING_DIFF_BATCHES: std::cell::RefCell<std::collections::BTreeMap<String, PendingDiffBatch>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     static PENDING_DIFF_EXPANDS: std::cell::RefCell<std::collections::BTreeMap<String, PendingExpandLines>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static PENDING_DIFF_EXPAND_ALL: std::cell::RefCell<std::collections::BTreeMap<String, PendingExpandAll>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
@@ -469,7 +591,65 @@ pub(crate) fn set_diff_file_open(scope_id: &str, path: &str, open: bool) {
     });
 }
 
+pub(crate) fn set_diff_files_open_batch(scope_id: &str, paths: &[String], open: bool) {
+    if paths.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = paths
+        .iter()
+        .filter(|path| !path.is_empty())
+        .map(|path| diff_collapse_key(scope_id, path))
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    EXPANDED_DIFF_FILES.with(|set| {
+        let mut set = set.borrow_mut();
+        for key in &keys {
+            if open {
+                set.insert(key.clone());
+            } else {
+                set.remove(key);
+            }
+        }
+    });
+    m::write(|s| {
+        for key in keys {
+            if open {
+                s.diff_view.collapsed_files.remove(&key);
+            } else {
+                s.diff_view.collapsed_files.insert(key);
+            }
+        }
+    });
+}
+
+fn clear_pending_expand_all(scope_filter: Option<&str>) {
+    let expand_all_scopes: Vec<String> = PENDING_DIFF_EXPAND_ALL.with(|all| {
+        let mut all = all.borrow_mut();
+        let keys: Vec<String> = all
+            .keys()
+            .filter(|scope| scope_filter.is_none_or(|target| *scope == target))
+            .cloned()
+            .collect();
+        for scope in &keys {
+            all.remove(scope);
+        }
+        keys
+    });
+    if let Some(scope) = scope_filter {
+        dom::cancel_frame(&format!("diff-expand-all:{scope}"));
+        let _ = next_diff_generation(&format!("expand-all:{scope}"));
+    } else {
+        for scope in &expand_all_scopes {
+            dom::cancel_frame(&format!("diff-expand-all:{scope}"));
+            let _ = next_diff_generation(&format!("expand-all:{scope}"));
+        }
+    }
+}
+
 pub(crate) fn clear_pending_diff_work(scope_filter: Option<&str>) {
+    clear_pending_expand_all(scope_filter);
     let batch_keys: Vec<String> = PENDING_DIFF_BATCHES.with(|batches| {
         let mut batches = batches.borrow_mut();
         let keys: Vec<String> = batches
@@ -503,6 +683,31 @@ pub(crate) fn clear_pending_diff_work(scope_filter: Option<&str>) {
         dom::cancel_frame(&format!("diff-expand:{key}"));
         let _ = next_diff_generation(&format!("expand:{key}"));
     }
+}
+
+#[cfg(test)]
+pub(crate) fn seed_pending_expand_all_for_test(scope_id: &str) -> u64 {
+    let generation = next_diff_generation(&format!("expand-all:{scope_id}"));
+    PENDING_DIFF_EXPAND_ALL.with(|all| {
+        all.borrow_mut().insert(
+            scope_id.to_owned(),
+            PendingExpandAll {
+                generation,
+                groups: Vec::new(),
+                next_idx: 0,
+            },
+        );
+    });
+    generation
+}
+
+#[cfg(test)]
+pub(crate) fn pending_expand_all_still_valid_for_test(scope_id: &str, generation: u64) -> bool {
+    PENDING_DIFF_EXPAND_ALL.with(|all| {
+        all.borrow()
+            .get(scope_id)
+            .is_some_and(|pending| pending.generation == generation)
+    }) && diff_generation_matches(&format!("expand-all:{scope_id}"), generation)
 }
 
 #[cfg(test)]
@@ -1268,25 +1473,98 @@ pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id:
     schedule_diff_batch(scope_id.to_owned());
 }
 
+fn apply_expand_all_slice(scope_id: &str, groups: &[web_sys::Element]) {
+    let mut opened_paths = Vec::with_capacity(groups.len());
+    for group in groups {
+        if !group.is_connected() {
+            continue;
+        }
+        let path = group.get_attribute("data-diff-file").unwrap_or_default();
+        if path.is_empty() {
+            continue;
+        }
+        opened_paths.push(path);
+        let _ = group.set_attribute("open", "");
+        hydrate_diff_file_group(group);
+    }
+    set_diff_files_open_batch(scope_id, &opened_paths, true);
+}
+
+fn schedule_expand_all_batch(scope_id: String) {
+    let frame_key = format!("diff-expand-all:{scope_id}");
+    dom::schedule_frame(&frame_key, move || {
+        step_expand_all_batch(&scope_id);
+    });
+}
+
+fn step_expand_all_batch(scope_id: &str) {
+    let taken = PENDING_DIFF_EXPAND_ALL.with(|all| {
+        let mut all = all.borrow_mut();
+        let pending = all.get_mut(scope_id)?;
+        if !diff_generation_matches(&format!("expand-all:{scope_id}"), pending.generation) {
+            all.remove(scope_id);
+            return None;
+        }
+        let start = pending.next_idx;
+        let end = diff_next_chunk_end(start, pending.groups.len(), DIFF_EXPAND_ALL_BATCH_SIZE);
+        pending.next_idx = end;
+        let slice = pending.groups[start..end].to_vec();
+        let more = end < pending.groups.len();
+        if !more {
+            all.remove(scope_id);
+        }
+        Some((slice, more))
+    });
+    let Some((slice, more)) = taken else {
+        return;
+    };
+    apply_expand_all_slice(scope_id, &slice);
+    if more {
+        schedule_expand_all_batch(scope_id.to_owned());
+    }
+}
+
 pub(crate) fn toggle_all_diff_groups(scope_id: &str, expand: bool) {
+    clear_pending_expand_all(Some(scope_id));
     flush_pending_diff_batches(scope_id);
     let selector = format!(
         "details.diff-file-group[data-diff-scope=\"{}\"]",
         crate::dom::escape_css_attr_value(scope_id)
     );
-    let groups = dom::all(&selector);
-    for group in &groups {
-        let path = group.get_attribute("data-diff-file").unwrap_or_default();
-        if path.is_empty() {
-            continue;
-        }
-        set_diff_file_open(scope_id, &path, expand);
-        if expand {
-            let _ = group.set_attribute("open", "");
-            hydrate_diff_file_group(group);
-        } else {
+    let groups: Vec<web_sys::Element> = dom::all(&selector)
+        .into_iter()
+        .filter(|g| {
+            !g.get_attribute("data-diff-file")
+                .unwrap_or_default()
+                .is_empty()
+        })
+        .collect();
+    if !expand {
+        let paths: Vec<String> = groups
+            .iter()
+            .map(|g| g.get_attribute("data-diff-file").unwrap_or_default())
+            .collect();
+        set_diff_files_open_batch(scope_id, &paths, false);
+        for group in &groups {
             let _ = group.remove_attribute("open");
         }
+        return;
+    }
+    let first_end = groups.len().min(DIFF_EXPAND_ALL_BATCH_SIZE);
+    apply_expand_all_slice(scope_id, &groups[..first_end]);
+    if groups.len() > first_end {
+        let generation = next_diff_generation(&format!("expand-all:{scope_id}"));
+        PENDING_DIFF_EXPAND_ALL.with(|all| {
+            all.borrow_mut().insert(
+                scope_id.to_owned(),
+                PendingExpandAll {
+                    generation,
+                    groups,
+                    next_idx: first_end,
+                },
+            );
+        });
+        schedule_expand_all_batch(scope_id.to_owned());
     }
 }
 

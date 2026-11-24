@@ -76,7 +76,7 @@ case " $* " in
     while IFS= read -r line; do
       case "$line" in
         *'"request_id":"harness-commands"'*)
-          echo '{{"type":"control_response","response":{{"request_id":"harness-commands","subtype":"success","response":{{"commands":[{{"name":"pdf","description":"Work with PDF files"}}]}}}}}}'
+          echo '{{"type":"control_response","response":{{"request_id":"harness-commands","subtype":"success","response":{{"commands":[{{"name":"pdf","description":"Work with PDF files"}},{{"name":"compact","description":"Compact conversation"}}]}}}}}}'
           exit 0;;
       esac
     done
@@ -108,29 +108,48 @@ esac
     // is the agent that follows the executor's protocol: a test writes that
     // agent as a shell fragment.
     let script = if name == "codex" {
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 dir=$(dirname "$0")
 case " $* " in
   *" app-server "*)
     while IFS= read -r line; do
       case "$line" in
-        *'"method":"initialize"'*) echo '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"fake"}}';;
+        *'"method":"initialize"'*) echo '{{"jsonrpc":"2.0","id":1,"result":{{"userAgent":"fake"}}}}';;
         *'"method":"skills/list"'*) cat "$dir/codex-skills.json";;
       esac
     done
     exit 0;;
 esac
 prompt=$(cat)
-printf '%s\n' "$@" > "$dir/codex-arguments.txt"
-printf '%s' "$prompt" > "$dir/codex-prompt.txt"
-env > "$dir/codex-environment.txt"
-if [ -f "$dir/codex-agent.sh" ]; then
-  . "$dir/codex-agent.sh"
-else
-  cat "$dir/codex-events.jsonl"
-fi
-"#
-        .to_string()
+case "$prompt" in
+  *"You are the SkillCache compiler."*)
+    if [ -r "{project}/invoices/a.txt" ] || ls "{project}" >/dev/null 2>&1; then
+      cat "$dir/compiler-leak.jsonl"
+      exit 0
+    fi
+    case " $* " in
+      *" --output-schema "*) ;;
+      *) exit 2;;
+    esac
+    case " $* " in
+      *" --disallowedTools "*) exit 3;;
+    esac
+    round=$(printf '%s\n' "$prompt" | sed -n 's/^Round: \([0-9]*\).*/\1/p' | head -n 1)
+    cat "$dir/compiler-codex-answer-$round.jsonl";;
+  *)
+    printf '%s\n' "$@" > "$dir/codex-arguments.txt"
+    printf '%s' "$prompt" > "$dir/codex-prompt.txt"
+    env > "$dir/codex-environment.txt"
+    if [ -f "$dir/codex-agent.sh" ]; then
+      . "$dir/codex-agent.sh"
+    else
+      cat "$dir/codex-events.jsonl"
+    fi;;
+esac
+"#,
+            project = root.join("project").display(),
+        )
     } else {
         script
     };
@@ -173,6 +192,7 @@ struct Stand {
     root: PathBuf,
     project_id: String,
     store: SessionStore,
+    sessions: Arc<Sessions>,
     services: Arc<NativeServices>,
     port: u16,
     token: String,
@@ -412,6 +432,7 @@ impl Stand {
             root,
             project_id,
             store,
+            sessions,
             services,
             port,
             token,
@@ -775,7 +796,7 @@ async fn the_option_is_validated_and_can_change_between_turns() {
     for (skillcache, extra) in [
         (json!({"mode": "always"}), json!({})),
         (
-            json!({"mode": "auto", "compiler": {"provider": "codex"}}),
+            json!({"mode": "auto", "compiler": {"provider": "cursor"}}),
             json!({}),
         ),
         (json!("auto"), json!({})),
@@ -961,6 +982,42 @@ impl Stand {
                 "Extract the rows of invoices-2026/",
                 json!({"mode": "observe"}),
                 Some(&writing_agent("claude")),
+            )
+            .await;
+        let generation = self.skillcache_events(&sid)[0]["generation"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (sid, generation)
+    }
+    /// A read-only observed turn with the `pdf` skill (no workspace file writes).
+    async fn observed_readonly(&self, skill_rel: &str) -> (String, String) {
+        let project = self.project();
+        let skill = project.join(skill_rel);
+        let a_txt = project.join("invoices/a.txt");
+        self.script(
+            "claude",
+            &[
+                json!({"type": "system", "subtype": "init", "session_id": "ro-obs-1"}),
+                json!({"type": "assistant", "session_id": "ro-obs-1", "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": skill}},
+                    {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": a_txt}}
+                ]}}),
+                json!({"type": "user", "session_id": "ro-obs-1", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "     1→# PDF\n     2→\n     3→Read invoices/a.txt", "is_error": false},
+                    {"type": "tool_result", "tool_use_id": "t2", "content": "Invoice 1\nTotal: 10.00\n", "is_error": false}
+                ]}}),
+                json!({"type": "assistant", "session_id": "ro-obs-1", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "Invoice 1 total is 10.00."}
+                ]}}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": "Invoice 1 total is 10.00.", "session_id": "ro-obs-1", "total_cost_usd": 0.01}),
+            ],
+        );
+        let sid = self
+            .claude_turn(
+                "Audit invoices in invoices/",
+                json!({"mode": "observe"}),
+                None,
             )
             .await;
         let generation = self.skillcache_events(&sid)[0]["generation"]
@@ -1221,7 +1278,7 @@ async fn an_observed_turn_compiles_into_a_qualified_capsule() {
         .http(
             Method::POST,
             &format!("/api/sessions/{sid}/skillcache/compile"),
-            Some(json!({"generation": generation, "compiler": {"provider": "codex"}})),
+            Some(json!({"generation": generation, "compiler": {"provider": "cursor"}})),
         )
         .await;
     assert_eq!(status, 400);
@@ -2222,21 +2279,24 @@ async fn claude_warm_routing_runs_dollar_and_hint_while_keeping_slash_native() {
         "active"
     );
 
-    // `/pdf` on Claude stays native (observe-only miss, no warm injection).
+    // Non-skill `/compact` on Claude stays native (`native_route`), whereas `/pdf`
+    // resolves the active compiled capsule cleanly while guarding leading `/` from Claude CLI.
     stand.script("claude", &skill_turn(&stand.project()));
-    let native_sid = stand
-        .claude_turn("/pdf invoices/", json!({"mode": "warm_only"}), None)
+    let unknown_sid = stand
+        .claude_turn("/compact", json!({"mode": "warm_only"}), None)
         .await;
-    let events = stand.skillcache_events(&native_sid);
-    assert_eq!(events[0]["phase"], "miss", "{events:?}");
-    assert_eq!(events[0]["reason"], "native_route", "{events:?}");
+    let unknown_events = stand.skillcache_events(&unknown_sid);
+    assert_eq!(unknown_events[0]["phase"], "miss", "{unknown_events:?}");
+    assert_eq!(
+        unknown_events[0]["reason"], "native_route",
+        "{unknown_events:?}"
+    );
     assert!(
         !stand
             .recorded("claude-prompt.txt")
             .contains("SkillCache capsule")
     );
 
-    // `$pdf` on Claude runs warm with `Bash(skillcache-run:*)` + `Bash(skillcache-tool:*)`.
     let fixture = Path::new(FIXTURE).parent().unwrap().display().to_string();
     let claude_warm_agent = format!(
         r#"PATH="{fixture}:$PATH"
@@ -2248,6 +2308,26 @@ echo '{{"type":"system","subtype":"init","session_id":"claude-warm-1"}}'
 echo '{{"type":"result","subtype":"success","is_error":false,"result":"Rows extracted.","session_id":"claude-warm-1","total_cost_usd":0.01}}'
 "#
     );
+    let native_skill_sid = stand
+        .claude_turn(
+            "/pdf invoices/",
+            json!({"mode": "warm_only"}),
+            Some(&claude_warm_agent),
+        )
+        .await;
+    assert_eq!(stand.phases(&native_skill_sid)[0], "hit");
+    assert_eq!(stand.phases(&native_skill_sid).last().unwrap(), "complete");
+    let native_prompt = stand.recorded("claude-prompt.txt");
+    assert!(
+        native_prompt.starts_with("The user wrote:\n/pdf invoices/"),
+        "{native_prompt}"
+    );
+    assert!(
+        native_prompt.contains("SkillCache capsule for this request"),
+        "{native_prompt}"
+    );
+
+    // `$pdf` on Claude runs warm with `Bash(skillcache-run:*)` + `Bash(skillcache-tool:*)`.
     let warm_sid = stand
         .claude_turn(
             "$pdf extract the rows of invoices/",
@@ -3001,8 +3081,1054 @@ async fn tool_chain_observe_compile_and_warm_reuse() {
     assert!(
         fallback_sc
             .iter()
-            .any(|ev| ev["reason"] == "direct_fallback"),
+            .any(|ev| ev["reason"] == "direct_fallback"
+                && ev["text"].as_str().is_some_and(
+                    |t| t.contains("program_failed") && !t.contains("sandbox_unavailable")
+                )),
         "{fallback_sc:?}"
     );
     stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tool_chain_direct_dispatch_protected_verifies_harness_tmp_and_completes() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let project = stand.project();
+    let secret_dir = stand.root.join("secret-vault");
+    fs::create_dir_all(&secret_dir).unwrap();
+    fs::write(secret_dir.join("key.txt"), "top-secret\n").unwrap();
+
+    let ro_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "native-tc-prot"}),
+        json!({"type": "assistant", "session_id": "native-tc-prot", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "Total", "path": project.join("invoices")}}
+        ]}}),
+        json!({"type": "user", "session_id": "native-tc-prot", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "a.txt ok", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Total: 10.00", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "native-tc-prot", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Checked invoices total."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Checked invoices total.", "session_id": "native-tc-prot", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &ro_turn);
+    let sid = stand
+        .turn(
+            "Inspect invoices total cleanly",
+            json!({"mode": "observe", "tool_chain": true}),
+        )
+        .await;
+    let generation = stand.skillcache_events(&sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tc_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "inspect-protected", "description": "Inspect invoices under protected sandbox"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "description": "Inspect invoices",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/main.py",
+            "content": "import json, sys\nif '--check' in sys.argv:\n    print(json.dumps({'status': 'complete', 'result': {}}))\n    sys.exit(0)\nwith open('invoices/a.txt') as f:\n    lines = [ln.strip() for ln in f if ln.strip()]\nprint(json.dumps({'status': 'complete', 'result': {'summary': f'Checked invoices total ({len(lines)} protected lines).'}}))\n"
+        }],
+        "examples": {"bindings": {}, "steps": {}}
+    });
+    stand.compiler(1, &tc_answer);
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+
+    // Enable protected-path boundary enforcement: `verify_direct_protected` must create
+    // `.harness-tmp` inside `probe_ws` before launching `sandbox::gate` (`Profile::Gate`)
+    // and execute direct dispatch without spawning the provider CLI.
+    stand
+        .sessions
+        .install_protected(vec![secret_dir], Some(PathBuf::from(FIXTURE)))
+        .unwrap();
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let (status, created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": stand.project_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true},
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let direct_sid = created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&direct_sid, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "protected direct dispatch should skip spawning provider CLI"
+    );
+    let direct_events = stand.store.events(&direct_sid, 0).unwrap();
+    let direct_sc = stand.skillcache_events(&direct_sid);
+    assert!(
+        direct_sc
+            .iter()
+            .any(|ev| ev["phase"] == "hit" && ev["direct_dispatch"] == true),
+        "{direct_sc:?}"
+    );
+    assert!(
+        direct_events.iter().any(|ev| {
+            ev["kind"] == "text"
+                && ev["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Checked invoices total (2 protected lines)."))
+        }),
+        "{direct_events:?}"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p1_parameterized_direct_dispatch_thin_formatter_partial_fallback_and_multiturn_resume() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed_readonly(".claude/skills/pdf/SKILL.md").await;
+
+    // 1. Parameterized all_read_only Skill capsule (`prompt_regex` + `default`) with structured JSON result.
+    let param_ro_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "pdf-param-ro", "description": "Read invoices with regex year"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [
+                {"name": "input_dir", "type": "path", "origin": "workspace_path", "pattern": r"^inv[a-z]+/?$"},
+                {"name": "year", "type": "number", "origin": "prompt_regex", "pattern": r"\b(20\d{2})\b", "default": 2025}
+            ],
+            "programs": [
+                {
+                    "id": "step_zero",
+                    "entry": ["python3", "programs/step_zero/main.py"],
+                    "inputs": ["input_dir", "year"],
+                    "outputs": ["prefix_tag"],
+                    "check": ["python3", "programs/step_zero/main.py", "--check"],
+                    "timeout_seconds": 30,
+                    "read_only": true
+                },
+                {
+                    "id": "step_one",
+                    "entry": ["python3", "programs/step_one/main.py"],
+                    "inputs": ["prefix_tag"],
+                    "outputs": [],
+                    "check": ["python3", "programs/step_one/main.py", "--check"],
+                    "timeout_seconds": 30,
+                    "read_only": true
+                }
+            ],
+            "steps": [
+                {"kind": "program", "program": "step_zero"},
+                {"kind": "program", "program": "step_one"}
+            ],
+            "verification": []
+        },
+        "files": [
+            {
+                "path": "programs/step_zero/main.py",
+                "content": "import json, os, sys\nif sys.argv[1:] == ['--check']:\n    print(json.dumps({'status': 'complete', 'result': {'ok': True}}))\n    sys.exit(0)\ninp = json.loads(os.environ['SKILLCACHE_INPUT'])\ntag = 'tag-' + inp['input_dir'].strip('/') + '-' + str(inp['year'])\nprint(json.dumps({'status': 'complete', 'result': {'prefix_tag': tag}}))\n"
+            },
+            {
+                "path": "programs/step_one/main.py",
+                "content": "import json, os, sys\nif sys.argv[1:] == ['--check']:\n    print(json.dumps({'status': 'complete', 'result': {'ok': True}}))\n    sys.exit(0)\nif os.path.exists(os.path.join(os.environ['SKILLCACHE_WORKSPACE'], 'fail-step1.flag')):\n    sys.stderr.write('step1 forced fail')\n    sys.exit(2)\ninp = json.loads(os.environ['SKILLCACHE_INPUT'])\nprint(json.dumps({'status': 'complete', 'result': {'rows': [{'tag': inp['prefix_tag'], 'total': 10.0}], 'count': 1}}))\n"
+            }
+        ],
+        "examples": {
+            "bindings": {"input_dir": "observed-folder/", "year": 2024},
+            "steps": {"0": {"result": {"prefix_tag": "tag-observed-folder-2024"}}}
+        }
+    });
+    stand.compiler(1, &param_ro_answer);
+    let (_, ro_cap_id) = stand.start_compile(&sid, &generation).await;
+    let settled_ro = stand.settled(&ro_cap_id, "compiling").await;
+    assert_eq!(settled_ro["status"], "active", "{settled_ro}");
+
+    // 1a. `skillcache_thin_formatter: false` skips LLM even when output lacks prose `summary`.
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let mut no_tf_opts = stand.options("$pdf audit invoices 2026", json!({"mode": "warm_only"}));
+    no_tf_opts["skillcache_thin_formatter"] = json!(false);
+    let (status, created_no_tf) = stand
+        .http(Method::POST, "/api/sessions", Some(no_tf_opts))
+        .await;
+    assert_eq!(status, 201, "{created_no_tf}");
+    assert_eq!(created_no_tf["session"]["skillcache_thin_formatter"], false);
+    let sid_no_tf = created_no_tf["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&sid_no_tf, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "edit-mode Skill direct_dispatch with thin_formatter=false must bypass Claude CLI"
+    );
+
+    // 1b. `skillcache_thin_formatter: true` runs `build_thin_formatter_prompt` skipping ~25k prefix.
+    stand.script(
+        "claude",
+        &[
+            json!({"type": "system", "subtype": "init", "session_id": "claude-tf-1"}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Formatted 1 invoice row.", "session_id": "claude-tf-1", "total_cost_usd": 0.002}),
+        ],
+    );
+    let _ = fs::remove_file(&claude_args);
+    let mut tf_opts = stand.options("$pdf audit invoices 2026", json!({"mode": "warm_only"}));
+    tf_opts["skillcache_thin_formatter"] = json!(true);
+    let (status, created_tf) = stand
+        .http(Method::POST, "/api/sessions", Some(tf_opts))
+        .await;
+    assert_eq!(status, 201, "{created_tf}");
+    let sid_tf = created_tf["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&sid_tf, 1).await;
+    let tf_prompt = stand.recorded("claude-prompt.txt");
+    assert!(
+        tf_prompt
+            .starts_with("Format the verified read-only SkillCache outputs from `pdf-param-ro`"),
+        "{tf_prompt}"
+    );
+    assert!(tf_prompt.contains("tag-invoices-2026"), "{tf_prompt}");
+    assert!(
+        !tf_prompt.contains("Harness session delegation requirement"),
+        "{tf_prompt}"
+    );
+
+    // 2. Mid-plan direct_dispatch failure at step k = 1 > 0 degrades to warm LLM turn (no cold drop).
+    fs::write(stand.project().join("fail-step1.flag"), "1").unwrap();
+    let fixture = Path::new(FIXTURE).parent().unwrap().display().to_string();
+    let partial_agent = format!(
+        r#"PATH="{fixture}:$PATH"
+skillcache-run continue >/dev/null
+echo '{{"type":"system","subtype":"init","session_id":"claude-partial-1"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Recovered step 1.","session_id":"claude-partial-1","total_cost_usd":0.01}}'
+"#
+    );
+    fs::write(stand.root.join("bin/claude-agent.sh"), partial_agent).unwrap();
+    let sid_partial = stand
+        .turn("$pdf audit invoices 2026", json!({"mode": "warm_only"}))
+        .await;
+    let _ = fs::remove_file(stand.project().join("fail-step1.flag"));
+    let _ = fs::remove_file(stand.root.join("bin/claude-agent.sh"));
+    let partial_sc = stand.skillcache_events(&sid_partial);
+    assert!(
+        partial_sc.iter().any(|ev| ev["phase"] == "hit"
+            && ev["partial_direct_fallback"] == true
+            && ev["failed_step_index"] == 1),
+        "mid-plan k>0 failure must degrade warm, not drop cold: {partial_sc:?}"
+    );
+    assert!(
+        !partial_sc
+            .iter()
+            .any(|ev| ev["phase"] == "miss" && ev["reason"] == "direct_fallback"),
+        "{partial_sc:?}"
+    );
+    let partial_prompt = stand.recorded("claude-prompt.txt");
+    assert!(
+        partial_prompt
+            .contains("Partial direct execution completed steps 0..0 and failed at step 1"),
+        "{partial_prompt}"
+    );
+    assert!(
+        partial_prompt.contains("tag-invoices-2026"),
+        "{partial_prompt}"
+    );
+    assert!(
+        !partial_prompt.contains("program_source_path"),
+        "{partial_prompt}"
+    );
+
+    // 3. Multi-turn RunState continuity: Turn 1 pauses on `your_steps`, Turn 2 finishes via `continue`.
+    let _ = stand
+        .http(
+            Method::DELETE,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/{ro_cap_id}",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    let (_sid2, gen2) = stand.observed().await;
+    stand.compiler(1, &hybrid_answer());
+    let (_, hybrid_id) = stand.start_compile(&_sid2, &gen2).await;
+    assert_eq!(
+        stand.settled(&hybrid_id, "compiling").await["status"],
+        "active"
+    );
+
+    let pause_turn1 = format!(
+        r#"PATH="{fixture}:$PATH"
+skillcache-run run '{{"input_dir":"invoices/"}}' >/dev/null
+echo '{{"type":"system","subtype":"init","session_id":"claude-mt-1"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Need quarter confirmation.","session_id":"claude-mt-1","total_cost_usd":0.01}}'
+"#
+    );
+    fs::write(stand.root.join("bin/claude-agent.sh"), pause_turn1).unwrap();
+    let sid_mt = stand
+        .turn("$pdf extract invoices/", json!({"mode": "warm_only"}))
+        .await;
+    let paused_state_file = stand.root.join(format!(
+        "state/skillcache/sessions/{sid_mt}/{hybrid_id}/plan-state.json"
+    ));
+    assert!(
+        paused_state_file.exists(),
+        "paused RunState position < plan_len must remain across turns: {}",
+        paused_state_file.display()
+    );
+
+    let resume_turn2 = format!(
+        r#"PATH="{fixture}:$PATH"
+mkdir -p out && printf '[{{"id":1,"total":10}}]\n' > out/rows.json
+skillcache-run continue >/dev/null
+echo '{{"type":"system","subtype":"init","session_id":"claude-mt-1"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Completed turn 2.","session_id":"claude-mt-1","total_cost_usd":0.01}}'
+"#
+    );
+    fs::write(stand.root.join("bin/claude-agent.sh"), resume_turn2).unwrap();
+    let (status, sent) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid_mt}/messages"),
+            Some(json!({"prompt": "$pdf continue"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{sent}");
+    stand.finished(&sid_mt, 2).await;
+    let _ = fs::remove_file(stand.root.join("bin/claude-agent.sh"));
+    assert!(
+        stand
+            .recorded("claude-prompt.txt")
+            .contains("Paused SkillCache run on disk"),
+        "Turn 2 prompt must carry paused state resume hint"
+    );
+    assert!(
+        !paused_state_file.exists(),
+        "completed Turn 2 must clean up finished state_dir"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p1_codex_compiler_codex_manual_and_deferred_toolchain() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed_readonly(".agents/skills/pdf/SKILL.md").await;
+
+    // 1. Sandbox-isolated Codex compiler produces an active `all_read_only` capsule!
+    let ro_codex_ans = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "pdf-codex-ro", "description": "Read-only PDF inspector compiled by Codex"},
+            "source": {"skills": [{"name": "pdf", "path": ".agents/skills/pdf/SKILL.md"}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [{"name": "input_dir", "type": "path", "origin": "route_arg", "default": "invoices"}],
+            "programs": [{
+                "id": "inspect",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": ["input_dir"],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/main.py",
+            "content": "import json, os, sys\nif sys.argv[1:] == ['--check']:\n    print(json.dumps({'status': 'complete', 'result': {'ok': True}}))\n    sys.exit(0)\ninp = json.loads(os.environ['SKILLCACHE_INPUT'])\nprint(json.dumps({'status': 'complete', 'result': {'summary': 'inspected:' + str(inp['input_dir'])}}))\n"
+        }],
+        "examples": {"bindings": {"input_dir": "sample-dir/"}, "steps": {"0": {"result": {"summary": "inspected:sample-dir/"}}}}
+    });
+    let codex_jsonl = format!(
+        "{}\n{}\n{}\n",
+        json!({"type": "thread.started", "thread_id": "codex-cmp-1"}),
+        json!({"type": "item.completed", "item": {"type": "agent_message", "text": ro_codex_ans.to_string()}}),
+        json!({"type": "turn.completed", "usage": {"input_tokens": 50, "output_tokens": 25}})
+    );
+    fs::write(
+        stand.root.join("bin/compiler-codex-answer-1.jsonl"),
+        codex_jsonl,
+    )
+    .unwrap();
+
+    let (status, queued) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/skillcache/compile"),
+            Some(json!({"generation": generation, "compiler": {"provider": "codex", "model": "gpt-5.3-codex"}})),
+        )
+        .await;
+    assert_eq!(status, 202, "{queued}");
+    let codex_cap_id = queued["capsule_id"].as_str().unwrap().to_owned();
+    let settled = stand.settled(&codex_cap_id, "compiling").await;
+    assert_eq!(settled["status"], "active", "{settled}");
+    let (get_status, detail) = stand
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/{codex_cap_id}",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(get_status, 200, "{detail}");
+    assert_eq!(detail["compile"]["provider"], "codex");
+    assert_eq!(detail["compile"]["model"], "gpt-5.3-codex");
+
+    // 2. Codex in `manual` mode hits `direct_dispatch` / `all_read_only` capsule without `codex_manual` miss.
+    let mut manual_opts = stand.options("$pdf invoices", json!({"mode": "warm_only"}));
+    manual_opts["provider"] = json!("codex");
+    manual_opts["permissions"] = json!("manual");
+    let (status, created_man) = stand
+        .http(Method::POST, "/api/sessions", Some(manual_opts))
+        .await;
+    assert_eq!(status, 201, "{created_man}");
+    let sid_man = created_man["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&sid_man, 1).await;
+    let man_events = stand.skillcache_events(&sid_man);
+    assert!(
+        man_events.iter().any(|ev| ev["phase"] == "hit"),
+        "codex manual read-only hit expected: {man_events:?}"
+    );
+    assert!(
+        !man_events.iter().any(|ev| ev["reason"] == "codex_manual"),
+        "{man_events:?}"
+    );
+    let (after_status, detail_after) = stand
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/{codex_cap_id}",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(after_status, 200, "{detail_after}");
+    assert_eq!(
+        detail_after["amortization"]["direct_dispatch_hits"], 1,
+        "{detail_after}"
+    );
+
+    // 3. Unrouted cold `ToolChain` turn uses lightweight pre-turn stamp cleanly.
+    let project = stand.project();
+    stand.script(
+        "claude",
+        &[
+            json!({"type": "system", "subtype": "init", "session_id": "tc-light-1"}),
+            json!({"type": "assistant", "session_id": "tc-light-1", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+                {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "Invoice", "path": project.join("invoices")}}
+            ]}}),
+            json!({"type": "user", "session_id": "tc-light-1", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "Invoice 1", "is_error": false},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "invoices/a.txt:1", "is_error": false}
+            ]}}),
+            json!({"type": "assistant", "session_id": "tc-light-1", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Checked"}
+            ]}}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Checked", "session_id": "tc-light-1", "total_cost_usd": 0.03}),
+        ],
+    );
+    let tc_sid = stand
+        .claude_turn(
+            "Inspect invoices cleanly",
+            json!({"mode": "observe", "tool_chain": true}),
+            None,
+        )
+        .await;
+    let tc_events = stand.skillcache_events(&tc_sid);
+    assert!(
+        tc_events.iter().any(|ev| ev["phase"] == "observed"),
+        "read-only toolchain should be observed post-turn: {tc_events:?}"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p2_gc_unpins_snapshots_cross_worktree_sharing_and_normalized_template_matching() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let project = stand.project();
+
+    // Mark project 1 as Laravel via `.infra-manifest.json` and add an `other` skill for active pinning check.
+    fs::write(
+        project.join(".infra-manifest.json"),
+        r#"{"edition":"Laravel"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(project.join(".claude/skills/other")).unwrap();
+    fs::write(
+        project.join(".claude/skills/other/SKILL.md"),
+        "---\nname: other\ndescription: Another check\n---\n# Other\n\nCheck summary.\n",
+    )
+    .unwrap();
+    git(
+        &project,
+        &["add", ".infra-manifest.json", ".claude/skills/other"],
+    );
+    git(&project, &["commit", "-q", "-m", "manifest-and-other"]);
+
+    let ro_pdf_turn = |ws: &Path| {
+        vec![
+            json!({"type": "system", "subtype": "init", "session_id": "ro-pdf-1"}),
+            json!({"type": "assistant", "session_id": "ro-pdf-1", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": ws.join(".claude/skills/pdf/SKILL.md")}},
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": ws.join("invoices/a.txt")}}
+            ]}}),
+            json!({"type": "user", "session_id": "ro-pdf-1", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "     1→# PDF\n     2→\n     3→Use scripts/extract.py.", "is_error": false},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "Invoice 1\nTotal: 10.00\n", "is_error": false}
+            ]}}),
+            json!({"type": "assistant", "session_id": "ro-pdf-1", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Counted 1 file."}
+            ]}}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Counted 1 file.", "session_id": "ro-pdf-1", "total_cost_usd": 0.01}),
+        ]
+    };
+    let portable_pdf_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "pdf-count", "description": "Count files in an input directory"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [{"name": "input_dir", "type": "path", "origin": "request", "description": "Target folder"}],
+            "programs": [{
+                "id": "count",
+                "description": "Count files",
+                "entry": ["python3", "programs/count/main.py"],
+                "inputs": ["input_dir"],
+                "outputs": [],
+                "check": ["python3", "programs/count/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "count"}],
+            "verification": [{"kind": "inspection", "text": "Confirm file count matches."}]
+        },
+        "files": [{
+            "path": "programs/count/main.py",
+            "content": "import json, os, sys\nif sys.argv[1:] == ['--check']:\n    print(json.dumps({'status': 'complete', 'result': {'ok': True}}))\n    sys.exit(0)\ninp = json.loads(os.environ['SKILLCACHE_INPUT'])\ntotal = sum(len(fs) for _, _, fs in os.walk(inp['input_dir']))\nprint(json.dumps({'status': 'complete', 'result': {'files': total}}))\n"
+        }],
+        "examples": {
+            "bindings": {"input_dir": "invoices/"},
+            "steps": {}
+        }
+    });
+
+    stand.script("claude", &ro_pdf_turn(&project));
+    let obs_pdf_sid = stand
+        .claude_turn("Count files in invoices/", json!({"mode": "observe"}), None)
+        .await;
+    let obs_pdf_gen = stand.skillcache_events(&obs_pdf_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    stand.compiler(1, &portable_pdf_answer);
+    let (_, cap_tpl_src) = stand.start_compile(&obs_pdf_sid, &obs_pdf_gen).await;
+    let tpl_src = stand.settled(&cap_tpl_src, "compiling").await;
+    assert_eq!(tpl_src["status"], "active", "{tpl_src}");
+    assert_eq!(tpl_src["form"], "hybrid", "{tpl_src}");
+    assert_eq!(
+        gate_summary(&tpl_src),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+
+    let (tpl_count, tpl_semantic): (i64, String) = {
+        let db = stand.store.connection().unwrap();
+        db.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(skill_semantic_sha), '') FROM skillcache_templates WHERE edition = 'Laravel' AND skill_name = 'pdf'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(tpl_count, 1);
+    assert!(
+        !tpl_semantic.is_empty(),
+        "template must record skill_semantic_sha"
+    );
+
+    let snap_rel = |trace_gen: &str| -> PathBuf {
+        stand
+            .root
+            .join("state/skillcache/snapshots")
+            .join(trace_gen)
+    };
+    let snap1_path = snap_rel(&obs_pdf_gen);
+    assert!(
+        snap1_path.is_dir(),
+        "expected snapshot at {}",
+        snap1_path.display()
+    );
+
+    // Compile a second active capsule on `other` so its aged snapshot remains pinned across recover.
+    let other_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "ro-other-1"}),
+        json!({"type": "assistant", "session_id": "ro-other-1", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join(".claude/skills/other/SKILL.md")}},
+            {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}}
+        ]}}),
+        json!({"type": "user", "session_id": "ro-other-1", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "     1→# Other", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Invoice 1", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "ro-other-1", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Counted 1 file."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Counted 1 file.", "session_id": "ro-other-1", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &other_turn);
+    let obs_keep_sid = stand
+        .claude_turn(
+            "Count other files in invoices/",
+            json!({"mode": "observe"}),
+            None,
+        )
+        .await;
+    let obs_keep_gen = stand.skillcache_events(&obs_keep_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut keep_answer = portable_pdf_answer.clone();
+    keep_answer["capsule"]["mu"]["name"] = "other-keep-check".into();
+    keep_answer["capsule"]["source"]["skills"][0] =
+        json!({"name": "other", "path": ".claude/skills/other/SKILL.md"});
+    stand.compiler(1, &keep_answer);
+    let (_, cap_keep) = stand.start_compile(&obs_keep_sid, &obs_keep_gen).await;
+    let settled_keep = stand.settled(&cap_keep, "compiling").await;
+    assert_eq!(settled_keep["status"], "active", "{settled_keep}");
+    let snap_keep_path = snap_rel(&obs_keep_gen);
+    assert!(
+        snap_keep_path.is_dir(),
+        "expected active keep snapshot at {}",
+        snap_keep_path.display()
+    );
+
+    // Create sibling git worktree at identical commit before adding a ToolChain capsule.
+    let wt2 = stand.root.join("wt2");
+    git(
+        &project,
+        &["worktree", "add", "-q", "-b", "wt2", wt2.to_str().unwrap()],
+    );
+    let wt2_id = stand.store.register(&wt2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(wt2_id, stand.project_id);
+
+    // Compile an active read-only ToolChain capsule on project 1.
+    let tc_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "ro-tc-wt"}),
+        json!({"type": "assistant", "session_id": "ro-tc-wt", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "Total", "path": project.join("invoices")}}
+        ]}}),
+        json!({"type": "user", "session_id": "ro-tc-wt", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "Invoice 1", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "Total: 10.00", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "ro-tc-wt", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Inspected (2 lines)."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Inspected (2 lines).", "session_id": "ro-tc-wt", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &tc_turn);
+    let tc_sid = stand
+        .turn(
+            "Inspect invoices total across files",
+            json!({"mode": "observe", "tool_chain": true}),
+        )
+        .await;
+    let tc_gen = stand.skillcache_events(&tc_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tc_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "inspect-wt-invoices", "description": "Inspect invoices files cleanly"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "description": "Inspect invoices",
+                "entry": ["python3", "programs/inspect/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/inspect/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/main.py",
+            "content": "import json, sys\nif '--check' in sys.argv:\n    print(json.dumps({'status': 'complete', 'result': {}}))\n    sys.exit(0)\nwith open('invoices/a.txt') as f:\n    lines = [ln.strip() for ln in f if ln.strip()]\nprint(json.dumps({'status': 'complete', 'result': {'summary': f'Inspected ({len(lines)} lines).'}}))\n"
+        }],
+        "examples": {"bindings": {}, "steps": {}}
+    });
+    stand.compiler(1, &tc_answer);
+    let (_, cap_tc) = stand.start_compile(&tc_sid, &tc_gen).await;
+    let settled_tc = stand.settled(&cap_tc, "compiling").await;
+    assert_eq!(settled_tc["status"], "active", "{settled_tc}");
+    assert_eq!(settled_tc["kind"], "tool_chain", "{settled_tc}");
+
+    // 1. Age trace timestamps past TRACE_DAYS and retire `cap_tpl_src`: its snapshot unpins & deletes on disk
+    // while `cap_keep` (active) preserves its aged snapshot.
+    {
+        let db = stand.store.connection().unwrap();
+        db.execute(
+            "UPDATE skillcache_traces SET created_at = '2000-01-01T00:00:00Z' WHERE generation IN (?1, ?2)",
+            rusqlite::params![&obs_pdf_gen, &obs_keep_gen],
+        )
+        .unwrap();
+    }
+    let (status, retired) = stand
+        .http(
+            Method::POST,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/{cap_tpl_src}/retire",
+                stand.project_id
+            ),
+            Some(json!({"reason": "sunset"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{retired}");
+    assert!(
+        !snap1_path.exists(),
+        "retiring capsule with expired trace must unpin and delete snapshot dir on disk: {}",
+        snap1_path.display()
+    );
+    assert!(
+        snap_keep_path.exists(),
+        "active capsule snapshot must stay pinned on disk even when trace is older than TRACE_DAYS: {}",
+        snap_keep_path.display()
+    );
+
+    // 2. Cross-worktree sharing of `cap_tc` in sibling worktree `wt2` + isolation on drift & unrelated repo.
+    let (status, wt2_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{wt2_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{wt2_pre}");
+    assert_eq!(wt2_pre["skillcache"]["decision"], "hit", "{wt2_pre}");
+    assert_eq!(wt2_pre["skillcache"]["capsule"]["capsule_id"], cap_tc);
+
+    let claude_args = stand.root.join("bin/claude-arguments.txt");
+    let _ = fs::remove_file(&claude_args);
+    let (status, wt2_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": wt2_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Please inspect invoices files",
+                "skillcache": {"mode": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{wt2_created}");
+    let wt2_sid = wt2_created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&wt2_sid, 1).await;
+    assert!(
+        !claude_args.exists(),
+        "sibling worktree warm direct dispatch must not spawn claude"
+    );
+    let wt2_events = stand.skillcache_events(&wt2_sid);
+    assert!(
+        wt2_events
+            .iter()
+            .any(|ev| ev["phase"] == "hit" && ev["direct_dispatch"] == true),
+        "{wt2_events:?}"
+    );
+
+    // Drift wt2's workspace tree -> cross-worktree sharing isolates cleanly.
+    fs::write(wt2.join("invoices/a.txt"), "Invoice 1\nTotal: 99.00\n").unwrap();
+    git(&wt2, &["add", "-A"]);
+    git(&wt2, &["commit", "-q", "-m", "drift"]);
+    let (_, wt2_drift) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{wt2_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_ne!(
+        wt2_drift["skillcache"]["decision"], "hit",
+        "workspace_tree_sha drift must prevent sibling sharing: {wt2_drift}"
+    );
+
+    // Unrelated repo with identical initial files -> isolated by git_common_dir.
+    let other_repo = stand.root.join("other-repo");
+    fs::create_dir_all(other_repo.join("invoices")).unwrap();
+    fs::write(
+        other_repo.join("invoices/a.txt"),
+        "Invoice 1\nTotal: 10.00\n",
+    )
+    .unwrap();
+    git(&other_repo, &["init", "-q"]);
+    git(&other_repo, &["add", "-A"]);
+    git(&other_repo, &["commit", "-q", "-m", "base"]);
+    let other_id = stand.store.register(&other_repo).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, other_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{other_id}/preflight"),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true}
+            })),
+        )
+        .await;
+    assert_ne!(
+        other_pre["skillcache"]["decision"], "hit",
+        "unrelated git_common_dir must never match sibling capsule: {other_pre}"
+    );
+
+    // 3. Normalized `skill_semantic_sha` template matching in a second Laravel project (zero compiler invocation, Gates 1-3 pass).
+    let laravel2 = stand.root.join("laravel2");
+    fs::create_dir_all(laravel2.join(".claude/skills/pdf/scripts")).unwrap();
+    fs::create_dir_all(laravel2.join("invoices")).unwrap();
+    fs::write(laravel2.join("artisan"), "#!/usr/bin/env php\n").unwrap();
+    fs::write(
+        laravel2.join("composer.json"),
+        r#"{"require":{"laravel/framework":"^11.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".infra-manifest.json"),
+        r#"{"edition":"Laravel"}"#,
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".claude/skills/pdf/SKILL.md"),
+        "---\n# YAML formatting comment\nname: pdf\ndescription:   Work   with PDF files  \n---\n\n<!-- editorial comment -->\n# PDF\n\n\nUse   scripts/extract.py.\n\n",
+    )
+    .unwrap();
+    fs::write(
+        laravel2.join(".claude/skills/pdf/scripts/extract.py"),
+        "# comment\nprint('rows')   \n\n",
+    )
+    .unwrap();
+    fs::write(laravel2.join("invoices/a.txt"), "Invoice 1\nTotal: 10.00\n").unwrap();
+    git(&laravel2, &["init", "-q"]);
+    git(&laravel2, &["add", "-A"]);
+    git(&laravel2, &["commit", "-q", "-m", "base"]);
+
+    assert_ne!(
+        infra_skillcache::fingerprint::tree_sha256(&project.join(".claude/skills/pdf"))
+            .unwrap()
+            .sha256,
+        infra_skillcache::fingerprint::tree_sha256(&laravel2.join(".claude/skills/pdf"))
+            .unwrap()
+            .sha256,
+        "exact skill_tree_sha256 must differ so matching relies on normalized skill_semantic_sha"
+    );
+
+    let laravel2_id = stand.store.register(&laravel2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    stand.script("claude", &ro_pdf_turn(&laravel2));
+    let (status, l2_created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": laravel2_id,
+                "provider": "claude",
+                "mode": "plan",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "auto",
+                "prompt": "Count files in invoices/",
+                "skillcache": {"mode": "observe"}
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{l2_created}");
+    let l2_obs_sid = l2_created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&l2_obs_sid, 1).await;
+    let l2_gen = stand.skillcache_events(&l2_obs_sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Remove compiler answers so any LLM compiler invocation would fail.
+    let _ = fs::remove_file(stand.root.join("bin/compiler-answer-1.jsonl"));
+    let (_, l2_cap_id) = stand.start_compile(&l2_obs_sid, &l2_gen).await;
+    let l2_cap = stand
+        .settled_in(&laravel2_id, &l2_cap_id, "compiling")
+        .await;
+    assert_eq!(l2_cap["status"], "active", "{l2_cap}");
+    assert_eq!(l2_cap["kind"], "template", "{l2_cap}");
+    assert_eq!(l2_cap["form"], "hybrid", "{l2_cap}");
+    assert_eq!(l2_cap["compile"]["rounds"], 0, "{l2_cap}");
+    assert_eq!(
+        gate_summary(&l2_cap),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+
+    let (status, l2_pre) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{laravel2_id}/preflight"),
+            Some(json!({
+                "prompt": "$pdf count files in invoices/",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "edit", "permissions": "auto"}
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{l2_pre}");
+    assert_eq!(l2_pre["skillcache"]["decision"], "hit", "{l2_pre}");
+    assert_eq!(l2_pre["skillcache"]["capsule"]["capsule_id"], l2_cap_id);
+
+    stand.close().await;
+
+    // 4. Cold-boot `SessionStore::open` recovery prunes aged retired capsules & failed compiles and collects unpinned snapshots.
+    let rec_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let rec_proj = rec_dir.path().join("proj");
+    fs::create_dir_all(&rec_proj).unwrap();
+    let snap_expired = rec_dir
+        .path()
+        .join("state/skillcache/snapshots/gen-exp-ret");
+    let snap_active = rec_dir
+        .path()
+        .join("state/skillcache/snapshots/gen-keep-act");
+    {
+        let s1 = SessionStore::open(&rec_dir.path().join("state")).unwrap();
+        fs::create_dir_all(&snap_expired).unwrap();
+        fs::create_dir_all(&snap_active).unwrap();
+        fs::write(snap_expired.join("tree.json"), "{}").unwrap();
+        fs::write(snap_active.join("tree.json"), "{}").unwrap();
+        let pid = s1.register(&rec_proj).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = s1.connection().unwrap();
+        db.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES ('s-rec','t',?1,?2,'claude','edit','native',0,'completed','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')",
+            rusqlite::params![&pid, rec_proj.to_string_lossy().as_ref()],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_traces(generation,session_id,provider,request,skill_refs,steps,redaction,trace_sha256,created_at) VALUES
+             ('gen-exp-ret','s-rec','claude','q','[]','[]','{}','s1','2000-01-01T00:00:00Z'),
+             ('gen-keep-act','s-rec','claude','q','[]','[]','{}','s2','2000-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_capsules(capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,updated_at,created_at) VALUES
+             ('cap-exp-ret',?1,'pdf','.claude/skills/pdf/SKILL.md','m','d','textual','retired',1,'c','t','{}','e',1,'1','s-rec','gen-exp-ret','cmp-exp','','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z'),
+             ('cap-keep-act',?1,'other','.claude/skills/other/SKILL.md','m','d','textual','active',1,'c','t','{}','e',1,'1','s-rec','gen-keep-act','cmp-keep','','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')",
+            [&pid],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO skillcache_compiles(compile_id,project_id,source_session_id,source_generation,provider,status,outcome,started_at,finished_at,capsule_id)
+             VALUES ('cmp-exp',?1,'s-rec','gen-exp-ret','claude','failed','err','2000-01-01T00:00:00Z','2000-01-01T00:00:00Z','cap-exp-ret')",
+            [&pid],
+        ).unwrap();
+    }
+    let s2 = SessionStore::open(&rec_dir.path().join("state")).unwrap();
+    let db2 = s2.connection().unwrap();
+    let ret_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_capsules WHERE capsule_id='cap-exp-ret'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let cmp_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_compiles WHERE compile_id='cmp-exp'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let act_cnt: i64 = db2
+        .query_row(
+            "SELECT COUNT(*) FROM skillcache_capsules WHERE capsule_id='cap-keep-act'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ret_cnt, 0,
+        "aged retired capsule pruned by SessionStore::open"
+    );
+    assert_eq!(
+        cmp_cnt, 0,
+        "aged failed compile pruned by SessionStore::open"
+    );
+    assert_eq!(act_cnt, 1, "active capsule preserved by SessionStore::open");
+    assert!(
+        !snap_expired.exists(),
+        "expired retired snapshot removed on reopen"
+    );
+    assert!(
+        snap_active.exists(),
+        "active capsule snapshot preserved on reopen"
+    );
 }

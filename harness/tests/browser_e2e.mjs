@@ -641,14 +641,15 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     await clickAt(box.cx, box.cy, options);
   }
 
-  async function pressKey({ key, code, keyCode, modifiers = 0 }) {
+  async function pressKey({ key, code, keyCode, modifiers = 0, shift = false }) {
+    const mods = modifiers || (shift ? 8 : 0);
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyDown',
       key,
       code,
       windowsVirtualKeyCode: keyCode,
       nativeVirtualKeyCode: keyCode,
-      modifiers,
+      modifiers: mods,
     });
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyUp',
@@ -656,7 +657,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
       code,
       windowsVirtualKeyCode: keyCode,
       nativeVirtualKeyCode: keyCode,
-      modifiers,
+      modifiers: mods,
     });
   }
 
@@ -873,6 +874,10 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
     const overlapY = Math.min(planeRect.bottom, hostRect.bottom) - Math.max(planeRect.top, hostRect.top);
     const overlapX = Math.min(planeRect.right, hostRect.right) - Math.max(planeRect.left, hostRect.left);
     const nodeCount = plane.querySelectorAll('.graph-map-node').length;
+    const sampleDomNode = plane.querySelector('.graph-map-node:not(.graph-map-entity-node)');
+    const sampleDomBg = sampleDomNode && host.getAttribute('data-dense') === 'true' && plane.getAttribute('data-scale-tier') === 'dense'
+      ? getComputedStyle(sampleDomNode).backgroundColor
+      : null;
     return {
       dpr: window.devicePixelRatio || 1,
       width: canvas.width,
@@ -887,11 +892,25 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
       nonZeroPixels,
       dataUrlDiffers,
       nodeCount,
+      sampleDomBg,
     };
   }, canvasSelector);
 
   assert(!geom.error, `${label}: ${geom.error}`);
   assert(geom.width > 0 && geom.height > 0, `${label}: dense canvas zero sized (${geom.width}x${geom.height})`);
+  const clampedDpr = Math.min(2, Math.max(1, geom.dpr || 1));
+  const expectedWidth = Math.round(geom.canvasRect.width * clampedDpr);
+  const expectedHeight = Math.round(geom.canvasRect.height * clampedDpr);
+  assert(
+    Math.abs(geom.width - expectedWidth) <= 2 && Math.abs(geom.height - expectedHeight) <= 2,
+    `${label}: dense canvas bitmap (${geom.width}x${geom.height}) drifted from CSS box (${geom.canvasRect.width}x${geom.canvasRect.height} @ ${clampedDpr}x -> ${expectedWidth}x${expectedHeight})`,
+  );
+  if (geom.sampleDomBg !== null) {
+    assert(
+      geom.sampleDomBg === 'rgba(0, 0, 0, 0)' || geom.sampleDomBg === 'transparent',
+      `${label}: expected transparent dense DOM hit target over Canvas2D, got "${geom.sampleDomBg}"`,
+    );
+  }
   if (minDpr > 1) {
     assert(
       geom.dpr >= minDpr
@@ -2149,22 +2168,47 @@ async function suite4LiveSseAndStyling(driver, cdp, opts) {
 
     const syntheticInitial = {
       ...baseOther,
-      events: Array.from({ length: 135 }, (_, idx) => ({
-        id: 201 + idx,
-        kind: 'text',
-        text: `Synthetic session history item ${201 + idx}`,
-      })),
+      events: Array.from({ length: 135 }, (_, idx) => {
+        const id = 201 + idx;
+        if (id === 215) {
+          return {
+            id,
+            kind: 'tool',
+            tool: 'Bash',
+            call: 'call-before-dedup',
+            state: 'completed',
+            ok: true,
+            text: 'completed output line',
+            command: 'echo dedup',
+          };
+        }
+        return {
+          id,
+          kind: 'text',
+          text: `Synthetic session history item ${id}`,
+        };
+      }),
       has_older: true,
       oldest_event_id: 201,
     };
     const syntheticOlder = {
-      events: Array.from({ length: 8 }, (_, idx) => ({
-        id: 193 + idx,
-        kind: 'text',
-        text: `Loaded earlier server history entry ${193 + idx}`,
-      })),
+      events: [
+        {
+          id: 192,
+          kind: 'tool',
+          tool: 'Bash',
+          call: 'call-before-dedup',
+          state: 'started',
+          command: 'echo dedup',
+        },
+        ...Array.from({ length: 8 }, (_, idx) => ({
+          id: 193 + idx,
+          kind: 'text',
+          text: `Loaded earlier server history entry ${193 + idx}`,
+        })),
+      ],
       has_older: false,
-      oldest_event_id: 193,
+      oldest_event_id: 192,
     };
     let sawBeforeFetch = false;
 
@@ -2231,6 +2275,24 @@ async function suite4LiveSseAndStyling(driver, cdp, opts) {
           return Boolean(wrap?.hidden && evText.includes('Loaded earlier server history entry 193'));
         }, '#events-load-earlier fetches ?before=201 and hides wrap when has_older is false', 8_000);
         assert(sawBeforeFetch, 'Expected ?before=201 request on #events-load-earlier click');
+
+        // Cross-page ?before= tool dedup: started(192) must not prepend a duplicate Running card
+        // or wipe output from already-rendered completed(215).
+        const dedupToolState = await driver.callFn(() => {
+          const cards = Array.from(document.querySelectorAll('#events details.conversation-tool[data-call-id="call-before-dedup"]'));
+          return {
+            count: cards.length,
+            toolState: cards[0]?.getAttribute('data-tool-state') || '',
+            summaryText: cards[0]?.querySelector('summary')?.textContent || '',
+            outputText: cards[0]?.querySelector('.tool-output')?.textContent || '',
+          };
+        });
+        assert(
+          dedupToolState.count === 1
+            && dedupToolState.toolState === 'completed'
+            && dedupToolState.outputText.includes('completed output line'),
+          `Expected 1 deduplicated completed tool card across ?before= boundary, got ${JSON.stringify(dedupToolState)}`,
+        );
       },
     );
 
@@ -4515,6 +4577,64 @@ async function suite9DiffChecksAndResults(driver, cdp, opts) {
     },
   );
 
+  // >24-file diff: RAF batching renders all 26 groups and `diff-expand-all` opens + hydrates every file.
+  const largeFileCount = 26;
+  const largeDiffText = Array.from({ length: largeFileCount }, (_, idx) => {
+    const file = `batch_${String(idx).padStart(2, '0')}.rs`;
+    return [
+      `diff --git a/${file} b/${file}`,
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      '@@ -1 +1,2 @@',
+      ` fn orig_${idx}() {}`,
+      `+fn changed_line_${idx}() {}`,
+    ].join('\n');
+  }).join('\n');
+  const largeDiffResults = {
+    ...baseResults,
+    snapshot: {
+      ...baseResults.snapshot,
+      available: true,
+      files: Array.from({ length: largeFileCount }, (_, idx) => ({
+        path: `batch_${String(idx).padStart(2, '0')}.rs`,
+        status: 'modified',
+      })),
+      diff: largeDiffText,
+    },
+  };
+  await withFetchOverride(
+    cdp,
+    [{ urlPattern: `${driver.origin}/api/sessions/*/results*` }],
+    async (params) => {
+      if ((params.request?.method || 'GET').toUpperCase() === 'GET' && params.request.url.includes('/results')) {
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify(largeDiffResults)).toString('base64'),
+        });
+        return true;
+      }
+      return false;
+    },
+    async () => {
+      await driver.click('#workspace-refresh-diff');
+      await driver.waitFor(
+        (count) => document.querySelectorAll('#workspace-diff-viewer details.diff-file-group').length === count,
+        `#workspace-diff-viewer renders all ${largeFileCount} diff groups via RAF batching`,
+        8_000,
+        largeFileCount,
+      );
+      await driver.click('#workspace-diff-viewer button[data-action="diff-expand-all"]');
+      await driver.waitFor((count) => {
+        const groups = Array.from(document.querySelectorAll('#workspace-diff-viewer details.diff-file-group'));
+        return groups.length === count
+          && groups.every((g) => g.open && !g.querySelector('pre[data-diff-deferred="true"]')
+            && (g.querySelector('.diff-file-lines')?.textContent || '').includes('changed_line_'));
+      }, `>24-file diff-expand-all opens and hydrates all ${largeFileCount} file groups`, 8_000, largeFileCount);
+    },
+  );
+
   // Switch to #right-tab-checks and navigate via #workspace-open-checks to #results-view
   await driver.click('#right-tab-checks');
   await driver.waitFor(() => {
@@ -5093,6 +5213,45 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
       const row = document.querySelector(sel);
       return sb?.classList.contains('open') && !sb.hasAttribute('inert') && row;
     }, 'Suite 11 mobile sidebar opens with target session', 5_000, targetSessionSel);
+
+    // Assert mobile #sidebar marks #main and .skip `inert` while open and traps Tab/Shift+Tab inside `#sidebar`.
+    const mobileInertOpen = await mobileDriver.callFn(() => ({
+      mainInert: document.getElementById('main')?.hasAttribute('inert'),
+      skipInert: document.querySelector('.skip')?.hasAttribute('inert'),
+      sidebarInert: document.getElementById('sidebar')?.hasAttribute('inert'),
+    }));
+    assert(
+      mobileInertOpen.mainInert && mobileInertOpen.skipInert && !mobileInertOpen.sidebarInert,
+      `Expected #main + .skip inert and #sidebar active when mobile drawer opens: ${JSON.stringify(mobileInertOpen)}`,
+    );
+    await mobileDriver.callFn(() => document.getElementById('project-switcher')?.focus());
+    await mobileDriver.pressKey({ key: 'Tab', code: 'Tab', keyCode: 9, modifiers: 8 /* Shift */ });
+    const afterShiftTab = await mobileDriver.callFn(() => {
+      const sb = document.getElementById('sidebar');
+      const active = document.activeElement;
+      return {
+        inSidebar: Boolean(sb && active && sb.contains(active)),
+        activeId: active?.id || active?.tagName || '',
+      };
+    });
+    assert(
+      afterShiftTab.inSidebar && afterShiftTab.activeId !== 'project-switcher',
+      `Shift+Tab from first #sidebar focusable must wrap inside #sidebar: ${JSON.stringify(afterShiftTab)}`,
+    );
+    await mobileDriver.pressKey({ key: 'Tab', code: 'Tab', keyCode: 9 });
+    const afterForwardTab = await mobileDriver.callFn(() => {
+      const sb = document.getElementById('sidebar');
+      const active = document.activeElement;
+      return {
+        inSidebar: Boolean(sb && active && sb.contains(active)),
+        activeId: active?.id || '',
+      };
+    });
+    assert(
+      afterForwardTab.inSidebar && afterForwardTab.activeId === 'project-switcher',
+      `Tab from last #sidebar focusable must wrap back to #project-switcher: ${JSON.stringify(afterForwardTab)}`,
+    );
+
     await mobileDriver.click(targetSessionSel);
     await mobileDriver.waitFor((sel) => Boolean(document.querySelector(`${sel}[aria-current="true"]`)), 'Suite 11 mobile session selected', 8_000, targetSessionSel);
     const sbStillOpen = await mobileDriver.callFn(() => Boolean(document.getElementById('sidebar')?.classList.contains('open')));
@@ -5960,6 +6119,19 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
       mode: 'edit',
       waiting_permissions: 1,
     };
+    const gammaSession = {
+      id: 's-gamma-sse',
+      title: 'Gamma SSE Session',
+      project_id: 'proj-alpha',
+      status: 'running',
+      workflow: 'native',
+      provider: 'codex',
+      mode: 'edit',
+      waiting_permissions: 0,
+    };
+    let gammaSkillcacheCompiled = false;
+    let gammaDiffReady = false;
+    let gammaResultsRequests = 0;
 
     try {
       await withFetchOverride(
@@ -5979,7 +6151,7 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
                 { id: 'proj-beta', name: 'Beta Project', path: '/tmp/beta' },
               ],
               providers: [{ id: 'codex', name: 'Codex', models: ['gpt-5'], default_model: 'gpt-5', permissions: ['ask', 'auto'] }],
-              sessions: [alphaSession, betaSession],
+              sessions: [alphaSession, betaSession, gammaSession],
               runtime: { default_agent_count: 3 },
               sdd_phases: ['specify', 'plan', 'tasks', 'implement'],
               omnigraph: { enabled: false },
@@ -5988,13 +6160,64 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
           } else if (parsed.pathname === '/api/sessions') {
             const pFilter = parsed.searchParams.get('project');
             const list = pFilter
-              ? [alphaSession, betaSession].filter((s) => s.project_id === pFilter)
-              : [alphaSession, betaSession];
+              ? [alphaSession, betaSession, gammaSession].filter((s) => s.project_id === pFilter)
+              : [alphaSession, betaSession, gammaSession];
             bodyObj = { sessions: list };
           } else if (parsed.pathname === '/api/sessions/s-alpha-1') {
             bodyObj = { session: alphaSession, waiting_permissions: [{ id: 1, kind: 'permission', request_id: 'perm-a1', tool: 'Edit', state: 'pending' }], events: [] };
           } else if (parsed.pathname === '/api/sessions/s-beta-1') {
             bodyObj = { session: betaSession, waiting_permissions: [{ id: 2, kind: 'permission', request_id: 'perm-b1', tool: 'Edit', state: 'pending' }], events: [] };
+          } else if (parsed.pathname === '/api/sessions/s-gamma-sse') {
+            bodyObj = {
+              session: gammaSession,
+              events: [
+                {
+                  id: 1,
+                  launch_id: 'launch-1',
+                  kind: 'skillcache',
+                  phase: 'observed',
+                  generation: 'g-sse-1',
+                  skill: 'pdf',
+                  text: 'SkillCache kept this turn’s trace (1 tool call; skill: pdf).',
+                },
+                {
+                  id: 2,
+                  launch_id: 'launch-2',
+                  kind: 'text',
+                  text: 'Later turn in launch-2 without skillcache.',
+                },
+              ],
+            };
+          } else if (parsed.pathname === '/api/sessions/s-gamma-sse/skillcache') {
+            bodyObj = {
+              session_id: 's-gamma-sse',
+              traces: [{ generation: 'g-sse-1', replayable: true }],
+              compiles: gammaSkillcacheCompiled
+                ? [{ source_generation: 'g-sse-1', status: 'completed', capsule_id: 'cap-sse-1', outcome: 'Compiled via SSE!' }]
+                : [],
+              capsules: gammaSkillcacheCompiled ? [{ capsule_id: 'cap-sse-1' }] : [],
+              runs: [],
+            };
+          } else if (parsed.pathname === '/api/sessions/s-gamma-sse/results') {
+            gammaResultsRequests += 1;
+            bodyObj = {
+              snapshot: gammaDiffReady
+                ? {
+                    available: true,
+                    files: [{ path: 'sse_refreshed.rs', status: 'modified' }],
+                    diff: [
+                      'diff --git a/sse_refreshed.rs b/sse_refreshed.rs',
+                      '--- a/sse_refreshed.rs',
+                      '+++ b/sse_refreshed.rs',
+                      '@@ -1 +1,2 @@',
+                      ' pub fn kept() {}',
+                      '+pub fn sse_auto_refreshed() {}',
+                    ].join('\n'),
+                  }
+                : { available: true, files: [], diff: '' },
+              launches: [],
+              checks: [],
+            };
           } else if (parsed.pathname === '/api/providers/sign-in') {
             bodyObj = { providers: [{ id: 'codex', state: 'signed_in' }] };
           } else if (parsed.pathname === '/api/permissions/rules') {
@@ -6067,6 +6290,58 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
             const rows = document.querySelectorAll('#history [data-action="session-open"]').length;
             return toggle?.getAttribute('data-count') === '0' && rows === 0;
           }, 'waiting_counts empty snapshot resets waiting_permissions badge & #history-filter-waiting to 0', 6_000);
+
+          // 1d. skillcache_capsule SSE live updates earlier-turn observed card after a later launch,
+          // and completion session_status SSE auto-refreshes workspace diff.
+          await tabDriver.click('#history-filter-waiting');
+          await tabDriver.waitFor(
+            () => document.querySelector('#history [data-action="session-open"][data-payload=\'"s-gamma-sse"\']'),
+            's-gamma-sse listed in #history',
+            6_000,
+          );
+          await tabDriver.click('#history [data-action="session-open"][data-payload=\'"s-gamma-sse"\']');
+          await tabDriver.waitFor(() => {
+            const card = document.querySelector('#events .conversation-skillcache[data-phase="observed"]');
+            return Boolean(card && card.querySelector('[data-action="skillcache-compile"]'));
+          }, 'earlier-turn observed card initially renders Compile into a capsule button', 8_000);
+
+          gammaSkillcacheCompiled = true;
+          await tabDriver.callFn(() => {
+            window.__e2eEmitSse('skillcache_capsule', {
+              project_id: 'proj-alpha',
+              capsule_id: 'cap-sse-1',
+              status: 'active',
+            });
+          });
+          await tabDriver.waitFor(() => {
+            const card = document.querySelector('#events .conversation-skillcache[data-phase="observed"]');
+            return Boolean(
+              card
+                && card.textContent.includes('Compilation completed')
+                && card.querySelector('[data-action="skillcache-open-capsule"]')
+                && !card.querySelector('[data-action="skillcache-compile"]'),
+            );
+          }, 'skillcache_capsule SSE live-updates earlier-turn observed card after later launch', 8_000);
+
+          await tabDriver.click('#right-tab-diff');
+          await tabDriver.waitFor(() => {
+            const pane = document.getElementById('workspace-diff-pane');
+            return Boolean(pane && !pane.hidden && document.querySelectorAll('#workspace-diff-viewer .diff-file-group').length === 0);
+          }, 'right-tab-diff opens with initially empty diff before completion SSE', 6_000);
+          await tabDriver.waitUntil(() => gammaResultsRequests >= 1, 'initial /results fetch finished before completion SSE', 6_000);
+
+          gammaDiffReady = true;
+          gammaSession.status = 'completed';
+          await tabDriver.callFn(() => {
+            window.__e2eEmitSse('session_status', {
+              session_id: 's-gamma-sse',
+              project_id: 'proj-alpha',
+              status: 'completed',
+            });
+          });
+          await tabDriver.waitFor(() => {
+            return Boolean(document.querySelector('#workspace-diff-viewer .diff-file-group[data-diff-file="sse_refreshed.rs"]'));
+          }, 'completion session_status SSE auto-refreshes workspace diff without manual refresh', 8_000);
         },
       );
     } finally {
@@ -6096,6 +6371,17 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
         run_summary: {
           with_skill: { pass_rate: { mean: 1.0, stddev: 0.0 } },
           delta: { pass_rate: '+0.20' },
+        },
+      },
+    };
+    const multiArmEvalPayload = {
+      ...baseEvalPayload,
+      benchmark: {
+        metadata: { skill_name: 'e2e-pdf-skill' },
+        run_summary: {
+          baseline_no_skill: { pass_rate: { mean: 0.5, stddev: 0.1 }, time_seconds: { mean: 12.0, stddev: 1.0 }, tokens: { mean: 2000, stddev: 100 } },
+          with_skill: { pass_rate: { mean: 0.85, stddev: 0.05 }, time_seconds: { mean: 10.0, stddev: 0.8 }, tokens: { mean: 1600, stddev: 80 } },
+          with_capsule: { pass_rate: { mean: 0.95, stddev: 0.05 }, time_seconds: { mean: 4.5, stddev: 0.4 }, tokens: { mean: 900, stddev: 40 } },
         },
       },
     };
@@ -6132,6 +6418,16 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
         }
         if (parsed.pathname === '/__e2e_eval_standalone.html') {
           const html = renderViewerDoc({ ...baseEvalPayload, standalone: true });
+          await tabCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(html).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/__e2e_eval_multi_arm.html') {
+          const html = renderViewerDoc({ ...multiArmEvalPayload, standalone: true });
           await tabCdp.send('Fetch.fulfillRequest', {
             requestId: params.requestId,
             responseCode: 200,
@@ -6283,6 +6579,28 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
           return Boolean(overlay && overlay.hidden === true && !overlay.classList.contains('visible') && document.activeElement?.id === 'done-btn');
         }, 'standalone viewer.html Escape closes #done-overlay and restores focus to #done-btn', 5_000);
 
+        // 2b2. Multi-arm (3+) benchmark summary table renders all 3 candidate arms + baseline deltas
+        await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_multi_arm.html` });
+        await tabDriver.waitFor(() => {
+          const benchTab = document.getElementById('tab-benchmark');
+          return Boolean(benchTab && !benchTab.disabled);
+        }, 'multi-arm viewer.html ready', 15_000);
+        await tabDriver.click('#tab-benchmark');
+        const multiArm = await tabDriver.waitFor(() => {
+          const table = document.querySelector('#panel-benchmark .benchmark-table');
+          if (!table) return null;
+          const headers = Array.from(table.querySelectorAll('thead th')).map((th) => (th.textContent || '').trim());
+          const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => (tr.textContent || '').trim());
+          return headers.length >= 6 ? { headers, rows } : null;
+        }, 'multi-arm (3+) benchmark renders all arm columns and deltas', 6_000);
+        assert(
+          multiArm.headers.some((h) => /Baseline/i.test(h))
+            && multiArm.headers.some((h) => /With Skill/i.test(h))
+            && multiArm.headers.some((h) => /With Capsule/i.test(h))
+            && multiArm.headers.filter((h) => /vs Baseline/i.test(h)).length === 2,
+          `Unexpected multi-arm benchmark headers: ${JSON.stringify(multiArm.headers)}`,
+        );
+
         // 2c. eval-set.html ARIA labels + Add Query focus + reorder focus preservation
         await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_set.html` });
         const evalSetA11y = await tabDriver.waitFor(() => {
@@ -6339,6 +6657,37 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
               && document.activeElement?.id === 'eval-trigger-row-0',
           );
         }, 'eval-set.html preserves checkbox focus across should_trigger reorder', 5_000);
+
+        // Unblurred Edit -> Export: editing query via `input` while textarea remains focused (no blur/change)
+        // must flush cleanly into exported eval_set.json payload.
+        const unblurredExported = await tabDriver.callFn(() => {
+          const origClick = HTMLAnchorElement.prototype.click;
+          let capturedHref = '';
+          HTMLAnchorElement.prototype.click = function capturedClick() {
+            if (this.getAttribute('download') === 'eval_set.json') {
+              capturedHref = this.getAttribute('href') || '';
+              return;
+            }
+            return origClick.apply(this, arguments);
+          };
+          try {
+            const ta = document.querySelector('#eval-body tr[data-editor-row="row-0"] textarea.query-input');
+            ta.focus();
+            ta.value = 'Unblurred live edited query';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('.btn-export')?.click();
+          } finally {
+            HTMLAnchorElement.prototype.click = origClick;
+          }
+          const prefix = 'data:application/json;charset=utf-8,';
+          if (!capturedHref.startsWith(prefix)) return null;
+          return JSON.parse(decodeURIComponent(capturedHref.slice(prefix.length)));
+        });
+        assert(
+          Array.isArray(unblurredExported)
+            && unblurredExported.some((item) => item?.query === 'Unblurred live edited query'),
+          `Expected unblurred edit to flush into eval_set.json export, got ${JSON.stringify(unblurredExported)}`,
+        );
       },
     );
 

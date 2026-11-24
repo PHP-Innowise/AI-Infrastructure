@@ -295,6 +295,9 @@ pub trait NativeRuntime: Send {
         repository: &Path,
         request: NativeRequest,
     ) -> Result<NativeResponse>;
+    fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Image {
@@ -695,7 +698,7 @@ impl<R: NativeRuntime> NativeProjectionMemory<R> {
             return Ok(());
         }
         self.closed = true;
-        let mut first = None;
+        let mut first = self.runtime.close().err();
         for file in self.directories.iter_mut().rev() {
             if let Some(file) = file.take()
                 && let Err(e) = close_file(file)

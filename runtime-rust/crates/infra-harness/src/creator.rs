@@ -8,10 +8,147 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::{SystemTime, UNIX_EPOCH},
 };
+const CREATOR_PHP_PROBE_RACY_NS: i128 = 2_000_000_000;
+const MAX_PHP_PROBE_CACHE: usize = 64;
+struct CachedPhpProbe {
+    stamp: String,
+    has_php: bool,
+    last_used: u64,
+}
+#[derive(Default)]
+struct PhpProbeCache {
+    seq: u64,
+    entries: HashMap<PathBuf, CachedPhpProbe>,
+}
+fn php_probe_cache() -> &'static Mutex<PhpProbeCache> {
+    static CACHE: OnceLock<Mutex<PhpProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PhpProbeCache::default()))
+}
+#[cfg(test)]
+fn php_probe_scan_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn creator_time_ns(t: SystemTime) -> Option<i128> {
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+}
+fn php_probe_stamp_at(source: &Path, now_ns: i128) -> Option<String> {
+    let mut max_mtime_ns = 0i128;
+    let mut parts = Vec::with_capacity(4);
+    let composer = source.join("composer.json");
+    match std::fs::symlink_metadata(&composer) {
+        Ok(m) => {
+            if m.file_type().is_symlink() {
+                return None;
+            }
+            let mtime = m.modified().ok().and_then(creator_time_ns)?;
+            max_mtime_ns = max_mtime_ns.max(mtime);
+            parts.push(format!("composer:{}:{}:{mtime}", m.is_file(), m.len()));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            parts.push("composer:missing".into());
+        }
+        Err(_) => return None,
+    }
+    for part in ["", "src", "app"] {
+        let dir = if part.is_empty() {
+            source.to_path_buf()
+        } else {
+            source.join(part)
+        };
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) => {
+                if m.file_type().is_symlink() || !m.is_dir() {
+                    return None;
+                }
+                let mtime = m.modified().ok().and_then(creator_time_ns)?;
+                max_mtime_ns = max_mtime_ns.max(mtime);
+                parts.push(format!("dir:{part}:{mtime}"));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                parts.push(format!("dir:{part}:missing"));
+            }
+            Err(_) => return None,
+        }
+    }
+    let settled = max_mtime_ns > 0
+        && now_ns > CREATOR_PHP_PROBE_RACY_NS
+        && max_mtime_ns <= now_ns - CREATOR_PHP_PROBE_RACY_NS;
+    settled.then(|| store::sha(parts.join("\n").as_bytes()))
+}
+fn scan_php_project(source: &Path) -> bool {
+    source.join("composer.json").is_file()
+        || ["", "src", "app"].iter().any(|part| {
+            std::fs::read_dir(source.join(part))
+                .ok()
+                .is_some_and(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .take(20000)
+                        .any(|e| e.path().extension().is_some_and(|x| x == "php"))
+                })
+        })
+}
+fn detect_php_project_at(source: &Path, now_ns: i128) -> bool {
+    let stamp = php_probe_stamp_at(source, now_ns);
+    if let Some(ref s) = stamp
+        && let Ok(mut guard) = php_probe_cache().lock()
+    {
+        guard.seq = guard.seq.saturating_add(1);
+        let seq = guard.seq;
+        if let Some(entry) = guard.entries.get_mut(source)
+            && &entry.stamp == s
+        {
+            entry.last_used = seq;
+            return entry.has_php;
+        }
+    }
+    #[cfg(test)]
+    if let Ok(mut counts) = php_probe_scan_counts().lock() {
+        *counts.entry(source.to_path_buf()).or_insert(0) += 1;
+    }
+    let has_php = scan_php_project(source);
+    let after_ns = creator_time_ns(SystemTime::now())
+        .unwrap_or(now_ns)
+        .max(now_ns);
+    if let Some(s) = stamp
+        && php_probe_stamp_at(source, after_ns).as_deref() == Some(s.as_str())
+        && let Ok(mut guard) = php_probe_cache().lock()
+    {
+        guard.seq = guard.seq.saturating_add(1);
+        let use_seq = guard.seq;
+        if guard.entries.len() >= MAX_PHP_PROBE_CACHE
+            && !guard.entries.contains_key(source)
+            && let Some(evict) = guard
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            guard.entries.remove(&evict);
+        }
+        guard.entries.insert(
+            source.to_path_buf(),
+            CachedPhpProbe {
+                stamp: s,
+                has_php,
+                last_used: use_seq,
+            },
+        );
+    }
+    has_php
+}
+fn detect_php_project(source: &Path) -> bool {
+    let now_ns = creator_time_ns(SystemTime::now()).unwrap_or(0);
+    detect_php_project_at(source, now_ns)
+}
 pub struct CreatorManager {
     store: SessionStore,
     source: PathBuf,
@@ -468,17 +605,7 @@ impl CreatorManager {
                 ));
             }
         }
-        let php = source.join("composer.json").is_file()
-            || ["", "src", "app"].iter().any(|part| {
-                std::fs::read_dir(source.join(part))
-                    .ok()
-                    .is_some_and(|entries| {
-                        entries
-                            .filter_map(|e| e.ok())
-                            .take(20000)
-                            .any(|e| e.path().extension().is_some_and(|x| x == "php"))
-                    })
-            });
+        let php = detect_php_project(&source);
         if !php {
             return Err(HarnessError::invalid(
                 "No PHP project entry point detected. Use stack adaptation separately for a non-PHP target.",
@@ -1315,5 +1442,59 @@ mod tests {
 
         let _ = sessions.close();
         let _ = sessions.wait_closed().await;
+    }
+
+    #[test]
+    fn creator_php_probe_caches_settled_directories_and_invalidates_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("php-target");
+        std::fs::create_dir_all(target.join("src")).unwrap();
+        std::fs::write(target.join("src/App.php"), "<?php\n").unwrap();
+        let target_canon = infra_core::fs::canonicalize(&target).unwrap();
+
+        let now_ns = creator_time_ns(SystemTime::now()).unwrap_or(0);
+        // Inside RACY_NS: bypasses cache and scans directly.
+        assert!(detect_php_project_at(&target_canon, now_ns));
+        assert!(detect_php_project_at(&target_canon, now_ns + 100));
+        assert_eq!(
+            php_probe_scan_counts()
+                .lock()
+                .unwrap()
+                .get(&target_canon)
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+
+        // Settled past RACY_NS: scans once to populate cache, then reuses without read_dir.
+        let settled = now_ns + CREATOR_PHP_PROBE_RACY_NS + 1_000_000;
+        assert!(detect_php_project_at(&target_canon, settled));
+        assert!(detect_php_project_at(&target_canon, settled + 1_000));
+        assert_eq!(
+            php_probe_scan_counts()
+                .lock()
+                .unwrap()
+                .get(&target_canon)
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+
+        // Removing the PHP file updates `src/` dir mtime -> invalidates settled cache cleanly.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::remove_file(target_canon.join("src/App.php")).unwrap();
+        let settled2 =
+            creator_time_ns(SystemTime::now()).unwrap_or(0) + CREATOR_PHP_PROBE_RACY_NS + 1_000_000;
+        assert!(!detect_php_project_at(&target_canon, settled2));
+        assert!(!detect_php_project_at(&target_canon, settled2 + 1_000));
+        assert_eq!(
+            php_probe_scan_counts()
+                .lock()
+                .unwrap()
+                .get(&target_canon)
+                .copied()
+                .unwrap_or(0),
+            4
+        );
     }
 }

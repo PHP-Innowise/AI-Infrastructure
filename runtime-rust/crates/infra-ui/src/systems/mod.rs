@@ -5,6 +5,8 @@ mod runs;
 mod tests;
 
 #[allow(unused_imports)]
+pub(crate) use catalog_map::poll_system_graph_status;
+#[allow(unused_imports)]
 pub use catalog_map::{
     adopt_sidebar_project, aggregate_graphs_pill, build_changes_overlay, catalog_autoload,
     drill_down_service_map, drill_down_service_target, focus_system_graph_workspace,

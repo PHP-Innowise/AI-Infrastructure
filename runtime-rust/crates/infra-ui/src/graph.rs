@@ -782,25 +782,54 @@ pub(crate) fn extract_sse_delta_payload(event: &V) -> SseDeltaPayload {
     }
 }
 
+fn sse_event_member_project(event: &V) -> String {
+    let src = m::text(event, "source_project_id");
+    if !src.is_empty() {
+        return src;
+    }
+    m::text(event, "member_project_id")
+}
+
 pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> GraphSseAction {
+    let active_view = m::read(|s| s.view.clone());
+    apply_graph_status_sse_event_for_view(event, current_project, &active_view)
+}
+
+pub(crate) fn apply_graph_status_sse_event_for_view(
+    event: &V,
+    current_project: &str,
+    active_view: &str,
+) -> GraphSseAction {
     if !event.is_object() {
         return GraphSseAction::Ignored;
     }
-    m::set("graph-sse-status", event.clone());
     let delta = extract_sse_delta_payload(event);
-    let event_project = delta.project_id.clone();
-    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
-    {
+    let owner_project = delta.project_id.clone();
+    let member_project = sse_event_member_project(event);
+    let event_project = if !member_project.is_empty() {
+        member_project.clone()
+    } else {
+        owner_project.clone()
+    };
+    let same_or_global_project = event_project.is_empty()
+        || current_project.is_empty()
+        || event_project == current_project
+        || (!owner_project.is_empty() && owner_project == current_project);
+    let external_multi_project_view =
+        matches!(active_view, "systems" | "system-changes" | "omnigraph");
+    if !same_or_global_project && !external_multi_project_view {
         return GraphSseAction::Ignored;
     }
     let state = delta.state.clone();
     let reason = delta.reason.clone();
     let message = m::text(event, "message");
     if state == "building" {
-        let mut status = m::data("graph");
-        if status.is_object() {
-            status["state"] = json!("building");
-            m::set("graph", status);
+        if same_or_global_project {
+            let mut status = m::data("graph");
+            if status.is_object() {
+                status["state"] = json!("building");
+                m::set("graph", status);
+            }
         }
         return GraphSseAction::Building;
     }
@@ -814,6 +843,7 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
                 | "ir_updated"
                 | "incremental_update"
                 | "architecture_updated"
+                | "ir_delta"
         );
     if !is_refresh_candidate {
         return GraphSseAction::Ignored;
@@ -827,6 +857,7 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
                 | "ir_updated"
                 | "incremental_update"
                 | "architecture_updated"
+                | "ir_delta"
                 | "rebuild"
                 | "completed"
         );
@@ -835,6 +866,12 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
             &event_project,
             current_project,
         );
+        if !owner_project.is_empty() && owner_project != event_project {
+            crate::graph_map::invalidate_surface_analysis_caches_for_live_project(
+                &owner_project,
+                current_project,
+            );
+        }
     }
     let banner_text = if !message.is_empty() {
         message
@@ -843,42 +880,52 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
     } else {
         "Graph updated — Refresh".to_owned()
     };
-    let mut synth_status = m::data("graph");
-    if !synth_status.is_object() {
-        synth_status = json!({});
+    if !event_project.is_empty() {
+        m::set(&format!("graph-sse-status:{event_project}"), event.clone());
     }
-    let prev_nodes = synth_status["graph"]["nodes"].as_u64();
-    let prev_edges = synth_status["graph"]["edges"].as_u64();
-    m::set(
-        "graph-sse-delta-meta",
-        json!({
+    if same_or_global_project {
+        m::set("graph-sse-status", event.clone());
+        let mut synth_status = m::data("graph");
+        if !synth_status.is_object() {
+            synth_status = json!({});
+        }
+        let prev_nodes = synth_status["graph"]["nodes"].as_u64();
+        let prev_edges = synth_status["graph"]["edges"].as_u64();
+        let meta = json!({
             "prev_nodes": prev_nodes,
             "prev_edges": prev_edges,
-        }),
-    );
-    synth_status["state"] = json!(if state.is_empty() {
-        "ready"
-    } else {
-        state.as_str()
-    });
-    if let Some(rev) = delta.revision {
-        synth_status["ir_revision"] = json!(rev);
-    }
-    if delta.nodes.is_some() || delta.edges.is_some() {
-        if !synth_status["graph"].is_object() {
-            synth_status["graph"] = json!({});
+        });
+        if !event_project.is_empty() {
+            m::set(
+                &format!("graph-sse-delta-meta:{event_project}"),
+                meta.clone(),
+            );
         }
-        if let Some(nodes) = delta.nodes {
-            synth_status["graph"]["nodes"] = json!(nodes);
+        m::set("graph-sse-delta-meta", meta);
+        synth_status["state"] = json!(if state.is_empty() {
+            "ready"
+        } else {
+            state.as_str()
+        });
+        if let Some(rev) = delta.revision {
+            synth_status["ir_revision"] = json!(rev);
         }
-        if let Some(edges) = delta.edges {
-            synth_status["graph"]["edges"] = json!(edges);
+        if delta.nodes.is_some() || delta.edges.is_some() {
+            if !synth_status["graph"].is_object() {
+                synth_status["graph"] = json!({});
+            }
+            if let Some(nodes) = delta.nodes {
+                synth_status["graph"]["nodes"] = json!(nodes);
+            }
+            if let Some(edges) = delta.edges {
+                synth_status["graph"]["edges"] = json!(edges);
+            }
         }
+        if !event["backend"].is_null() {
+            synth_status["backend"] = event["backend"].clone();
+        }
+        m::set("graph", synth_status);
     }
-    if !event["backend"].is_null() {
-        synth_status["backend"] = event["backend"].clone();
-    }
-    m::set("graph", synth_status);
     GraphSseAction::RefreshCandidate {
         event_project,
         banner_text,
@@ -886,23 +933,39 @@ pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> 
     }
 }
 
-/// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
+/// Processes SSE `event: "graph_status"` and `event: "system_graph_status"` updates without
+/// destroying user camera or selection.
 pub(crate) fn on_graph_status_sse(event: &V) {
     let current_project = dom::value("project");
     match apply_graph_status_sse_event(event, &current_project) {
         GraphSseAction::Ignored => {}
         GraphSseAction::Building => {
-            render();
+            let ev_proj = m::text(event, "project_id");
+            let member_proj = sse_event_member_project(event);
+            if ev_proj.is_empty()
+                || current_project.is_empty()
+                || ev_proj == current_project
+                || (!member_proj.is_empty() && member_proj == current_project)
+            {
+                render();
+            }
         }
         GraphSseAction::RefreshCandidate {
             event_project,
             banner_text,
             schedule_idle,
         } => {
-            render();
+            if event_project.is_empty()
+                || current_project.is_empty()
+                || event_project == current_project
+            {
+                render();
+            }
             crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
             if schedule_idle {
                 crate::graph_map::maybe_schedule_idle_refresh(&event_project);
+            } else {
+                crate::graph_map::refresh_external_views_for_stale_sse(&event_project);
             }
         }
     }
@@ -1693,5 +1756,107 @@ mod tests {
         }));
         assert!(schema.schema_changed);
         assert!(schema.full_reload);
+    }
+
+    #[test]
+    fn apply_graph_status_sse_admits_external_projects_in_multi_project_views_only() {
+        m::set(
+            "graph",
+            json!({ "state": "ready", "ir_revision": 10, "graph": { "nodes": 25, "edges": 40 } }),
+        );
+        let ext_event = json!({
+            "project_id": "svc-member",
+            "state": "updated",
+            "reason": "incremental_update",
+            "revision": 77,
+            "nodes": 999,
+            "edges": 888,
+            "changed_files": ["src/api.rs"]
+        });
+
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&ext_event, "proj-primary", "sessions"),
+            GraphSseAction::Ignored
+        );
+
+        for view in ["systems", "system-changes", "omnigraph"] {
+            m::write(|s| s.view = view.to_owned());
+            let action = apply_graph_status_sse_event(&ext_event, "proj-primary");
+            assert_eq!(
+                action,
+                GraphSseAction::RefreshCandidate {
+                    event_project: "svc-member".to_owned(),
+                    banner_text: "Graph updated — Refresh".to_owned(),
+                    schedule_idle: true,
+                },
+                "expected external project SSE admit for view={view}"
+            );
+            // Primary project's sidebar status must NOT be overwritten by external project counts.
+            assert_eq!(m::data("graph")["ir_revision"], json!(10));
+            assert_eq!(m::data("graph")["graph"]["nodes"], json!(25));
+        }
+
+        let sys_ir_delta = json!({
+            "project_id": "sys-owner",
+            "reason": "ir_delta",
+            "ir_revision": 88,
+        });
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&sys_ir_delta, "proj-primary", "systems"),
+            GraphSseAction::RefreshCandidate {
+                event_project: "sys-owner".to_owned(),
+                banner_text: "Graph updated — Refresh".to_owned(),
+                schedule_idle: true,
+            }
+        );
+
+        // External project and `building` events must NOT clobber primary project's singleton `graph-sse-status`.
+        let primary_ready = json!({
+            "project_id": "proj-primary",
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "changed_files": ["src/main.rs"]
+        });
+        assert!(matches!(
+            apply_graph_status_sse_event_for_view(&primary_ready, "proj-primary", "systems"),
+            GraphSseAction::RefreshCandidate { .. }
+        ));
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
+
+        let ext_building = json!({
+            "project_id": "svc-member",
+            "state": "building",
+            "reason": "build_started",
+        });
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&ext_building, "proj-primary", "systems"),
+            GraphSseAction::Building
+        );
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
+
+        let sys_member_ir_delta = json!({
+            "project_id": "sys-owner",
+            "source_project_id": "proj-api",
+            "service": "api",
+            "state": "updated",
+            "reason": "ir_delta",
+            "ir_revision": 91,
+        });
+        assert_eq!(
+            apply_graph_status_sse_event_for_view(&sys_member_ir_delta, "proj-primary", "systems"),
+            GraphSseAction::RefreshCandidate {
+                event_project: "proj-api".to_owned(),
+                banner_text: "Graph updated — Refresh".to_owned(),
+                schedule_idle: true,
+            }
+        );
+        assert_eq!(
+            m::data("graph-sse-status:proj-api")["ir_revision"],
+            json!(91)
+        );
+        assert_eq!(m::data("graph-sse-status")["revision"], json!(12));
+
+        m::write(|s| s.view = "sessions".to_owned());
     }
 }

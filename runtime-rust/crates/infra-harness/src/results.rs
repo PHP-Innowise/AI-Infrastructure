@@ -295,7 +295,7 @@ fn current_unix_ns() -> i128 {
         .unwrap_or(0)
 }
 
-fn cached_command_analyzer(
+pub(crate) fn cached_command_analyzer(
     check_root: &Path,
 ) -> std::result::Result<Arc<infra_generator::commands::CommandAnalyzer>, String> {
     let ws_canon =
@@ -398,10 +398,20 @@ impl CheckCacheKey {
     }
 }
 
+#[derive(Clone)]
+struct CheckCacheEntry {
+    capture: Capture,
+    last_used: u64,
+    check_root: PathBuf,
+    project_id: String,
+    ir_revision: u64,
+    scoped_files: Vec<String>,
+}
+
 #[derive(Default)]
 struct CheckReceiptCache {
     seq: u64,
-    entries: BTreeMap<CheckCacheKey, (Capture, u64)>,
+    entries: BTreeMap<CheckCacheKey, CheckCacheEntry>,
 }
 
 impl CheckReceiptCache {
@@ -409,11 +419,19 @@ impl CheckReceiptCache {
         self.seq = self.seq.saturating_add(1);
         let use_seq = self.seq;
         let entry = self.entries.get_mut(key)?;
-        entry.1 = use_seq;
-        Some(entry.0.clone())
+        entry.last_used = use_seq;
+        Some(entry.capture.clone())
     }
 
-    fn insert(&mut self, key: CheckCacheKey, capture: Capture) {
+    fn insert(
+        &mut self,
+        key: CheckCacheKey,
+        capture: Capture,
+        check_root: PathBuf,
+        project_id: String,
+        ir_revision: u64,
+        scoped_files: Vec<String>,
+    ) {
         self.seq = self.seq.saturating_add(1);
         let use_seq = self.seq;
         if self.entries.len() >= MAX_CHECK_CACHE_ENTRIES
@@ -421,13 +439,203 @@ impl CheckReceiptCache {
             && let Some(evict_key) = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (_, last_used))| *last_used)
+                .min_by_key(|(_, e)| e.last_used)
                 .map(|(k, _)| k.clone())
         {
             self.entries.remove(&evict_key);
         }
-        self.entries.insert(key, (capture, use_seq));
+        self.entries.insert(
+            key,
+            CheckCacheEntry {
+                capture,
+                last_used: use_seq,
+                check_root,
+                project_id,
+                ir_revision,
+                scoped_files,
+            },
+        );
     }
+
+    fn invalidate_for_ir_delta(
+        &mut self,
+        project_id: &str,
+        canon_root: &Path,
+        delta: &crate::graph_ir::IrUpdateDelta,
+        touched: &BTreeSet<&str>,
+    ) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| {
+            let same_scope = (!entry.project_id.is_empty() && entry.project_id == project_id)
+                || entry.check_root == canon_root
+                || entry.check_root.starts_with(canon_root);
+            if !same_scope {
+                return true;
+            }
+            let stale_rev = delta.ir_revision > 0 && entry.ir_revision < delta.ir_revision;
+            let scope_overlaps = delta.manifest_changed
+                || delta.reexport_changed
+                || delta.semantic_changed
+                || entry.scoped_files.is_empty()
+                || entry
+                    .scoped_files
+                    .iter()
+                    .any(|f| touched.contains(f.as_str()));
+            !(scope_overlaps && (stale_rev || delta.ir_revision == 0 || entry.ir_revision == 0))
+        });
+        before.saturating_sub(self.entries.len())
+    }
+}
+
+struct CheckCacheSubscriber {
+    state_dir: PathBuf,
+    cache: Weak<Mutex<CheckReceiptCache>>,
+}
+
+fn check_cache_subscribers() -> &'static Mutex<Vec<CheckCacheSubscriber>> {
+    static SUBS: OnceLock<Mutex<Vec<CheckCacheSubscriber>>> = OnceLock::new();
+    SUBS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_check_cache_subscriber(state_dir: PathBuf, cache: &Arc<Mutex<CheckReceiptCache>>) {
+    if let Ok(mut subs) = check_cache_subscribers().lock() {
+        subs.retain(|s| s.cache.strong_count() > 0);
+        subs.push(CheckCacheSubscriber {
+            state_dir,
+            cache: Arc::downgrade(cache),
+        });
+    }
+}
+
+fn resolve_check_scope_meta(
+    store: &SessionStore,
+    check_root: &Path,
+    argv: &[String],
+) -> (PathBuf, String, u64, Vec<String>) {
+    let canon_root =
+        infra_core::fs::canonicalize(check_root).unwrap_or_else(|_| check_root.to_path_buf());
+    let mut project_id = String::new();
+    if let Ok(projects) = store.projects() {
+        for p in projects {
+            if let (Some(pid), Some(path)) = (p["id"].as_str(), p["path"].as_str())
+                && let Ok(proj_canon) = infra_core::fs::canonicalize(Path::new(path))
+                && (canon_root == proj_canon || canon_root.starts_with(&proj_canon))
+            {
+                project_id = pid.to_owned();
+                break;
+            }
+        }
+    }
+    let ir_revision = if !project_id.is_empty() {
+        crate::graph_ir::GraphIrStore::open_readonly_cached(&store.state, &project_id)
+            .ok()
+            .flatten()
+            .map(|ir| ir.current_write_epoch())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let scoped_files = crate::clash::is_single_file_linter_argv(argv)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim_start_matches("./").replace('\\', "/"))
+        .collect();
+    (canon_root, project_id, ir_revision, scoped_files)
+}
+
+/// Invalidates L1 `CheckReceiptCache` and SQLite `check_receipt_cache` rows matching an IR delta.
+pub(crate) fn on_ir_paths_updated(
+    store: &SessionStore,
+    project_id: &str,
+    root: &Path,
+    delta: &crate::graph_ir::IrUpdateDelta,
+) -> usize {
+    let touched: BTreeSet<&str> = delta
+        .changed_paths
+        .iter()
+        .chain(delta.edited_files.iter())
+        .chain(delta.removed_files.iter())
+        .chain(delta.incoming_caller_files.iter())
+        .map(String::as_str)
+        .collect();
+    if touched.is_empty()
+        && !delta.manifest_changed
+        && !delta.reexport_changed
+        && !delta.semantic_changed
+    {
+        return 0;
+    }
+    let canon_root = infra_core::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut evicted = 0usize;
+    if let Ok(mut subs) = check_cache_subscribers().lock() {
+        subs.retain(|s| s.cache.strong_count() > 0);
+        for sub in subs.iter() {
+            if sub.state_dir == store.state
+                && let Some(cache) = sub.cache.upgrade()
+                && let Ok(mut guard) = cache.lock()
+            {
+                evicted += guard.invalidate_for_ir_delta(project_id, &canon_root, delta, &touched);
+            }
+        }
+    }
+    if let Ok(db) = store.connection() {
+        let rows: Vec<(String, String, String, i64, String)> = {
+            let Ok(mut stmt) = db.prepare(
+                "SELECT cache_key, check_root, project_id, ir_revision, scoped_files
+                 FROM check_receipt_cache",
+            ) else {
+                return evicted;
+            };
+            let Ok(mapped) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            }) else {
+                return evicted;
+            };
+            mapped.flatten().collect()
+        };
+        for (cache_key, row_root, row_pid, row_rev, scoped_raw) in rows {
+            let row_root_path = Path::new(&row_root);
+            let same_scope = (!row_pid.is_empty() && row_pid == project_id)
+                || (!row_root.is_empty()
+                    && (row_root_path == canon_root || row_root_path.starts_with(&canon_root)))
+                || (row_pid.is_empty() && row_root.is_empty());
+            if !same_scope {
+                continue;
+            }
+            let scoped: Vec<String> = if scoped_raw.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&scoped_raw).unwrap_or_default()
+            };
+            let stale_rev = delta.ir_revision > 0
+                && u64::try_from(row_rev)
+                    .ok()
+                    .is_none_or(|r| r < delta.ir_revision);
+            let scope_overlaps = delta.manifest_changed
+                || delta.reexport_changed
+                || delta.semantic_changed
+                || scoped.is_empty()
+                || scoped.iter().any(|f| touched.contains(f.as_str()));
+            if scope_overlaps
+                && (stale_rev || delta.ir_revision == 0 || row_rev == 0)
+                && db
+                    .execute(
+                        "DELETE FROM check_receipt_cache WHERE cache_key = ?1",
+                        [&cache_key],
+                    )
+                    .is_ok()
+            {
+                evicted += 1;
+            }
+        }
+    }
+    evicted
 }
 
 fn check_cache_disabled_by_env() -> bool {
@@ -489,7 +697,7 @@ pub struct Results {
     pub(crate) backend: Arc<dyn ResultsBackend>,
     target: RwLock<Option<Weak<dyn TargetCheckWorkflow>>>,
     omnigraph: RwLock<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
-    check_cache: Mutex<CheckReceiptCache>,
+    check_cache: Arc<Mutex<CheckReceiptCache>>,
     check_cache_enabled: AtomicBool,
 }
 #[derive(Clone, Copy, Default)]
@@ -501,7 +709,25 @@ impl Results {
     pub fn new(store: SessionStore, backend: Arc<dyn ResultsBackend>) -> Result<Self> {
         let checks = {
             let db = store.connection()?;
-            db.execute_batch("CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,settings TEXT NOT NULL,usage TEXT,context TEXT,receipt TEXT);CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);CREATE TABLE IF NOT EXISTS checks(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE IF NOT EXISTS check_receipt_cache(cache_key TEXT PRIMARY KEY,canon_argv TEXT NOT NULL,env_fingerprint TEXT NOT NULL,snapshot_id TEXT NOT NULL,output TEXT NOT NULL,exit_code INTEGER,reason TEXT,seconds REAL NOT NULL,updated_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS check_receipt_cache_lru ON check_receipt_cache(last_used_at ASC);")?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,settings TEXT NOT NULL,usage TEXT,context TEXT,receipt TEXT);CREATE INDEX IF NOT EXISTS launches_session ON launches(session_id,started_at);CREATE TABLE IF NOT EXISTS checks(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE IF NOT EXISTS check_receipt_cache(cache_key TEXT PRIMARY KEY,canon_argv TEXT NOT NULL,env_fingerprint TEXT NOT NULL,snapshot_id TEXT NOT NULL,output TEXT NOT NULL,exit_code INTEGER,reason TEXT,seconds REAL NOT NULL,updated_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL,check_root TEXT NOT NULL DEFAULT '',project_id TEXT NOT NULL DEFAULT '',ir_revision INTEGER NOT NULL DEFAULT 0,scoped_files TEXT NOT NULL DEFAULT '');CREATE INDEX IF NOT EXISTS check_receipt_cache_lru ON check_receipt_cache(last_used_at ASC);")?;
+            let cache_cols = {
+                let mut s = db.prepare("PRAGMA table_info(check_receipt_cache)")?;
+                s.query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<std::result::Result<BTreeSet<_>, _>>()?
+            };
+            for (col, def) in [
+                ("check_root", "TEXT NOT NULL DEFAULT ''"),
+                ("project_id", "TEXT NOT NULL DEFAULT ''"),
+                ("ir_revision", "INTEGER NOT NULL DEFAULT 0"),
+                ("scoped_files", "TEXT NOT NULL DEFAULT ''"),
+            ] {
+                if !cache_cols.contains(col) {
+                    db.execute(
+                        &format!("ALTER TABLE check_receipt_cache ADD COLUMN {col} {def}"),
+                        [],
+                    )?;
+                }
+            }
             let columns = {
                 let mut s = db.prepare("PRAGMA table_info(launches)")?;
                 s.query_map([], |r| r.get::<_, String>(1))?
@@ -520,12 +746,14 @@ impl Results {
             s.query_map([], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let check_cache = Arc::new(Mutex::new(CheckReceiptCache::default()));
+        register_check_cache_subscriber(store.state.clone(), &check_cache);
         let this = Self {
             store,
             backend,
             target: RwLock::new(None),
             omnigraph: RwLock::new(None),
-            check_cache: Mutex::new(CheckReceiptCache::default()),
+            check_cache,
             check_cache_enabled: AtomicBool::new(true),
         };
         for raw in checks {
@@ -671,11 +899,20 @@ impl Results {
             }
         };
         if let Some(capture) = loaded {
+            let (canon_root, project_id, ir_revision, scoped_files) =
+                resolve_check_scope_meta(&self.store, check_root, argv);
             let mut guard = self
                 .check_cache
                 .lock()
                 .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
-            guard.insert(key, capture.clone());
+            guard.insert(
+                key,
+                capture.clone(),
+                canon_root,
+                project_id,
+                ir_revision,
+                scoped_files,
+            );
             return Ok(Some(capture));
         }
         Ok(None)
@@ -707,26 +944,43 @@ impl Results {
         let digest = key.digest()?;
         let raw_argv = serde_json::to_string(&key.canon_argv)?;
         let seq = next_check_cache_seq();
+        let (canon_root, project_id, ir_revision, scoped_files) =
+            resolve_check_scope_meta(&self.store, check_root, argv);
+        let scoped_json = serde_json::to_string(&scoped_files).unwrap_or_else(|_| "[]".into());
+        let root_str = canon_root.to_string_lossy().into_owned();
+        let ir_rev_i64 = i64::try_from(ir_revision).unwrap_or(0);
         {
             let mut guard = self
                 .check_cache
                 .lock()
                 .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
-            guard.insert(key.clone(), capture.clone());
+            guard.insert(
+                key.clone(),
+                capture.clone(),
+                canon_root,
+                project_id.clone(),
+                ir_revision,
+                scoped_files,
+            );
         }
         let db = self.store.connection()?;
         db.execute(
             "INSERT INTO check_receipt_cache(
                  cache_key, canon_argv, env_fingerprint, snapshot_id,
-                 output, exit_code, reason, seconds, updated_at, last_used_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                 output, exit_code, reason, seconds, updated_at, last_used_at,
+                 check_root, project_id, ir_revision, scoped_files
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(cache_key) DO UPDATE SET
                  output = excluded.output,
                  exit_code = excluded.exit_code,
                  reason = excluded.reason,
                  seconds = excluded.seconds,
                  updated_at = excluded.updated_at,
-                 last_used_at = excluded.last_used_at",
+                 last_used_at = excluded.last_used_at,
+                 check_root = excluded.check_root,
+                 project_id = excluded.project_id,
+                 ir_revision = excluded.ir_revision,
+                 scoped_files = excluded.scoped_files",
             params![
                 digest,
                 raw_argv,
@@ -737,6 +991,10 @@ impl Results {
                 capture.reason,
                 capture.seconds,
                 seq,
+                root_str,
+                project_id,
+                ir_rev_i64,
+                scoped_json,
             ],
         )?;
         db.execute(
@@ -3402,5 +3660,125 @@ mod omnigraph_quality_gate_tests {
         results.start_launch(sid, &generation, None).unwrap();
         let history = results.history(sid).unwrap();
         assert_eq!(history["launches"][0]["settings"]["permissions"], "manual");
+    }
+
+    #[test]
+    fn results_on_ir_paths_updated_invalidates_overlapping_receipts_and_keeps_disjoint_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("project");
+        setup_governed_project(&proj);
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(proj.join("src/a.php"), "<?php function a() {}\n").unwrap();
+        std::fs::write(proj.join("src/b.php"), "<?php function b() {}\n").unwrap();
+        let store = SessionStore::open(&tmp.path().join("state")).unwrap();
+        let reg = store.register(&proj).unwrap();
+        let pid = reg["id"].as_str().unwrap().to_owned();
+        let results = Results::new(
+            store.clone(),
+            Arc::new(TestBackend {
+                project: proj.clone(),
+                operation: Arc::new(tokio::sync::Mutex::new(())),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .unwrap();
+
+        let env_extra = BTreeMap::new();
+        let cap = Capture {
+            output: "ok".into(),
+            exit_code: Some(0),
+            reason: None,
+            seconds: 0.01,
+        };
+        let argv_a = vec!["php".into(), "-l".into(), "src/a.php".into()];
+        let argv_b = vec!["php".into(), "-l".into(), "src/b.php".into()];
+        let argv_ws = vec!["php".into(), "-v".into()];
+
+        results
+            .store_cached_check(
+                &argv_a,
+                &env_extra,
+                "snap-1",
+                &proj,
+                "php -l src/a.php",
+                false,
+                &cap,
+            )
+            .unwrap();
+        results
+            .store_cached_check(
+                &argv_b,
+                &env_extra,
+                "snap-1",
+                &proj,
+                "php -l src/b.php",
+                false,
+                &cap,
+            )
+            .unwrap();
+        results
+            .store_cached_check(&argv_ws, &env_extra, "snap-1", &proj, "php -v", false, &cap)
+            .unwrap();
+
+        let delta = crate::graph_ir::IrUpdateDelta {
+            ir_revision: 5,
+            changed_paths: vec!["src/a.php".into()],
+            ..Default::default()
+        };
+        let evicted = on_ir_paths_updated(&store, &pid, &proj, &delta);
+        assert!(evicted >= 2, "evicted={evicted}");
+        assert!(
+            results
+                .cached_check(
+                    &argv_a,
+                    &env_extra,
+                    "snap-1",
+                    &proj,
+                    "php -l src/a.php",
+                    false
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            results
+                .cached_check(&argv_ws, &env_extra, "snap-1", &proj, "php -v", false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            results
+                .cached_check(
+                    &argv_b,
+                    &env_extra,
+                    "snap-1",
+                    &proj,
+                    "php -l src/b.php",
+                    false
+                )
+                .unwrap()
+                .is_some()
+        );
+
+        let manifest_delta = crate::graph_ir::IrUpdateDelta {
+            ir_revision: 6,
+            manifest_changed: true,
+            ..Default::default()
+        };
+        let evicted_manifest = on_ir_paths_updated(&store, &pid, &proj, &manifest_delta);
+        assert!(evicted_manifest >= 1);
+        assert!(
+            results
+                .cached_check(
+                    &argv_b,
+                    &env_extra,
+                    "snap-1",
+                    &proj,
+                    "php -l src/b.php",
+                    false
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 }

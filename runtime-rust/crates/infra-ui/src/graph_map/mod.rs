@@ -352,6 +352,8 @@ pub(crate) use surfaces::open_system_service_map;
 #[allow(unused_imports)]
 pub use surfaces::pointer_event;
 #[allow(unused_imports)]
+pub(crate) use surfaces::refresh_external_views_for_stale_sse;
+#[allow(unused_imports)]
 pub(crate) use surfaces::render_side_memory_bridge_html;
 #[allow(unused_imports)]
 pub use surfaces::selected_impact_file;

@@ -232,6 +232,78 @@ fn plan_html(capsule: &V) -> String {
     out
 }
 
+fn gate_stderr_block(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<pre class=\"skill-capsule-gate-stderr\">{}</pre>",
+            esc(trimmed)
+        )
+    }
+}
+
+fn gate_programs_summary_html(programs: &[V]) -> String {
+    if programs.is_empty() {
+        return String::new();
+    }
+    let rows = programs
+        .iter()
+        .map(|prog| {
+            let id = m::text(prog, "id");
+            let passed = m::yes(&prog["passed"]);
+            let exit = prog["exit_code"]
+                .as_i64()
+                .map_or_else(|| "—".to_owned(), |c| c.to_string());
+            let secs = prog["seconds"]
+                .as_f64()
+                .map_or_else(String::new, |s| format!(" · {s:.2}s"));
+            let denied = if m::yes(&prog["sandbox_denied"]) {
+                " · sandbox denied"
+            } else {
+                ""
+            };
+            let stderr_html = gate_stderr_block(prog["stderr"].as_str().unwrap_or(""));
+            format!(
+                "<li><code>{}</code> {} (exit {}{secs}{denied}){stderr_html}</li>",
+                esc(&id),
+                if passed { "passed" } else { "failed" },
+                esc(&exit)
+            )
+        })
+        .collect::<String>();
+    format!("<ul class=\"skill-capsule-violations\">{rows}</ul>")
+}
+
+fn gate_comparison_summary_html(report: &V) -> String {
+    let comparison = &report["result_comparison"];
+    let mut parts = Vec::new();
+    if let Some(secs) = report["seconds"].as_f64() {
+        parts.push(format!("{secs:.2}s"));
+    }
+    if let Some(net) = report["network"].as_str().filter(|s| !s.is_empty()) {
+        parts.push(format!("network {}", esc(net)));
+    }
+    if comparison.is_object() {
+        let cmp_status = comparison["status"].as_str().unwrap_or("unknown");
+        parts.push(format!("comparison {}", esc(cmp_status)));
+    }
+    let summary_line = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<p class=\"skill-capsule-source\">{}</p>",
+            parts.join(" · ")
+        )
+    };
+    let report_stderr = gate_stderr_block(report["stderr"].as_str().unwrap_or(""));
+    let report_details = gate_stderr_block(report["details"].as_str().unwrap_or(""));
+    let cmp_stderr = gate_stderr_block(comparison["stderr"].as_str().unwrap_or(""));
+    let cmp_details = gate_stderr_block(comparison["details"].as_str().unwrap_or(""));
+    format!("{summary_line}{report_stderr}{report_details}{cmp_stderr}{cmp_details}")
+}
+
 fn gates_html(gates: &[V]) -> String {
     if gates.is_empty() {
         return String::new();
@@ -240,29 +312,63 @@ fn gates_html(gates: &[V]) -> String {
         .iter()
         .map(|gate| {
             let passed = m::yes(&gate["passed"]);
-            let violations = m::array(&gate["report"]["violations"]);
+            let at_str = gate["at"]
+                .as_str()
+                .or_else(|| gate["created_at"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" <span class=\"skill-capsule-source\">{}</span>", esc(s)))
+                .unwrap_or_default();
+            let report = &gate["report"];
+            let programs_html = gate_programs_summary_html(&m::array(&report["programs"]));
+            let comparison_html = gate_comparison_summary_html(report);
+            let violations = m::array(&report["violations"]);
             let details = violations
                 .iter()
-                .take(12)
                 .map(|violation| {
+                    let at_v = violation["at"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            format!(
+                                " <span class=\"skill-capsule-source\">at <code>{}</code></span>",
+                                esc(s)
+                            )
+                        })
+                        .unwrap_or_default();
+                    let prog_v = violation["program"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            format!(
+                                " <span class=\"skill-capsule-source\">program <code>{}</code></span>",
+                                esc(s)
+                            )
+                        })
+                        .unwrap_or_default();
+                    let extra = format!(
+                        "{}{}",
+                        gate_stderr_block(violation["stderr"].as_str().unwrap_or("")),
+                        gate_stderr_block(violation["details"].as_str().unwrap_or(""))
+                    );
                     format!(
-                        "<li><code>{}</code> {}</li>",
+                        "<li><code>{}</code> {}{at_v}{prog_v}{extra}</li>",
                         esc(&m::text(violation, "code")),
                         esc(&m::text(violation, "message"))
                     )
                 })
                 .collect::<String>();
             format!(
-                "<li data-passed=\"{}\"><span class=\"skill-capsule-kind\">Round {} · {}</span> {}{}{}</li>",
+                "<li data-passed=\"{}\"><span class=\"skill-capsule-kind\">Round {} · {}</span> {}{}{}{}{}</li>",
                 if passed { "true" } else { "false" },
                 count(&gate["round"]),
                 esc(&m::text(gate, "gate")),
                 if passed { "passed" } else { "failed" },
-                if violations.len() > 12 {
-                    format!(" ({} findings, 12 shown)", violations.len())
-                } else {
-                    String::new()
-                },
+                at_str,
+                comparison_html,
+                programs_html,
                 if details.is_empty() {
                     String::new()
                 } else {
@@ -277,28 +383,77 @@ fn gates_html(gates: &[V]) -> String {
     )
 }
 
+fn session_link_html(project_id: &str, session_id: &str) -> String {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return String::new();
+    }
+    let route = dom::format_hash_str(&dom::HashRoute {
+        view: "sessions".into(),
+        project: project_id.to_owned(),
+        session: sid.to_owned(),
+        run: String::new(),
+        path: String::new(),
+    });
+    let short_sid = if sid.chars().count() > 14 {
+        let prefix: String = sid.chars().take(12).collect();
+        format!("{prefix}…")
+    } else {
+        sid.to_owned()
+    };
+    let payload = json!({"project_id": project_id, "session_id": sid});
+    format!(
+        "<a class=\"skill-capsule-session-link\" href=\"{}\" data-action=\"skill-capsule-open-session\" data-payload=\"{}\">Session <code>{}</code></a>",
+        esc(&route),
+        esc(&payload.to_string()),
+        esc(&short_sid)
+    )
+}
+
+fn run_row_html(run: &V, project_id: &str) -> String {
+    let handed = run["deopts"].as_i64().unwrap_or_default();
+    let link = session_link_html(project_id, &m::text(run, "session_id"));
+    format!(
+        "<li>{} · {}{} <span class=\"skill-capsule-source\">{} {}</span>{}</li>",
+        esc(&m::text(run, "created_at")),
+        esc(&m::text(run, "outcome")),
+        if handed > 0 {
+            format!(" · {handed} step(s) handed back")
+        } else {
+            String::new()
+        },
+        esc(&m::text(run, "provider")),
+        esc(&m::text(run, "model")),
+        if link.is_empty() {
+            String::new()
+        } else {
+            format!(" · {link}")
+        }
+    )
+}
+
 fn runs_html(detail: &V) -> String {
+    let project_id = m::text(detail, "project_id");
     let runs = &detail["runs"];
     let amortization = &detail["amortization"];
-    let recent = m::array(&runs["recent"])
+    let all_recent = m::array(&runs["recent"]);
+    let recent = all_recent
         .iter()
         .take(8)
-        .map(|run| {
-            let handed = run["deopts"].as_i64().unwrap_or_default();
-            format!(
-                "<li>{} · {}{} <span class=\"skill-capsule-source\">{} {}</span></li>",
-                esc(&m::text(run, "created_at")),
-                esc(&m::text(run, "outcome")),
-                if handed > 0 {
-                    format!(" · {handed} step(s) handed back")
-                } else {
-                    String::new()
-                },
-                esc(&m::text(run, "provider")),
-                esc(&m::text(run, "model")),
-            )
-        })
+        .map(|run| run_row_html(run, &project_id))
         .collect::<String>();
+    let older = if all_recent.len() > 8 {
+        let rows = all_recent[8..]
+            .iter()
+            .map(|run| run_row_html(run, &project_id))
+            .collect::<String>();
+        format!(
+            "<details class=\"skill-capsule-more-runs\"><summary>Show {} earlier warm turns</summary><ul class=\"skill-capsule-list\">{rows}</ul></details>",
+            all_recent.len() - 8
+        )
+    } else {
+        String::new()
+    };
     let warm_turns_display = match (runs["count"].as_i64(), runs["total"].as_i64()) {
         (Some(since), Some(total)) if total > since => format!("{since} ({total} total)"),
         _ => count(&runs["count"]),
@@ -311,7 +466,7 @@ fn runs_html(detail: &V) -> String {
         _ => "—".into(),
     };
     let body = format!(
-        "<dl class=\"skill-capsule-facts-grid\"><dt>Warm turns</dt><dd>{}</dd><dt>Completed</dt><dd>{}</dd><dt>Handed a step back</dt><dd>{}</dd><dt>Compilation cost</dt><dd>{}</dd><dt>Compile cost / warm turn</dt><dd>{}</dd><dt>Saving per reuse</dt><dd>{}</dd><dt>Break-even</dt><dd>{}</dd></dl><p class=\"skills-note\">A saving is measured by a sealed evaluation (<code>infra-engine eval skillcache-ab</code>), not read off these turns. Until one exists it is unknown.</p>{}",
+        "<dl class=\"skill-capsule-facts-grid\"><dt>Warm turns</dt><dd>{}</dd><dt>Completed</dt><dd>{}</dd><dt>Handed a step back</dt><dd>{}</dd><dt>Compilation cost</dt><dd>{}</dd><dt>Compile cost / warm turn</dt><dd>{}</dd><dt>Saving per reuse</dt><dd>{}</dd><dt>Break-even</dt><dd>{}</dd></dl><p class=\"skills-note\">A saving is measured by a sealed evaluation (<code>infra-engine eval skillcache-ab</code>), not read off these turns. Until one exists it is unknown.</p>{}{}",
         warm_turns_display,
         count(&runs["complete"]),
         count(&runs["handed_back"]),
@@ -323,12 +478,13 @@ fn runs_html(detail: &V) -> String {
             String::new()
         } else {
             format!("<ul class=\"skill-capsule-list\">{recent}</ul>")
-        }
+        },
+        older
     );
     section("Warm turns and cost", &body)
 }
 
-fn compile_html(compile: &V) -> String {
+fn compile_html(compile: &V, project_id: &str, source_session_id: &str) -> String {
     if !compile.is_object() {
         return String::new();
     }
@@ -343,36 +499,188 @@ fn compile_html(compile: &V) -> String {
     .map(|(field, label)| format!("{} {label}", count(&usage[*field])))
     .collect::<Vec<_>>()
     .join(" · ");
+    let source_link = session_link_html(project_id, source_session_id);
+    let source_row = if source_link.is_empty() {
+        String::new()
+    } else {
+        format!("<dt>Source session</dt><dd>{source_link}</dd>")
+    };
     section(
         "Compilation",
         &format!(
-            "<dl class=\"skill-capsule-facts-grid\"><dt>Status</dt><dd>{}</dd><dt>Rounds</dt><dd>{}</dd><dt>Compiler</dt><dd>{} {}</dd><dt>Tokens</dt><dd>{}</dd><dt>Cost</dt><dd>{}</dd></dl><p class=\"skills-note\">{}</p>",
+            "<dl class=\"skill-capsule-facts-grid\"><dt>Status</dt><dd>{}</dd><dt>Rounds</dt><dd>{}</dd><dt>Compiler</dt><dd>{} {}</dd><dt>Tokens</dt><dd>{}</dd><dt>Cost</dt><dd>{}</dd>{}</dl><p class=\"skills-note\">{}</p>",
             esc(&m::text(compile, "status")),
             count(&compile["rounds"]),
             esc(&m::text(compile, "provider")),
             esc(&m::text(compile, "model")),
             esc(&tokens),
             money(&usage["cost_usd"]),
+            source_row,
             esc(&m::text(compile, "outcome")),
         ),
     )
 }
 
+pub(crate) fn is_needs_trace_error(status: u16, message: &str) -> bool {
+    if status == 409 {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("needs_trace")
+        || lower.contains("fresh observed trace")
+        || lower.contains("needs a fresh")
+        || lower.contains("no execution trace")
+}
+
+pub(crate) fn build_recompile_request_body(
+    provider_override: &str,
+    model_override: &str,
+    selected: &V,
+    session_state: &V,
+    boot: &V,
+) -> V {
+    let provider = {
+        let explicit = provider_override.trim();
+        if !explicit.is_empty() {
+            Some(explicit.to_owned())
+        } else {
+            crate::skillcache::configured_compiler_provider(selected, session_state, boot)
+        }
+    };
+    let model = {
+        let explicit = model_override.trim();
+        if !explicit.is_empty() {
+            Some(explicit.to_owned())
+        } else {
+            selected["skillcache"]["compiler"]["model"]
+                .as_str()
+                .or_else(|| session_state["compiler"]["model"].as_str())
+                .or_else(|| boot["skillcache"]["compiler"]["model"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        }
+    };
+    if provider.is_none() && model.is_none() {
+        return json!({});
+    }
+    let mut compiler = serde_json::Map::new();
+    if let Some(p) = provider {
+        compiler.insert("provider".into(), V::String(p));
+    }
+    if let Some(m_id) = model {
+        compiler.insert("model".into(), V::String(m_id));
+    }
+    json!({"compiler": V::Object(compiler)})
+}
+
+fn compiler_controls_html(provider: &str, model: &str, disabled: bool) -> String {
+    let mut opts = String::new();
+    for (val, label) in [
+        ("", "Default compiler"),
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+    ] {
+        let sel = if provider.eq_ignore_ascii_case(val) {
+            " selected"
+        } else {
+            ""
+        };
+        opts.push_str(&format!(
+            "<option value=\"{val}\"{sel}>{}</option>",
+            esc(label)
+        ));
+    }
+    let dis = if disabled { " disabled" } else { "" };
+    format!(
+        "<div class=\"skill-capsule-compiler\">\
+         <label class=\"field\">Compiler<select id=\"skill-capsule-compiler-provider\"{dis}>{opts}</select></label>\
+         <label class=\"field\">Compiler model<input id=\"skill-capsule-compiler-model\" type=\"text\" maxlength=\"120\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Default model\" value=\"{}\"{dis}></label>\
+         </div>",
+        esc(model)
+    )
+}
+
+fn needs_trace_guidance_html(detail: &V, error_message: &str, disabled: bool) -> String {
+    let message = if !error_message.trim().is_empty() {
+        error_message.trim()
+    } else if !detail["reason"].as_str().unwrap_or("").trim().is_empty() {
+        detail["reason"].as_str().unwrap_or("")
+    } else {
+        "This capsule needs a fresh observed trace before it can be recompiled."
+    };
+    let payload = json!({
+        "capsule_id": detail["capsule_id"],
+        "project_id": detail["project_id"],
+        "skill_name": detail["skill_name"],
+        "skill_path": detail["skill_path"],
+    });
+    format!(
+        "<div class=\"skill-capsule-needs-trace\" role=\"status\">\
+         <p>{}</p>\
+         {}</div>",
+        esc(message),
+        button(
+            "Capture fresh trace in session",
+            "skill-capsule-capture-trace",
+            &payload,
+            "primary",
+            disabled
+        )
+    )
+}
+
+pub(crate) fn capsule_matches_query(capsule: &V, query: &str) -> bool {
+    let trimmed = query.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let status = capsule["status"].as_str().unwrap_or("");
+    let form = capsule["form"].as_str().unwrap_or("");
+    let haystack = [
+        capsule_title(capsule),
+        m::text(capsule, "skill_name"),
+        m::text(capsule, "skill_path"),
+        m::text(capsule, "capsule_id"),
+        status.to_owned(),
+        status_label(status).to_owned(),
+        form.to_owned(),
+        form_label(form).to_owned(),
+        m::text(&capsule["mu"], "description"),
+        m::text(capsule, "reason"),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    trimmed
+        .split_whitespace()
+        .all(|term| haystack.contains(term))
+}
+
 /// One capsule: its identity and status, what can be done with it, its plan
 /// and its history. `armed` is a delete waiting for its confirmation;
 /// `pending` is an action in flight.
+#[cfg(test)]
 pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool) -> String {
+    render_capsule_detail_html_with_options(detail, armed, pending, "", "", "")
+}
+
+pub(crate) fn render_capsule_detail_html_with_options(
+    detail: &V,
+    armed: bool,
+    pending: bool,
+    compiler_provider: &str,
+    compiler_model: &str,
+    needs_trace_message: &str,
+) -> String {
     let id = &detail["capsule_id"];
     let status = detail["status"].as_str().unwrap_or("");
     let capsule = &detail["capsule"];
     let mut actions = String::new();
-    let has_source = detail["source_session_id"]
-        .as_str()
-        .is_some_and(|s| !s.is_empty())
-        && detail["source_generation"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty());
-    if has_source && matches!(status, "failed" | "interrupted") {
+    let can_recompile = matches!(
+        status,
+        "failed" | "interrupted" | "needs_recompile" | "stale"
+    );
+    if matches!(status, "failed" | "interrupted") {
         actions.push_str(&button(
             "Retry compile",
             "skill-capsule-recompile",
@@ -381,7 +689,7 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
             pending,
         ));
     }
-    if has_source && matches!(status, "needs_recompile" | "stale") {
+    if matches!(status, "needs_recompile" | "stale") {
         actions.push_str(&button(
             "Recompile",
             "skill-capsule-recompile",
@@ -459,8 +767,19 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
             )
         })
         .collect::<String>();
+    let show_needs_trace = m::yes(&detail["needs_trace"]) || !needs_trace_message.trim().is_empty();
+    let compiler_controls = if can_recompile {
+        compiler_controls_html(compiler_provider, compiler_model, pending)
+    } else {
+        String::new()
+    };
+    let needs_trace_box = if show_needs_trace {
+        needs_trace_guidance_html(detail, needs_trace_message, pending)
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "<header class=\"skill-capsule-head\"><h3>{}</h3><p class=\"installed-tools\">{}{}</p>{}{}<div class=\"skill-capsule-actions\">{}</div></header>",
+        "<header class=\"skill-capsule-head\"><h3>{}</h3><p class=\"installed-tools\">{}{}</p>{}{}<div class=\"skill-capsule-actions\">{}</div>{}{}</header>",
         esc(&capsule_title(detail)),
         chip(status_label(status), status_tone(status)),
         chip(form_label(detail["form"].as_str().unwrap_or("")), "muted"),
@@ -481,6 +800,8 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
             )
         },
         actions,
+        compiler_controls,
+        needs_trace_box,
     );
     if capabilities.is_object() {
         out.push_str(&section(
@@ -509,7 +830,11 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
         ));
     }
     out.push_str(&runs_html(detail));
-    out.push_str(&compile_html(&detail["compile"]));
+    out.push_str(&compile_html(
+        &detail["compile"],
+        &m::text(detail, "project_id"),
+        &m::text(detail, "source_session_id"),
+    ));
     out.push_str(&gates_html(&m::array(&detail["gates"])));
     if !files.is_empty() {
         out.push_str(&section(
@@ -552,17 +877,48 @@ fn list_path(project: &str) -> String {
     )
 }
 
+fn ensure_search_input() {
+    if dom::get("skill-capsules-search").is_some() {
+        return;
+    }
+    let Some(toolbar) = dom::all(".skill-capsules-toolbar").into_iter().next() else {
+        return;
+    };
+    let field = dom::el("label", "field", "Search");
+    let input = dom::el("input", "", "");
+    let _ = input.set_attribute("id", "skill-capsules-search");
+    let _ = input.set_attribute("type", "search");
+    let _ = input.set_attribute("maxlength", "200");
+    let _ = input.set_attribute("autocomplete", "off");
+    let _ = input.set_attribute("spellcheck", "false");
+    let _ = input.set_attribute("placeholder", "Filter by skill, capsule, path…");
+    dom::add(&field, &input);
+    let anchor = dom::get("skill-capsules-refresh");
+    let _ = toolbar.insert_before(&field, anchor.as_deref());
+}
+
 fn render_list() {
+    ensure_search_input();
     let listed = m::data("skill-capsules");
     let capsules = m::array(&listed["capsules"]);
+    let query = dom::value("skill-capsules-search");
+    let filtered: Vec<&V> = capsules
+        .iter()
+        .filter(|capsule| capsule_matches_query(capsule, &query))
+        .collect();
     let open = m::string(&m::data("skill-capsule-open"));
     if let Some(list) = dom::get("skill-capsules-list") {
         crate::skillcache::set_markup(
             &list,
             &if capsules.is_empty() {
                 "<p class=\"empty-note\">No capsule yet. Turn SkillCache to Observe in a session, run a turn that uses a skill, and compile it from the run's SkillCache tab.</p>".to_owned()
+            } else if filtered.is_empty() {
+                format!(
+                    "<p class=\"empty-note\">No capsules match “{}”.</p>",
+                    esc(query.trim())
+                )
             } else {
-                capsules
+                filtered
                     .iter()
                     .map(|capsule| {
                         render_capsule_row_html(capsule, m::text(capsule, "capsule_id") == open)
@@ -571,14 +927,16 @@ fn render_list() {
             },
         );
     }
-    dom::text(
-        "skill-capsules-status-note",
-        &match capsules.len() {
-            0 => String::new(),
-            1 => "1 capsule".into(),
-            count => format!("{count} capsules"),
-        },
-    );
+    let note = if capsules.is_empty() {
+        String::new()
+    } else if !query.trim().is_empty() {
+        format!("{} of {} capsules", filtered.len(), capsules.len())
+    } else if capsules.len() == 1 {
+        "1 capsule".into()
+    } else {
+        format!("{} capsules", capsules.len())
+    };
+    dom::text("skill-capsules-status-note", &note);
 }
 
 fn render_detail() {
@@ -592,19 +950,38 @@ fn render_detail() {
         dom::hide(&pane, true);
         return;
     }
+    let compiler = m::data("skill-capsule-compiler");
+    let needs_trace = m::data("skill-capsule-needs-trace");
+    let trace_msg = if needs_trace["capsule_id"].as_str() == Some(open.as_str()) {
+        needs_trace["message"].as_str().unwrap_or("")
+    } else {
+        ""
+    };
     crate::skillcache::set_markup(
         &pane,
-        &render_capsule_detail_html(
+        &render_capsule_detail_html_with_options(
             &detail,
             m::data("skill-capsule-armed") == open.as_str(),
             m::yes(&m::data("skill-capsule-pending")),
+            compiler["provider"].as_str().unwrap_or(""),
+            compiler["model"].as_str().unwrap_or(""),
+            trace_msg,
         ),
     );
     dom::hide(&pane, false);
 }
 
+pub(crate) fn should_clear_error_on_reload(preserve_error: bool) -> bool {
+    !preserve_error
+}
+
 /// Loads the project's capsules and, when one is open, that capsule.
 pub async fn load_capsules() {
+    load_capsules_preserving_error(false).await;
+}
+
+async fn load_capsules_preserving_error(preserve_error: bool) {
+    ensure_search_input();
     let project = m::current_project();
     if project.is_empty() {
         dom::text(
@@ -617,11 +994,14 @@ pub async fn load_capsules() {
         Ok((epoch, listed))
             if m::current("skill-capsules", epoch) && m::current_project() == project =>
         {
-            dom::error("skill-capsules-error", "");
+            if should_clear_error_on_reload(preserve_error) {
+                dom::error("skill-capsules-error", "");
+            }
             // A capsule of another project, or one that was deleted, closes.
             let open = m::string(&m::data("skill-capsule-open"));
             let filtered = !dom::value("skill-capsules-status").is_empty()
-                || !dom::value("skill-capsules-form").is_empty();
+                || !dom::value("skill-capsules-form").is_empty()
+                || !dom::value("skill-capsules-search").trim().is_empty();
             if !open.is_empty()
                 && !filtered
                 && !m::array(&listed["capsules"])
@@ -637,7 +1017,7 @@ pub async fn load_capsules() {
             if open.is_empty() {
                 render_detail();
             } else {
-                load_capsule(&open).await;
+                load_capsule_preserving_error(&open, preserve_error).await;
             }
         }
         Ok(_) => {}
@@ -647,6 +1027,10 @@ pub async fn load_capsules() {
 }
 
 async fn load_capsule(id: &str) {
+    load_capsule_preserving_error(id, false).await;
+}
+
+async fn load_capsule_preserving_error(id: &str, preserve_error: bool) {
     let project = m::current_project();
     let path = format!(
         "/api/projects/{}/skillcache/capsules/{}",
@@ -657,7 +1041,9 @@ async fn load_capsule(id: &str) {
         Ok((epoch, detail))
             if m::current("skill-capsule-detail", epoch) && m::data("skill-capsule-open") == id =>
         {
-            dom::error("skill-capsules-error", "");
+            if should_clear_error_on_reload(preserve_error) {
+                dom::error("skill-capsules-error", "");
+            }
             m::set("skill-capsule-detail", detail);
             render_list();
             render_detail();
@@ -689,38 +1075,86 @@ async fn act(action: &str, id: &str) {
         dom::enc(&project),
         dom::enc(id)
     );
+    let compiler_saved = m::data("skill-capsule-compiler");
+    let dom_provider = dom::value("skill-capsule-compiler-provider");
+    let dom_model = dom::value("skill-capsule-compiler-model");
+    let provider_override = if dom_provider.trim().is_empty() {
+        compiler_saved["provider"].as_str().unwrap_or("")
+    } else {
+        dom_provider.as_str()
+    };
+    let model_override = if dom_model.trim().is_empty() {
+        compiler_saved["model"].as_str().unwrap_or("").to_owned()
+    } else {
+        dom_model
+    };
     m::set("skill-capsule-pending", json!(true));
     m::take("skill-capsule-armed");
     render_detail();
     let result = match action {
         "delete" => api::delete(&base).await,
         "recompile" => {
-            let detail = m::data("skill-capsule-detail");
-            let session_id = detail["source_session_id"].as_str().unwrap_or("");
-            let generation = detail["source_generation"].as_str().unwrap_or("");
-            api::post(
-                &format!("/api/sessions/{}/skillcache/compile", dom::enc(session_id)),
-                json!({"generation": generation}),
-            )
-            .await
+            let (selected, boot) = m::read(|s| (s.selected.clone(), s.boot.clone()));
+            let body = build_recompile_request_body(
+                provider_override,
+                &model_override,
+                &selected,
+                &crate::skillcache::session_state(),
+                &boot,
+            );
+            api::post(&format!("{base}/recompile"), body).await
         }
         _ => api::post(&format!("{base}/{action}"), json!({})).await,
     };
     m::take("skill-capsule-pending");
-    match result {
+    let preserved_err = match result {
         Ok(_) => {
             dom::error("skill-capsules-error", "");
+            m::take("skill-capsule-needs-trace");
             if action == "delete" {
                 m::take("skill-capsule-open");
                 m::take("skill-capsule-detail");
             }
+            None
         }
-        Err(error) => dom::error("skill-capsules-error", &error.message),
+        Err(error) => {
+            if action == "recompile" && is_needs_trace_error(error.status, &error.message) {
+                m::set(
+                    "skill-capsule-needs-trace",
+                    json!({"capsule_id": id, "message": error.message}),
+                );
+            }
+            dom::error("skill-capsules-error", &error.message);
+            Some(error.message)
+        }
+    };
+    load_capsules_preserving_error(preserved_err.is_some()).await;
+    if let Some(msg) = preserved_err {
+        dom::error("skill-capsules-error", &msg);
     }
-    load_capsules().await;
 }
 
 pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: &V) -> bool {
+    if matches!(kind, "input" | "change") && id == "skill-capsules-search" {
+        render_list();
+        return true;
+    }
+    if matches!(kind, "input" | "change")
+        && [
+            "skill-capsule-compiler-provider",
+            "skill-capsule-compiler-model",
+        ]
+        .contains(&id)
+    {
+        let mut compiler = m::data("skill-capsule-compiler");
+        if !compiler.is_object() {
+            compiler = json!({});
+        }
+        compiler["provider"] = json!(dom::value("skill-capsule-compiler-provider"));
+        compiler["model"] = json!(dom::value("skill-capsule-compiler-model"));
+        m::set("skill-capsule-compiler", compiler);
+        return true;
+    }
     if kind == "change" && ["skill-capsules-status", "skill-capsules-form"].contains(&id) {
         load_capsules().await;
         return true;
@@ -737,9 +1171,38 @@ pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: 
         "skill-capsule-open" => {
             m::set("skill-capsule-open", json!(capsule));
             m::take("skill-capsule-armed");
+            m::take("skill-capsule-needs-trace");
             render_list();
             load_capsule(capsule).await;
             dom::focus("skill-capsule-detail");
+        }
+        "skill-capsule-open-session" => {
+            let sid = m::text(payload, "session_id");
+            let proj = m::text(payload, "project_id");
+            if !sid.is_empty() {
+                if !proj.is_empty() && proj != m::current_project() {
+                    dom::set_value("project-switcher", &proj);
+                }
+                crate::session::select(&sid).await;
+                crate::session::open_view("sessions", true).await;
+            }
+        }
+        "skill-capsule-capture-trace" => {
+            let proj = m::text(payload, "project_id");
+            let skill = m::text(payload, "skill_name");
+            m::take("skill-capsule-needs-trace");
+            crate::session::open_view("sessions", true).await;
+            if !proj.is_empty() {
+                crate::session::new_session(Some(&proj));
+            } else {
+                crate::session::new_session(None);
+            }
+            dom::set_value("skillcache-mode", "observe");
+            crate::skillcache::controls();
+            if !skill.trim().is_empty() && dom::value("prompt").trim().is_empty() {
+                dom::set_value("prompt", &format!("${} ", skill.trim()));
+            }
+            dom::focus("prompt");
         }
         "skill-capsule-arm" => {
             m::set("skill-capsule-armed", json!(capsule));
@@ -973,5 +1436,107 @@ mod tests {
         assert!(!html.contains("Programs (P)"));
         assert_eq!(money(&V::Null), "—");
         assert_eq!(money(&json!(0.0)), "$0.0000");
+    }
+
+    #[test]
+    fn template_admitted_and_needs_trace_capsules_render_controls_and_deep_links() {
+        // Template-admitted capsule (empty source_session_id / source_generation) still gets Recompile.
+        let mut tmpl = detail();
+        tmpl["status"] = "needs_recompile".into();
+        tmpl["source_session_id"] = "".into();
+        tmpl["source_generation"] = "".into();
+        tmpl["needs_trace"] = json!(true);
+        let html = render_capsule_detail_html_with_options(
+            &tmpl,
+            false,
+            false,
+            "codex",
+            "gpt-5-codex",
+            "",
+        );
+        assert_no_inline_hex_colors(&html);
+        assert_eq!(payloads(&html, "skill-capsule-recompile"), [json!("c1")]);
+        assert!(html.contains("id=\"skill-capsule-compiler-provider\""));
+        assert!(!html.contains("value=\"cursor\""));
+        assert!(!html.contains("value=\"gemini\""));
+        assert!(html.contains("value=\"claude\""));
+        assert!(html.contains("value=\"codex\""));
+        assert!(html.contains("id=\"skill-capsule-compiler-model\""));
+        assert!(should_clear_error_on_reload(false));
+        assert!(!should_clear_error_on_reload(true));
+        assert!(html.contains("value=\"gpt-5-codex\""));
+        assert!(html.contains("skill-capsule-capture-trace"));
+        assert_eq!(payloads(&html, "skill-capsule-capture-trace").len(), 1);
+        // Compiler selector and trace CTA stay outside `.skill-capsule-actions`.
+        let actions_start = html.find("<div class=\"skill-capsule-actions\">").unwrap();
+        let actions_end = html[actions_start..].find("</div>").unwrap() + actions_start;
+        let actions_slice = &html[actions_start..actions_end];
+        assert!(!actions_slice.contains("skill-capsule-capture-trace"));
+        assert!(!actions_slice.contains("skill-capsule-compiler-provider"));
+
+        assert_eq!(
+            build_recompile_request_body("codex", "gpt-5", &V::Null, &V::Null, &V::Null),
+            json!({"compiler": {"provider": "codex", "model": "gpt-5"}})
+        );
+        assert_eq!(
+            build_recompile_request_body("", "", &V::Null, &V::Null, &V::Null),
+            json!({})
+        );
+        assert!(is_needs_trace_error(409, "conflict"));
+        assert!(is_needs_trace_error(400, "needs a fresh observed trace"));
+        assert!(!is_needs_trace_error(500, "compiler failed"));
+
+        // Text search filters by title, skill_name, path, description, or status.
+        assert!(capsule_matches_query(&detail(), ""));
+        assert!(capsule_matches_query(&detail(), "pdf-rows"));
+        assert!(capsule_matches_query(&detail(), "pdf active"));
+        assert!(!capsule_matches_query(&detail(), "nonexistent-skill"));
+
+        // Gates show timestamp, violation `at`/`program`, stderr/details, and all >12 violations.
+        let mut rich = detail();
+        rich["runs"]["recent"] = json!((0..10)
+            .map(|idx| json!({
+                "created_at": format!("2026-11-20T10:0{idx}:00Z"),
+                "outcome": "complete",
+                "deopts": 0,
+                "provider": "codex",
+                "model": "gpt-5",
+                "session_id": format!("sess-run-{idx}")
+            }))
+            .collect::<Vec<_>>());
+        let mut lots = Vec::new();
+        for idx in 0..14 {
+            lots.push(json!({
+                "code": format!("v_{idx}"),
+                "at": format!("programs[0].line_{idx}"),
+                "program": "extract",
+                "message": format!("Violation {idx}"),
+                "stderr": if idx == 0 { "Traceback: module not found" } else { "" }
+            }));
+        }
+        rich["gates"] = json!([{
+            "round": 2,
+            "gate": "gate2",
+            "at": "2026-11-20T10:05:00Z",
+            "passed": false,
+            "report": {
+                "programs": [{"id": "extract", "passed": false, "exit_code": 1, "seconds": 0.42, "sandbox_denied": true}],
+                "result_comparison": {"status": "mismatch", "details": "Expected 3 rows, got 2"},
+                "violations": lots
+            }
+        }]);
+        let rich_html = render_capsule_detail_html(&rich, false, false);
+        assert!(rich_html.contains("2026-11-20T10:05:00Z"));
+        assert!(rich_html.contains("at <code>programs[0].line_13</code>"));
+        assert!(rich_html.contains("program <code>extract</code>"));
+        assert!(rich_html.contains("Traceback: module not found"));
+        assert!(rich_html.contains("Expected 3 rows, got 2"));
+        assert!(rich_html.contains("sandbox denied"));
+        assert!(rich_html.contains("v_13"));
+        assert!(!rich_html.contains("12 shown"));
+        assert!(rich_html.contains("Show 2 earlier warm turns"));
+        assert!(rich_html.contains("href=\"#/sessions?project=p1&amp;session=sess-run-0\""));
+        assert!(rich_html.contains("href=\"#/sessions?project=p1&amp;session=s1\""));
+        assert_eq!(payloads(&rich_html, "skill-capsule-open-session").len(), 11);
     }
 }
