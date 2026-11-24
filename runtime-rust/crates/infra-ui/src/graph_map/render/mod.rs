@@ -113,8 +113,8 @@ pub(super) fn lookup_path_index(items: &[V], map: &HashMap<&str, usize>, key: &V
 /// Scale thresholds beyond which non-essential marks and offscreen details are simplified.
 pub const LARGE_GRAPH_NODE_THRESHOLD: usize = 24;
 pub const LARGE_GRAPH_EDGE_THRESHOLD: usize = 60;
-pub const DENSE_GRAPH_NODE_THRESHOLD: usize = 48;
-pub const DENSE_GRAPH_EDGE_THRESHOLD: usize = 120;
+pub const DENSE_GRAPH_NODE_THRESHOLD: usize = 32;
+pub const DENSE_GRAPH_EDGE_THRESHOLD: usize = 80;
 
 /// Scale classification for detail/culling optimizations on large dependency graphs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

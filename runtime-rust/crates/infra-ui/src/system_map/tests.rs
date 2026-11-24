@@ -1047,7 +1047,7 @@ fn system_digest_pin_deltas_and_dense_scene_sync_behave_consistently() {
             svc5_idx
         )
         .is_some_and(|h| h.contains("data-n=\"svc-5\"")));
-    // Shares lowered dense threshold (48 nodes).
+    // Shares lowered dense threshold (32 nodes).
     let thresh_nodes: Vec<V> = (0..crate::graph_map::DENSE_GRAPH_NODE_THRESHOLD)
         .map(|i| json!({"id": format!("s-{i}"), "name": format!("s-{i}"), "kind": "service"}))
         .collect();

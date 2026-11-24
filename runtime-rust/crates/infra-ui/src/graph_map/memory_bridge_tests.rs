@@ -431,8 +431,8 @@ fn side_only_click_actions_skip_canvas_rerender_and_selection_patch_preserves_st
 fn large_and_dense_scale_thresholds_elide_details_and_cull_viewport() {
     assert_eq!(LARGE_GRAPH_NODE_THRESHOLD, 24);
     assert_eq!(LARGE_GRAPH_EDGE_THRESHOLD, 60);
-    assert_eq!(DENSE_GRAPH_NODE_THRESHOLD, 48);
-    assert_eq!(DENSE_GRAPH_EDGE_THRESHOLD, 120);
+    assert_eq!(DENSE_GRAPH_NODE_THRESHOLD, 32);
+    assert_eq!(DENSE_GRAPH_EDGE_THRESHOLD, 80);
     assert_eq!(graph_scale_tier(10, 20), GraphScaleTier::Normal);
     assert_eq!(
         graph_scale_tier(LARGE_GRAPH_NODE_THRESHOLD, 10),
@@ -472,9 +472,9 @@ fn large_and_dense_scale_thresholds_elide_details_and_cull_viewport() {
     assert!(rendered.html.contains("data-scale-tier=\"large\""));
     assert!(!rendered.html.contains("graph-map-edge-chevron"));
 
-    // >= 48 nodes enters Dense mode with Canvas2D scene and lazy DOM html slots.
+    // >= 32 nodes (including default 40-node paginated File/Symbol views) enters Dense mode with Canvas2D scene and lazy DOM html slots.
     let mut dense_nodes = Vec::new();
-    for i in 0..50usize {
+    for i in 0..40usize {
         dense_nodes.push(json!({
             "path": format!("src/Dense{i}.php"),
             "name": format!("Dense{i}.php"),
