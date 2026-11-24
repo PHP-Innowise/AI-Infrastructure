@@ -2473,7 +2473,6 @@ mod tests {
         std::fs::create_dir_all(ws.join("programs")).unwrap();
         let prog_bytes = b"print('safe')\n";
         let ws_prog = ws.join("programs/check.py");
-        std::fs::write(&ws_prog, prog_bytes).unwrap();
 
         let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
         let project_id = store.register(&ws).unwrap()["id"]
@@ -2489,6 +2488,10 @@ mod tests {
             true,
             &["gate1", "gate2", "gate3"],
         );
+
+        // Write `ws_prog` right before the RACY_NS checks so prior SQLite/store setup
+        // cannot push file mtime past the 2-second RACY_NS window on slow CI runners.
+        std::fs::write(&ws_prog, prog_bytes).unwrap();
 
         // 1. Fresh file within <2s RACY_NS forces disk SHA-256 reads each call.
         assert_eq!(

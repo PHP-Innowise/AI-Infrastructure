@@ -633,7 +633,7 @@ fn normalize_workspace_segment(
             token
         } else if let Some((flag, rhs)) = token.split_once('=')
             && !flag.is_empty()
-            && rhs.starts_with('/')
+            && (rhs.starts_with('/') || Path::new(rhs).is_absolute())
             && let Some(rel) = strip_workspace_prefix(workspace, ws_canon, rhs)
         {
             format!("{flag}={rel}")

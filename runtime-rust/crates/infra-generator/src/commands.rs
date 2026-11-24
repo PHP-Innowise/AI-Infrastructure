@@ -320,7 +320,9 @@ pub fn tokenize(value: &str) -> Result<Vec<String>> {
                     quote = Some(character);
                     active = true;
                 }
-                '\\' => {
+                // On Windows, unquoted `\` is a path separator (e.g. `C:\repo\src\App.php`),
+                // not a POSIX escape prefix.
+                '\\' if !cfg!(windows) => {
                     token.push(
                         characters
                             .next()
